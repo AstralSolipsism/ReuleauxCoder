@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reuleauxcoder"
+version = "0.1.0"
+description = "Reinventing the wheel, but only for those who prefer it non-circular."
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.10"
+authors = [
+    { name = "RC-CHN", email = "sorainygreen@gmail.com" },
+]
+keywords = ["ai", "agent", "coding", "cli", "llm", "terminal", "mcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development",
+]
+dependencies = [
+    "openai>=1.0",
+    "rich>=13.0",
+    "prompt_toolkit>=3.0",
+    "pyyaml>=6.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["reuleauxcoder"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+rcoder = "reuleauxcoder.interfaces.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/RC-CHN/ReuleauxCoder"
+Repository = "https://github.com/RC-CHN/ReuleauxCoder"
+Issues = "https://github.com/RC-CHN/ReuleauxCoder/issues"

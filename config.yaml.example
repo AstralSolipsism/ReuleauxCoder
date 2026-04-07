@@ -1,0 +1,45 @@
+app:
+  # Required
+  api_key: "your-api-key-here"
+
+  # Model settings
+  model: "gpt-4o"
+  base_url: "https://api.openai.com/v1"
+  max_tokens: 4096
+  temperature: 0.0
+  max_context_tokens: 128000
+
+session:
+  auto_save: true
+  dir: "/home/pan/.reuleauxcoder/sessions"
+
+cli:
+  history_file: "/home/pan/.reuleauxcoder/history"
+
+mcp:
+  servers:
+    filesystem:
+      command: "npx"
+      args:
+        - "-y"
+        - "@modelcontextprotocol/server-filesystem"
+        - "/home/pan/proj/ReuleauxCoder"
+      env: {}
+      cwd: null
+
+    github:
+      command: "npx"
+      args:
+        - "-y"
+        - "@modelcontextprotocol/server-github"
+      env:
+        GITHUB_TOKEN: "your-github-token-here"
+      cwd: null
+
+    postgres:
+      command: "uvx"
+      args:
+        - "mcp-server-postgres"
+      env:
+        DATABASE_URL: "postgresql://user:pass@localhost/db"
+      cwd: null

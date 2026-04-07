@@ -1,0 +1,83 @@
+"""Session manager - handles session persistence."""
+
+import json
+import time
+from pathlib import Path
+from typing import Optional, List, Tuple
+
+from reuleauxcoder.domain.session.models import Session, SessionMetadata
+from reuleauxcoder.infrastructure.fs.paths import get_sessions_dir
+
+
+def save_session(
+    messages: list[dict],
+    model: str,
+    session_id: Optional[str] = None,
+    sessions_dir: Optional[Path] = None,
+) -> str:
+    """Save conversation to disk. Returns the session ID."""
+    dir_path = sessions_dir or get_sessions_dir()
+    dir_path.mkdir(parents=True, exist_ok=True)
+
+    if not session_id:
+        session_id = f"session_{int(time.time())}"
+
+    data = {
+        "id": session_id,
+        "model": model,
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "messages": messages,
+    }
+
+    path = dir_path / f"{session_id}.json"
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    return session_id
+
+
+def load_session(
+    session_id: str,
+    sessions_dir: Optional[Path] = None,
+) -> Optional[Tuple[list[dict], str]]:
+    """Load a saved session. Returns (messages, model) or None."""
+    dir_path = sessions_dir or get_sessions_dir()
+    path = dir_path / f"{session_id}.json"
+
+    if not path.exists():
+        return None
+
+    data = json.loads(path.read_text())
+    return data["messages"], data["model"]
+
+
+def list_sessions(
+    sessions_dir: Optional[Path] = None,
+    limit: int = 20,
+) -> List[SessionMetadata]:
+    """List available sessions, newest first."""
+    dir_path = sessions_dir or get_sessions_dir()
+
+    if not dir_path.exists():
+        return []
+
+    sessions = []
+    for f in sorted(dir_path.glob("*.json"), reverse=True):
+        try:
+            data = json.loads(f.read_text())
+            # Get first user message as preview
+            preview = ""
+            for m in data.get("messages", []):
+                if m.get("role") == "user" and m.get("content"):
+                    preview = m["content"][:80]
+                    break
+            sessions.append(
+                SessionMetadata(
+                    id=data.get("id", f.stem),
+                    model=data.get("model", "?"),
+                    saved_at=data.get("saved_at", "?"),
+                    preview=preview,
+                )
+            )
+        except (json.JSONDecodeError, KeyError):
+            continue
+
+    return sessions[:limit]

@@ -1,0 +1,79 @@
+"""Agent events - event types for telemetry and hooks."""
+
+import time
+from dataclasses import dataclass, field
+from typing import Optional, Any
+from enum import Enum
+
+
+class AgentEventType(Enum):
+    """Types of agent events."""
+
+    CHAT_START = "chat_start"
+    CHAT_END = "chat_end"
+    TOOL_CALL_START = "tool_call_start"
+    TOOL_CALL_END = "tool_call_end"
+    COMPRESSION_START = "compression_start"
+    COMPRESSION_END = "compression_end"
+    ERROR = "error"
+
+
+@dataclass
+class AgentEvent:
+    """An event emitted by the agent during execution."""
+
+    event_type: AgentEventType
+    timestamp: float = field(default_factory=time.time)
+    data: dict = field(default_factory=dict)
+
+    # Tool call specific fields
+    tool_name: Optional[str] = None
+    tool_args: Optional[dict] = None
+    tool_result: Optional[str] = None
+
+    # Error specific fields
+    error_message: Optional[str] = None
+
+    @classmethod
+    def chat_start(cls, user_input: str) -> "AgentEvent":
+        """Create a chat start event."""
+        return cls(
+            event_type=AgentEventType.CHAT_START,
+            data={"user_input": user_input},
+        )
+
+    @classmethod
+    def chat_end(cls, response: str) -> "AgentEvent":
+        """Create a chat end event."""
+        return cls(
+            event_type=AgentEventType.CHAT_END,
+            data={"response": response},
+        )
+
+    @classmethod
+    def tool_call_start(cls, tool_name: str, tool_args: dict) -> "AgentEvent":
+        """Create a tool call start event."""
+        return cls(
+            event_type=AgentEventType.TOOL_CALL_START,
+            tool_name=tool_name,
+            tool_args=tool_args,
+        )
+
+    @classmethod
+    def tool_call_end(cls, tool_name: str, result: str) -> "AgentEvent":
+        """Create a tool call end event."""
+        return cls(
+            event_type=AgentEventType.TOOL_CALL_END,
+            tool_name=tool_name,
+            tool_result=result[:500]
+            if len(result) > 500
+            else result,  # Truncate for events
+        )
+
+    @classmethod
+    def error(cls, message: str) -> "AgentEvent":
+        """Create an error event."""
+        return cls(
+            event_type=AgentEventType.ERROR,
+            error_message=message,
+        )
