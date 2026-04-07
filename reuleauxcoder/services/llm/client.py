@@ -2,8 +2,9 @@
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Optional, Callable, List
+from typing import Optional, List
 
 from openai import OpenAI, APIError, RateLimitError, APITimeoutError, APIConnectionError
 
@@ -58,6 +59,7 @@ class LLM:
 
         # Accumulate response
         content_parts: list[str] = []
+        tokens: list[str] = []  # Collect streamed tokens
         tc_map: dict[int, dict] = {}  # index -> {id, name, arguments_str}
         prompt_tok = 0
         completion_tok = 0
@@ -75,7 +77,8 @@ class LLM:
             # Accumulate text
             if delta.content:
                 content_parts.append(delta.content)
-                if on_token:
+                tokens.append(delta.content)
+                if on_token is not None:
                     on_token(delta.content)
 
             # Accumulate tool calls across chunks
@@ -111,6 +114,7 @@ class LLM:
             tool_calls=parsed,
             prompt_tokens=prompt_tok,
             completion_tokens=completion_tok,
+            tokens=tokens,
         )
 
     def _call_with_retry(self, params: dict, max_retries: int = 3):

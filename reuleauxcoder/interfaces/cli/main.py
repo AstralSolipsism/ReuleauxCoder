@@ -5,7 +5,7 @@ from reuleauxcoder.domain.agent.agent import Agent
 from reuleauxcoder.extensions.mcp.manager import MCPManager
 from reuleauxcoder.extensions.tools.registry import ALL_TOOLS
 from reuleauxcoder.interfaces.cli.args import parse_args
-from reuleauxcoder.interfaces.cli.render import brief, console, render_markdown
+from reuleauxcoder.interfaces.cli.render import console, CLIRenderer
 from reuleauxcoder.interfaces.cli.repl import run_repl
 from reuleauxcoder.services.config.loader import ConfigLoader
 from reuleauxcoder.services.llm.client import LLM
@@ -38,14 +38,11 @@ def _cleanup_mcp(manager: MCPManager):
 
 
 def _run_once(agent: Agent, prompt: str):
-    def on_token(tok):
-        print(tok, end="", flush=True)
+    renderer = CLIRenderer()
+    agent.add_event_handler(renderer.on_event)
 
-    def on_tool(name, kwargs):
-        console.print(f"\n[dim]> {name}({brief(kwargs)})[/dim]")
-
-    agent.chat(prompt, on_token=on_token, on_tool=on_tool)
-    print()
+    response = agent.chat(prompt)
+    renderer.finalize_response(response)
 
 
 def main():

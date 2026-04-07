@@ -1,7 +1,7 @@
 """Core agent - the main agent class."""
 
 from __future__ import annotations
-from typing import TYPE_CHECKING, Optional, List, Callable
+from typing import TYPE_CHECKING, Optional, List
 from dataclasses import dataclass, field
 
 if TYPE_CHECKING:
@@ -77,12 +77,7 @@ class Agent:
                 return t
         return None
 
-    def chat(
-        self,
-        user_input: str,
-        on_token: Optional[Callable[[str], None]] = None,
-        on_tool: Optional[Callable[[str, dict], None]] = None,
-    ) -> str:
+    def chat(self, user_input: str) -> str:
         """Process one user message."""
         self._emit_event(AgentEvent.chat_start(user_input))
 
@@ -90,7 +85,7 @@ class Agent:
         self.state.messages.append({"role": "user", "content": user_input})
 
         # Run the loop
-        result = self._loop.run(on_token=on_token, on_tool=on_tool)
+        result = self._loop.run()
 
         self._emit_event(AgentEvent.chat_end(result))
         return result

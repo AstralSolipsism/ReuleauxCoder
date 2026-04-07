@@ -7,10 +7,9 @@ from reuleauxcoder import __version__
 from reuleauxcoder.infrastructure.fs.paths import ensure_user_dirs, get_history_file
 from reuleauxcoder.interfaces.cli.commands import handle_command
 from reuleauxcoder.interfaces.cli.render import (
-    brief,
     console,
-    render_markdown,
     show_banner,
+    CLIRenderer,
 )
 from reuleauxcoder.services.sessions.manager import save_session
 
@@ -22,6 +21,10 @@ def run_repl(agent, config) -> None:
     hist_path = str(get_history_file())
     history = FileHistory(hist_path)
     current_session_id = None
+
+    # Create event-driven renderer and subscribe to agent events
+    renderer = CLIRenderer()
+    agent.add_event_handler(renderer.on_event)
 
     while True:
         try:
@@ -43,21 +46,9 @@ def run_repl(agent, config) -> None:
         if result["action"] == "continue":
             continue
 
-        streamed: list[str] = []
-
-        def on_token(tok):
-            streamed.append(tok)
-            print(tok, end="", flush=True)
-
-        def on_tool(name, kwargs):
-            console.print(f"\n[dim]> {name}({brief(kwargs)})[/dim]")
-
         try:
-            response = agent.chat(user_input, on_token=on_token, on_tool=on_tool)
-            if streamed:
-                print()
-            else:
-                render_markdown(response)
+            response = agent.chat(user_input)
+            renderer.finalize_response(response)
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
         except Exception as e:

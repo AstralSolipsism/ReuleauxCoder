@@ -1,10 +1,91 @@
-"""CLI rendering helpers."""
+"""CLI rendering - event-driven UI renderer."""
 
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.syntax import Syntax
+
+from reuleauxcoder.domain.agent.events import AgentEvent, AgentEventType
 
 console = Console()
+
+
+class CLIRenderer:
+    """Event-driven CLI renderer - subscribes to agent events."""
+
+    def __init__(self):
+        self.console = console
+        self._streamed_tokens: list[str] = []
+
+    def on_event(self, event: AgentEvent) -> None:
+        """Handle an agent event."""
+        if event.event_type == AgentEventType.STREAM_TOKEN:
+            self._render_token(event.data["token"])
+        elif event.event_type == AgentEventType.TOOL_CALL_START:
+            self._render_tool_start(event.tool_name, event.tool_args)
+        elif event.event_type == AgentEventType.TOOL_CALL_END:
+            self._render_tool_end(event.tool_name, event.tool_result)
+        elif event.event_type == AgentEventType.ERROR:
+            self._render_error(event.error_message)
+
+    def _render_token(self, token: str) -> None:
+        """Render a streaming token."""
+        self._streamed_tokens.append(token)
+        print(token, end="", flush=True)
+
+    def _render_tool_start(self, name: str, args: dict | None) -> None:
+        """Render tool call start."""
+        # If we were streaming, add a newline before tool info
+        if self._streamed_tokens:
+            print()
+            self._streamed_tokens.clear()
+        args_str = brief(args) if args else ""
+        self.console.print(f"[dim]> {name}({args_str})[/dim]")
+
+    def _render_tool_end(self, name: str, result: str | None) -> None:
+        """Render tool call result."""
+        if not result:
+            return
+        # Special rendering for edit_file with diff
+        if name == "edit_file" and "---" in result:
+            self._render_diff(result)
+        else:
+            # Truncate long results
+            display = result[:500] + "..." if len(result) > 500 else result
+            self.console.print(f"[dim]{display}[/dim]")
+
+    def _render_diff(self, result: str) -> None:
+        """Render a diff with syntax highlighting."""
+        try:
+            syntax = Syntax(result, "diff", theme="monokai", line_numbers=False)
+            self.console.print(Panel(syntax, border_style="green", padding=(0, 1)))
+        except Exception:
+            self.console.print(f"[dim]{result[:500]}[/dim]")
+
+    def _render_error(self, message: str | None) -> None:
+        """Render an error message."""
+        if message:
+            self.console.print(f"[red]{message}[/red]")
+
+    def finalize_response(self, response: str) -> None:
+        """Finalize response rendering (for non-streamed or final output)."""
+        if self._streamed_tokens:
+            print()  # End the streamed line
+            self._streamed_tokens.clear()
+        elif response:
+            self.render_markdown(response)
+
+    def render_markdown(self, text: str) -> None:
+        """Render markdown text."""
+        self.console.print(Markdown(text))
+
+
+def brief(kwargs: dict, maxlen: int = 80) -> str:
+    """Brief representation of kwargs for display."""
+    if not kwargs:
+        return ""
+    s = ", ".join(f"{k}={repr(v)[:40]}" for k, v in kwargs.items())
+    return s[:maxlen] + ("..." if len(s) > maxlen else "")
 
 
 def show_banner(model: str, base_url: str | None, version: str) -> None:
@@ -37,10 +118,6 @@ def show_help() -> None:
     )
 
 
-def render_markdown(text: str) -> None:
-    console.print(Markdown(text))
-
-
 def show_error(text: str) -> None:
     console.print(f"[red]{text}[/red]")
 
@@ -51,8 +128,3 @@ def show_warning(text: str) -> None:
 
 def show_info(text: str) -> None:
     console.print(text)
-
-
-def brief(kwargs: dict, maxlen: int = 80) -> str:
-    s = ", ".join(f"{k}={repr(v)[:40]}" for k, v in kwargs.items())
-    return s[:maxlen] + ("..." if len(s) > maxlen else "")

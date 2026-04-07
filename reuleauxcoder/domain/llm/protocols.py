@@ -1,6 +1,7 @@
 """LLM domain protocols - abstract interfaces for LLM providers."""
 
-from typing import Protocol, Optional, Callable, Any
+from collections.abc import Callable
+from typing import Protocol, Optional, Any
 from reuleauxcoder.domain.llm.models import LLMResponse
 
 
@@ -22,7 +23,7 @@ class LLMProtocol(Protocol):
         Args:
             messages: List of message dictionaries
             tools: Optional list of tool schemas
-            on_token: Optional callback for streaming tokens
+            on_token: Optional callback invoked for each streamed text chunk
 
         Returns:
             LLMResponse with content, tool calls, and token counts

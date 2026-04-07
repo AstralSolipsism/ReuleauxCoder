@@ -11,6 +11,7 @@ class AgentEventType(Enum):
 
     CHAT_START = "chat_start"
     CHAT_END = "chat_end"
+    STREAM_TOKEN = "stream_token"
     TOOL_CALL_START = "tool_call_start"
     TOOL_CALL_END = "tool_call_end"
     COMPRESSION_START = "compression_start"
@@ -68,6 +69,14 @@ class AgentEvent:
             tool_result=result[:500]
             if len(result) > 500
             else result,  # Truncate for events
+        )
+
+    @classmethod
+    def stream_token(cls, token: str) -> "AgentEvent":
+        """Create a stream token event."""
+        return cls(
+            event_type=AgentEventType.STREAM_TOKEN,
+            data={"token": token},
         )
 
     @classmethod
