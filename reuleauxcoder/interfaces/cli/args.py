@@ -22,4 +22,53 @@ def parse_args():
     parser.add_argument(
         "-v", "--version", action="version", version=f"%(prog)s {__version__}"
     )
+    subparsers = parser.add_subparsers(dest="command")
+    mcp_parser = subparsers.add_parser("mcp", help="Manage MCP configuration")
+    mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command")
+
+    install_node = mcp_subparsers.add_parser(
+        "install-node", help="Install a Node/npx MCP server"
+    )
+    install_node.add_argument("server_name")
+    install_node.add_argument("--package", required=True, dest="package")
+    install_node.add_argument("--bin", required=True, dest="bin")
+    install_node.add_argument(
+        "--placement",
+        choices=["server", "peer", "both"],
+        default="server",
+    )
+    install_node.add_argument("--platform", nargs="*")
+    install_node.add_argument("--arg", action="append", dest="node_arg", default=[])
+    install_node.add_argument("--env", action="append", default=[])
+
+    artifact_parser = mcp_subparsers.add_parser(
+        "artifact", help="Manage server-hosted MCP artifacts"
+    )
+    artifact_subparsers = artifact_parser.add_subparsers(dest="artifact_command")
+
+    build_node = artifact_subparsers.add_parser(
+        "build-node", help="Build a lightweight Node/npx MCP artifact"
+    )
+    build_node.add_argument("server_name")
+    build_node.add_argument("--package", required=True, dest="package")
+    build_node.add_argument("--bin", required=True, dest="bin")
+    build_node.add_argument("--platform", required=True, nargs="+")
+
+    import_artifact = artifact_subparsers.add_parser(
+        "import", help="Import an existing peer MCP artifact archive"
+    )
+    import_artifact.add_argument("server_name")
+    import_artifact.add_argument("version")
+    import_artifact.add_argument("platform")
+    import_artifact.add_argument("archive")
+
+    list_artifacts = artifact_subparsers.add_parser(
+        "list", help="List configured MCP artifacts"
+    )
+    list_artifacts.add_argument("server_name", nargs="?")
+
+    verify_artifacts = artifact_subparsers.add_parser(
+        "verify", help="Verify configured MCP artifact checksums"
+    )
+    verify_artifacts.add_argument("server_name", nargs="?")
     return parser.parse_args()
