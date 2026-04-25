@@ -23,6 +23,22 @@ def parse_args():
         "-v", "--version", action="version", version=f"%(prog)s {__version__}"
     )
     subparsers = parser.add_subparsers(dest="command")
+    env_parser = subparsers.add_parser(
+        "env", help="Record lightweight CLI environment manifest entries"
+    )
+    env_subparsers = env_parser.add_subparsers(dest="env_command")
+    env_record = env_subparsers.add_parser(
+        "record", help="Record a server-authoritative CLI environment entry"
+    )
+    env_record.add_argument("tool_name")
+    env_record.add_argument("--command", required=True, dest="tool_command")
+    env_record.add_argument("--check", required=True)
+    env_record.add_argument("--install")
+    env_record.add_argument("--capability", action="append", default=[])
+    env_record.add_argument("--version")
+    env_record.add_argument("--source")
+    env_record.add_argument("--description")
+
     mcp_parser = subparsers.add_parser("mcp", help="Manage MCP configuration")
     mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command")
 

@@ -18,6 +18,7 @@ from reuleauxcoder.interfaces.cli.repl import run_repl
 from reuleauxcoder.interfaces.entrypoint import AppRunner, AppOptions
 from reuleauxcoder.interfaces.events import AgentEventBridge
 from reuleauxcoder.interfaces.ui_registry import UIRegistry
+from reuleauxcoder.extensions.environment.manifest import run_env_record_cli
 from reuleauxcoder.extensions.mcp.artifacts import (
     run_mcp_artifact_cli,
     run_mcp_install_node_cli,
@@ -33,6 +34,10 @@ def _run_once(agent, prompt: str):
 def main():
     """CLI main entry point."""
     args = parse_args()
+    if getattr(args, "command", None) == "env" and getattr(
+        args, "env_command", None
+    ) == "record":
+        sys.exit(run_env_record_cli(args))
     if getattr(args, "command", None) == "mcp" and getattr(
         args, "mcp_command", None
     ) == "artifact":

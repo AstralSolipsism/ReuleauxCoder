@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import patch
 
 from reuleauxcoder.services.config.loader import ConfigLoader
 
@@ -201,6 +202,40 @@ def test_parse_config_reads_peer_mcp_artifacts() -> None:
     assert server.permissions["tools"]["write_file"] == "require_approval"
 
 
+def test_parse_config_reads_environment_cli_tools() -> None:
+    loader = ConfigLoader()
+    config = loader._parse_config(
+        {
+            "models": {
+                "profiles": {"main": {"model": "gpt-main", "api_key": "key"}}
+            },
+            "modes": {"profiles": {"coder": {}}},
+            "environment": {
+                "cli_tools": {
+                    "gitnexus": {
+                        "command": "gitnexus",
+                        "capabilities": ["repo_index"],
+                        "check": "gitnexus --version",
+                        "install": "npm install -g gitnexus",
+                        "version": "latest",
+                        "source": "npm",
+                        "description": "Repository graph CLI",
+                    }
+                }
+            },
+        }
+    )
+
+    tool = config.environment.cli_tools["gitnexus"]
+    assert tool.command == "gitnexus"
+    assert tool.capabilities == ["repo_index"]
+    assert tool.check == "gitnexus --version"
+    assert tool.install == "npm install -g gitnexus"
+    assert tool.version == "latest"
+    assert tool.source == "npm"
+    assert tool.description == "Repository graph CLI"
+
+
 def test_parse_config_falls_back_when_active_profile_missing() -> None:
     loader = ConfigLoader()
     config = loader._parse_config(
@@ -304,3 +339,37 @@ def test_generate_example_config_creates_valid_yaml(tmp_path: Path) -> None:
     assert data["models"]["profiles"]["default"]["api_key"] == "your-api-key-here"
     assert "modes" in data
     assert data["modes"]["active"] == "coder"
+
+
+def test_load_does_not_copy_global_environment_manifest_into_workspace(
+    tmp_path: Path,
+) -> None:
+    global_path = tmp_path / "home" / "config.yaml"
+    workspace_path = tmp_path / "workspace" / ".rcoder" / "config.yaml"
+    global_path.parent.mkdir(parents=True)
+    global_path.write_text(
+        """
+models:
+  profiles:
+    main:
+      model: gpt-main
+      api_key: key
+environment:
+  cli_tools:
+    gitnexus:
+      command: gitnexus
+      check: gitnexus --version
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with patch.object(ConfigLoader, "GLOBAL_CONFIG_PATH", global_path), patch.object(
+        ConfigLoader, "WORKSPACE_CONFIG_PATH", workspace_path
+    ):
+        config = ConfigLoader().load()
+
+    workspace_data = ConfigLoader()._load_yaml(workspace_path)
+    assert "gitnexus" in config.environment.cli_tools
+    assert "environment" not in workspace_data
+    assert workspace_data["meta"]["workspace_bootstrapped"] is True
+    assert "modes" in workspace_data

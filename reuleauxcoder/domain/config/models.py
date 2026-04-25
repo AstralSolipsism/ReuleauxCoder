@@ -317,6 +317,58 @@ class RemoteExecConfig:
 
 
 @dataclass
+class EnvironmentCLIToolConfig:
+    """Declarative CLI tool entry used by lightweight environment sync."""
+
+    name: str
+    command: str = ""
+    capabilities: list[str] = field(default_factory=list)
+    check: str = ""
+    install: str = ""
+    version: Optional[str] = None
+    source: str = ""
+    description: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "command": self.command,
+            "capabilities": list(self.capabilities),
+            "check": self.check,
+            "install": self.install,
+            "source": self.source,
+            "description": self.description,
+        }
+        if self.version is not None:
+            data["version"] = self.version
+        return data
+
+    @classmethod
+    def from_dict(cls, name: str, d: dict[str, Any]) -> "EnvironmentCLIToolConfig":
+        raw_capabilities = d.get("capabilities", [])
+        return cls(
+            name=name,
+            command=str(d.get("command", "")),
+            capabilities=(
+                [str(item) for item in raw_capabilities]
+                if isinstance(raw_capabilities, list)
+                else []
+            ),
+            check=str(d.get("check", "")),
+            install=str(d.get("install", "")),
+            version=str(d["version"]) if d.get("version") is not None else None,
+            source=str(d.get("source", "")),
+            description=str(d.get("description", "")),
+        )
+
+
+@dataclass
+class EnvironmentConfig:
+    """Server-authoritative lightweight CLI environment manifest."""
+
+    cli_tools: dict[str, EnvironmentCLIToolConfig] = field(default_factory=dict)
+
+
+@dataclass
 class Config:
     """Main configuration model for ReuleauxCoder."""
 
@@ -371,6 +423,9 @@ class Config:
 
     # Remote execution settings
     remote_exec: RemoteExecConfig = field(default_factory=RemoteExecConfig)
+
+    # Server-authoritative environment manifest
+    environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
 
     def validate(self) -> list[str]:
         """Validate configuration and return list of errors."""

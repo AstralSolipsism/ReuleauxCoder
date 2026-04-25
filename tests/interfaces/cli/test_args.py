@@ -71,6 +71,40 @@ def test_parse_mcp_artifact_build_node(monkeypatch: pytest.MonkeyPatch) -> None:
     assert args.platform == ["windows-amd64", "linux-amd64"]
 
 
+def test_parse_env_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "rcoder",
+            "env",
+            "record",
+            "gitnexus",
+            "--command",
+            "gitnexus",
+            "--check",
+            "gitnexus --version",
+            "--install",
+            "npm install -g gitnexus",
+            "--capability",
+            "repo_index",
+            "--source",
+            "npm",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.command == "env"
+    assert args.env_command == "record"
+    assert args.tool_name == "gitnexus"
+    assert args.tool_command == "gitnexus"
+    assert args.check == "gitnexus --version"
+    assert args.install == "npm install -g gitnexus"
+    assert args.capability == ["repo_index"]
+    assert args.source == "npm"
+
+
 def test_parse_mcp_install_node_defaults_to_server(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         sys,

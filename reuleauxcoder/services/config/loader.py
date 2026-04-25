@@ -10,6 +10,8 @@ from reuleauxcoder.domain.config.models import (
     ApprovalRuleConfig,
     Config,
     ContextConfig,
+    EnvironmentCLIToolConfig,
+    EnvironmentConfig,
     MCPServerConfig,
     ModeConfig,
     ModelProfileConfig,
@@ -175,6 +177,9 @@ class ConfigLoader:
         prompt_config = data.get("prompt", {})
         context_config = data.get("context", {})
         remote_exec_config = data.get("remote_exec", {})
+        environment_config = data.get("environment", {})
+        if not isinstance(environment_config, dict):
+            environment_config = {}
 
         # Parse MCP servers
         mcp_servers = []
@@ -246,6 +251,16 @@ class ConfigLoader:
             )
             for rule in approval_config.get("rules", DEFAULTS["approval_rules"])
         ]
+
+        cli_tools: dict[str, EnvironmentCLIToolConfig] = {}
+        cli_tools_data = environment_config.get("cli_tools", {})
+        if isinstance(cli_tools_data, dict):
+            for name, tool_data in cli_tools_data.items():
+                if not isinstance(tool_data, dict):
+                    continue
+                cli_tools[str(name)] = EnvironmentCLIToolConfig.from_dict(
+                    str(name), tool_data
+                )
 
         return Config(
             model=(
@@ -390,6 +405,7 @@ class ConfigLoader:
                 ),
                 shell_timeout_sec=int(remote_exec_config.get("shell_timeout_sec", 120)),
             ),
+            environment=EnvironmentConfig(cli_tools=cli_tools),
             session_auto_save=session_config.get(
                 "auto_save", DEFAULTS["session_auto_save"]
             ),

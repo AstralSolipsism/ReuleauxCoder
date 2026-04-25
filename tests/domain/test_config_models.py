@@ -2,6 +2,7 @@ from reuleauxcoder.domain.config.models import (
     ApprovalConfig,
     ApprovalRuleConfig,
     Config,
+    EnvironmentCLIToolConfig,
     MCPArtifactConfig,
     MCPLaunchConfig,
     MCPServerConfig,
@@ -21,6 +22,23 @@ def test_mcp_server_config_roundtrip() -> None:
         enabled=False,
     )
     restored = MCPServerConfig.from_dict("demo", config.to_dict())
+    assert restored == config
+
+
+def test_environment_cli_tool_config_roundtrip() -> None:
+    config = EnvironmentCLIToolConfig(
+        name="gitnexus",
+        command="gitnexus",
+        capabilities=["repo_index", "git_graph"],
+        check="gitnexus --version",
+        install="npm install -g gitnexus",
+        version="latest",
+        source="npm",
+        description="Repository indexing CLI",
+    )
+
+    restored = EnvironmentCLIToolConfig.from_dict("gitnexus", config.to_dict())
+
     assert restored == config
 
 
