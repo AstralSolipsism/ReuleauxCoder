@@ -8,6 +8,9 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     CleanupRequest,
     CleanupResult,
     DisconnectNotice,
+    EnvironmentCLIToolManifest,
+    EnvironmentManifestRequest,
+    EnvironmentManifestResponse,
     ErrorMessage,
     ExecToolRequest,
     ExecToolResult,
@@ -148,6 +151,44 @@ class TestMCPManifest:
         assert restored.tools[0].name == "search"
         assert restored.tools[0].server_name == "docs"
         assert restored.diagnostics[0]["level"] == "warning"
+
+
+class TestEnvironmentManifest:
+    def test_manifest_roundtrip(self) -> None:
+        response = EnvironmentManifestResponse(
+            cli_tools=[
+                EnvironmentCLIToolManifest(
+                    name="gitnexus",
+                    command="gitnexus",
+                    capabilities=["repo_index"],
+                    check="gitnexus --version",
+                    install="npm install -g gitnexus",
+                    version="latest",
+                    source="npm",
+                )
+            ],
+            prompt="check gitnexus",
+        )
+
+        restored = EnvironmentManifestResponse.from_dict(response.to_dict())
+
+        assert restored.cli_tools[0].name == "gitnexus"
+        assert restored.cli_tools[0].capabilities == ["repo_index"]
+        assert restored.cli_tools[0].check == "gitnexus --version"
+        assert restored.cli_tools[0].install == "npm install -g gitnexus"
+        assert restored.prompt == "check gitnexus"
+
+    def test_manifest_request_roundtrip(self) -> None:
+        req = EnvironmentManifestRequest(
+            peer_token="pt_1", os="windows", arch="amd64", workspace="G:/repo"
+        )
+
+        restored = EnvironmentManifestRequest.from_dict(req.to_dict())
+
+        assert restored.peer_token == "pt_1"
+        assert restored.os == "windows"
+        assert restored.arch == "amd64"
+        assert restored.workspace == "G:/repo"
 
 
 class TestExecToolRequest:

@@ -31,6 +31,9 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     ChatStreamResponse,
     CleanupResult,
     DisconnectNotice,
+    EnvironmentCLIToolManifest,
+    EnvironmentManifestRequest,
+    EnvironmentManifestResponse,
     ExecToolResult,
     Heartbeat,
     MCPArtifactManifest,
@@ -171,6 +174,7 @@ class RemoteRelayHTTPService:
         bootstrap_token_ttl_sec: int = 300,
         mcp_servers: list[Any] | None = None,
         mcp_artifact_root: str | Path = ".rcoder/mcp-artifacts",
+        environment_cli_tools: dict[str, Any] | None = None,
     ) -> None:
         self.relay_server = relay_server
         self.bind = bind
@@ -182,6 +186,7 @@ class RemoteRelayHTTPService:
         self.bootstrap_token_ttl_sec = bootstrap_token_ttl_sec
         self.mcp_servers = list(mcp_servers or [])
         self.mcp_artifact_root = Path(mcp_artifact_root)
+        self.environment_cli_tools = dict(environment_cli_tools or {})
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._queues: dict[str, queue.Queue[RelayEnvelope]] = {}
@@ -334,6 +339,9 @@ class RemoteRelayHTTPService:
                     return
                 if parsed.path == "/remote/mcp/tools":
                     self._handle_mcp_tools()
+                    return
+                if parsed.path == "/remote/environment/manifest":
+                    self._handle_environment_manifest()
                     return
                 if parsed.path == "/remote/disconnect":
                     self._handle_disconnect()
@@ -542,6 +550,28 @@ class RemoteRelayHTTPService:
                         peer_id=peer_id,
                     )
                 self._send_json(HTTPStatus.OK, {"ok": ok, "peer_id": peer_id})
+
+            def _handle_environment_manifest(self) -> None:
+                payload = self._read_json()
+                try:
+                    req = EnvironmentManifestRequest.from_dict(payload)
+                except Exception:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "invalid_environment_manifest_request"},
+                    )
+                    return
+                peer_id = self._verify_peer_token(req.peer_token)
+                if peer_id is None:
+                    self._send_json(
+                        HTTPStatus.UNAUTHORIZED, {"error": "invalid_peer_token"}
+                    )
+                    return
+                service.relay_server.registry.update_heartbeat(peer_id)
+                response = service._build_environment_manifest(
+                    req.os, req.arch, req.workspace
+                )
+                self._send_json(HTTPStatus.OK, response.to_dict())
 
             def _handle_register(self) -> None:
                 payload = self._read_json()
@@ -931,9 +961,82 @@ class RemoteRelayHTTPService:
             )
         return MCPManifestResponse(servers=servers, diagnostics=diagnostics)
 
+    def _build_environment_manifest(
+        self, os_name: str, arch: str, workspace: str
+    ) -> EnvironmentManifestResponse:
+        del os_name, arch
+        tools: list[EnvironmentCLIToolManifest] = []
+        for name, tool in sorted(self.environment_cli_tools.items()):
+            tool_name = str(_env_tool_value(tool, "name", name) or name)
+            command = str(_env_tool_value(tool, "command", "") or "")
+            check = str(_env_tool_value(tool, "check", "") or "")
+            if not tool_name or not command or not check:
+                continue
+            capabilities = _env_tool_value(tool, "capabilities", [])
+            if not isinstance(capabilities, list):
+                capabilities = []
+            version = _env_tool_value(tool, "version", None)
+            tools.append(
+                EnvironmentCLIToolManifest(
+                    name=tool_name,
+                    command=command,
+                    capabilities=[str(item) for item in capabilities],
+                    check=check,
+                    install=str(_env_tool_value(tool, "install", "") or ""),
+                    version=str(version) if version is not None else None,
+                    source=str(_env_tool_value(tool, "source", "") or ""),
+                    description=str(_env_tool_value(tool, "description", "") or ""),
+                )
+            )
+        return EnvironmentManifestResponse(
+            cli_tools=tools,
+            prompt=self._build_environment_sync_prompt(tools, workspace),
+        )
+
+    @staticmethod
+    def _build_environment_sync_prompt(
+        tools: list[EnvironmentCLIToolManifest], workspace: str
+    ) -> str:
+        if not tools:
+            return ""
+        manifest = json.dumps(
+            [tool.to_dict() for tool in tools],
+            ensure_ascii=False,
+            indent=2,
+        )
+        workspace_line = workspace or "(peer working directory)"
+        return (
+            "You are the EZCode lightweight environment sync agent.\n"
+            "The server is the authority for the CLI manifest below. Work only from "
+            "this manifest; do not scan PATH broadly, discover unrelated tools, or "
+            "build a persistent inventory database.\n\n"
+            f"Peer workspace: {workspace_line}\n\n"
+            "CLI manifest:\n"
+            f"```json\n{manifest}\n```\n\n"
+            "Procedure:\n"
+            "1. For each manifest entry, use the shell tool to run exactly its "
+            "`check` command from the peer workspace.\n"
+            "2. Treat successful checks as available. For failures, explain the "
+            "missing or mismatched tool and quote the configured `install` command "
+            "if one is present.\n"
+            "3. Before running any install command, present a concise install plan "
+            "and wait for normal user approval. Do not install Node, Python, uv, npm, "
+            "pipx, or other base runtimes automatically; report them as blockers if "
+            "they are missing.\n"
+            "4. After any approved install command, rerun that tool's `check` command.\n"
+            "5. Finish with a compact status table: tool, capability, check result, "
+            "action taken, remaining blocker.\n"
+        )
+
 
 def _parse_bind(bind: str) -> tuple[str, int]:
     host, sep, port = bind.rpartition(":")
     if not sep or not host:
         raise ValueError(f"Invalid relay bind address: {bind!r}")
     return host, int(port)
+
+
+def _env_tool_value(tool: Any, field_name: str, default: Any = None) -> Any:
+    if isinstance(tool, dict):
+        return tool.get(field_name, default)
+    return getattr(tool, field_name, default)

@@ -24,6 +24,7 @@ _GO_AVAILABLE = shutil.which("go") is not None
 
 from reuleauxcoder.extensions.remote_exec.http_service import RemoteRelayHTTPService
 from reuleauxcoder.domain.config.models import (
+    EnvironmentCLIToolConfig,
     MCPArtifactConfig,
     MCPLaunchConfig,
     MCPServerConfig,
@@ -296,6 +297,74 @@ class TestRemoteRelayHTTPService:
             assert status == 200
             assert report["ok"] is True
             assert relay.get_peer_mcp_tools(peer_id)[0].server_name == "local-filesystem"
+        finally:
+            service.stop()
+            relay.stop()
+
+    def test_environment_manifest_endpoint_returns_cli_prompt(self) -> None:
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            environment_cli_tools={
+                "beads": {
+                    "command": "beads",
+                    "capabilities": ["issue_tracking"],
+                    "check": "beads --version",
+                    "install": "npm install -g beads",
+                    "source": "npm",
+                },
+                "gitnexus": EnvironmentCLIToolConfig(
+                    name="gitnexus",
+                    command="gitnexus",
+                    capabilities=["repo_index"],
+                    check="gitnexus --version",
+                    install="npm install -g gitnexus",
+                    source="npm",
+                )
+            },
+        )
+        service.start()
+        try:
+            _, register_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/register",
+                {
+                    "bootstrap_token": relay.issue_bootstrap_token(ttl_sec=60),
+                    "cwd": "/tmp/peer",
+                },
+            )
+            peer_token = register_body["payload"]["peer_token"]
+
+            try:
+                _json_request(
+                    "POST",
+                    f"{service.base_url}/remote/environment/manifest",
+                    {"peer_token": "bad", "os": "linux", "arch": "amd64"},
+                )
+                raise AssertionError("environment manifest should require valid token")
+            except HTTPError as exc:
+                assert exc.code == 401
+
+            status, manifest = _json_request(
+                "POST",
+                f"{service.base_url}/remote/environment/manifest",
+                {
+                    "peer_token": peer_token,
+                    "os": "linux",
+                    "arch": "amd64",
+                    "workspace": "/tmp/peer",
+                },
+            )
+
+            assert status == 200
+            tools = {tool["name"]: tool for tool in manifest["cli_tools"]}
+            assert tools["gitnexus"]["check"] == "gitnexus --version"
+            assert tools["beads"]["capabilities"] == ["issue_tracking"]
+            assert "do not scan PATH broadly" in manifest["prompt"]
+            assert "npm install -g gitnexus" in manifest["prompt"]
         finally:
             service.stop()
             relay.stop()
