@@ -123,10 +123,14 @@ skills:
   disabled: []
 
 # Optional MCP server examples.
-# Uncomment and adjust paths/tokens for your environment.
+# `placement: server` runs on the machine running rcoder.
+# `placement: peer` is centrally managed by the server, downloaded by remote peers,
+# and run on the peer. `placement: both` does both server and peer.
 # mcp:
+#   artifact_root: ".rcoder/mcp-artifacts"
 #   servers:
 #     filesystem:
+#       placement: server
 #       command: "npx"
 #       args:
 #         - "-y"
@@ -136,7 +140,37 @@ skills:
 #       cwd: null
 #       enabled: true
 #
+#     local-filesystem-peer:
+#       placement: peer
+#       version: "1.0.0"
+#       requirements:
+#         node: "required"
+#         npm: "required"
+#       build:
+#         type: "node"
+#         package: "@modelcontextprotocol/server-filesystem"
+#         package_version: "1.0.0"
+#         bin: "mcp-server-filesystem"
+#       artifacts:
+#         linux-amd64:
+#           path: "local-filesystem-peer/1.0.0/linux-amd64.tar.gz"
+#           sha256: "replace-with-sha256"
+#           launch:
+#             command: "{{bundle}}/run.sh"
+#             args: ["--root", "{{workspace}}"]
+#         windows-amd64:
+#           path: "local-filesystem-peer/1.0.0/windows-amd64.zip"
+#           sha256: "replace-with-sha256"
+#           launch:
+#             command: "{{bundle}}/run.cmd"
+#             args: ["--root", "{{workspace}}"]
+#       permissions:
+#         tools:
+#           write_file: "require_approval"
+#       enabled: true
+#
 #     github:
+#       placement: server
 #       command: "npx"
 #       args:
 #         - "-y"
@@ -146,7 +180,31 @@ skills:
 #       cwd: null
 #       enabled: true
 #
+#     browser-shared:
+#       placement: both
+#       command: "npx"
+#       args:
+#         - "-y"
+#         - "@demo/browser-mcp@1.0.0"
+#       env: {}
+#       version: "1.0.0"
+#       requirements:
+#         node: "required"
+#         npm: "required"
+#       build:
+#         type: "node"
+#         package: "@demo/browser-mcp"
+#         package_version: "1.0.0"
+#         bin: "browser-mcp"
+#       artifacts:
+#         windows-amd64:
+#           path: "browser-shared/1.0.0/windows-amd64.zip"
+#           sha256: "replace-with-sha256"
+#           launch:
+#             command: "{{bundle}}/run.cmd"
+#
 #     postgres:
+#       placement: server
 #       command: "uvx"
 #       args:
 #         - "mcp-server-postgres"

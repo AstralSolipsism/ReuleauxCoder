@@ -82,6 +82,78 @@ The bootstrap access secret is checked over HTTPS before the server issues a sho
 
 > Note: the bootstrap script now includes TTY fallback handling. Even when executed via a pipe (`curl | sh`), it will try to attach interactive mode via `/dev/tty`; if no TTY is available, it automatically falls back to non-interactive mode and keeps the peer online.
 
+### Server-managed MCP
+
+MCP servers can be placed by runtime:
+
+- `placement: server`: started on the machine running `rcoder --server`. Use this for GitHub, Notion, docs search, cloud services, and other MCP servers that do not need local workspace access.
+- `placement: peer`: centrally managed by the server, downloaded by the remote peer from `mcp.artifact_root`, verified with `sha256`, cached under the peer workspace at `.rcoder/mcp-cache/<server>/<version>/<platform>/`, and started on the peer. Use this for filesystem, IDE, browser, localhost, and device MCP servers.
+- `placement: both`: started on the server and also made available to peers through server-hosted artifacts.
+
+Peer MCP does not fall back to public `npx` / `uvx` installs by default. The server must provide the platform artifact. Launch commands support `{{workspace}}`, `{{bundle}}`, `{{cache}}`, and `{{home}}`. Approval policy remains server-managed; when a tool requires confirmation, the approval prompt is streamed back to the active local peer terminal.
+
+```yaml
+mcp:
+  artifact_root: ".rcoder/mcp-artifacts"
+  servers:
+    github:
+      placement: server
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-github"]
+      env:
+        GITHUB_TOKEN: "<token>"
+      enabled: true
+
+    local-filesystem:
+      placement: peer
+      version: "1.0.0"
+      requirements:
+        node: "required"
+        npm: "required"
+      build:
+        type: "node"
+        package: "@modelcontextprotocol/server-filesystem"
+        package_version: "1.0.0"
+        bin: "mcp-server-filesystem"
+      artifacts:
+        linux-amd64:
+          path: "local-filesystem/1.0.0/linux-amd64.tar.gz"
+          sha256: "<sha256>"
+          launch:
+            command: "{{bundle}}/run.sh"
+            args: ["--root", "{{workspace}}"]
+        windows-amd64:
+          path: "local-filesystem/1.0.0/windows-amd64.zip"
+          sha256: "<sha256>"
+          launch:
+            command: "{{bundle}}/run.cmd"
+            args: ["--root", "{{workspace}}"]
+      permissions:
+        tools:
+          write_file: "require_approval"
+      enabled: true
+```
+
+Node/npx peer MCP artifacts can be managed on the server without starting the
+interactive agent:
+
+```bash
+rcoder mcp install-node github --package @modelcontextprotocol/server-github@latest --bin mcp-server-github
+rcoder mcp install-node local-filesystem --package @modelcontextprotocol/server-filesystem@latest --bin mcp-server-filesystem --placement peer --arg=--root --arg "{{workspace}}"
+rcoder mcp install-node browser --package @demo/browser-mcp@latest --bin browser-mcp --placement both
+rcoder mcp artifact build-node local-filesystem --package @modelcontextprotocol/server-filesystem@latest --bin mcp-server-filesystem --platform windows-amd64 linux-amd64
+rcoder mcp artifact import local-filesystem 1.0.0 windows-amd64 ./windows-amd64.zip
+rcoder mcp artifact list
+rcoder mcp artifact verify
+```
+
+`install-node` defaults to `placement=server`. For `peer` or `both`, if no
+platform is provided, it builds `windows-amd64` and `linux-amd64` artifacts.
+The lightweight Node artifact contains `package.json`, `package-lock.json`, an
+offline npm cache, and a platform wrapper. The peer must have Node/npm in `PATH`;
+the wrapper runs `npm ci --offline` from the server-provided cache before
+starting the MCP server.
+
 ## Commands
 
 ```text

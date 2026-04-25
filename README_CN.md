@@ -82,6 +82,73 @@ iex (Invoke-WebRequest -UseBasicParsing -Headers @{ "X-RC-Bootstrap-Secret" = $e
 
 > 注意：脚本已内置 TTY 兜底处理。即使通过 pipe 执行（`curl | sh`），也会优先尝试从 `/dev/tty` 进入 `--interactive`；若无可用 TTY，则自动降级为非交互模式并保持 peer 在线。
 
+### 服务器统一管理 MCP
+
+MCP 可以按运行位置拆分：
+
+- `placement: server`：在运行 `rcoder --server` 的服务器上启动，适合 GitHub、Notion、文档检索、云服务等不依赖本地工作区的 MCP。
+- `placement: peer`：由服务器下发 manifest，peer 从服务器 `mcp.artifact_root` 下载版本化 artifact，校验 `sha256` 后缓存在当前工作区 `.rcoder/mcp-cache/<server>/<version>/<platform>/` 并在本机启动，适合文件系统、IDE、浏览器、localhost、设备等必须访问本地资源的 MCP。
+- `placement: both`：同时在服务器启动，也通过服务器托管 artifact 下发给 peer。
+
+peer MCP 不会默认从公网 `npx` / `uvx` 拉取；服务器必须提供对应平台 artifact。启动命令支持模板变量：`{{workspace}}`、`{{bundle}}`、`{{cache}}`、`{{home}}`。权限仍由服务器配置的 `/approval` 规则统一管理；需要人工确认时，确认提示会通过 remote chat 回到当前本地 peer 终端。
+
+```yaml
+mcp:
+  artifact_root: ".rcoder/mcp-artifacts"
+  servers:
+    github:
+      placement: server
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-github"]
+      env:
+        GITHUB_TOKEN: "<token>"
+      enabled: true
+
+    local-filesystem:
+      placement: peer
+      version: "1.0.0"
+      requirements:
+        node: "required"
+        npm: "required"
+      build:
+        type: "node"
+        package: "@modelcontextprotocol/server-filesystem"
+        package_version: "1.0.0"
+        bin: "mcp-server-filesystem"
+      artifacts:
+        linux-amd64:
+          path: "local-filesystem/1.0.0/linux-amd64.tar.gz"
+          sha256: "<sha256>"
+          launch:
+            command: "{{bundle}}/run.sh"
+            args: ["--root", "{{workspace}}"]
+        windows-amd64:
+          path: "local-filesystem/1.0.0/windows-amd64.zip"
+          sha256: "<sha256>"
+          launch:
+            command: "{{bundle}}/run.cmd"
+            args: ["--root", "{{workspace}}"]
+      permissions:
+        tools:
+          write_file: "require_approval"
+      enabled: true
+```
+
+Node/npx 类 peer MCP 可以在服务器上用独立命令管理，不需要启动交互 agent：
+
+```bash
+rcoder mcp install-node github --package @modelcontextprotocol/server-github@latest --bin mcp-server-github
+rcoder mcp install-node local-filesystem --package @modelcontextprotocol/server-filesystem@latest --bin mcp-server-filesystem --placement peer --arg=--root --arg "{{workspace}}"
+rcoder mcp install-node browser --package @demo/browser-mcp@latest --bin browser-mcp --placement both
+rcoder mcp artifact build-node local-filesystem --package @modelcontextprotocol/server-filesystem@latest --bin mcp-server-filesystem --platform windows-amd64 linux-amd64
+rcoder mcp artifact import local-filesystem 1.0.0 windows-amd64 ./windows-amd64.zip
+rcoder mcp artifact list
+rcoder mcp artifact verify
+```
+
+`install-node` 默认 `placement=server`。当选择 `peer` 或 `both` 且未指定平台时，会默认生成 `windows-amd64` 与 `linux-amd64` artifact。
+轻量 Node artifact 包含 `package.json`、`package-lock.json`、离线 npm cache 和平台 wrapper。peer 需要本机 `PATH` 中已有 Node/npm；wrapper 会先使用服务器提供的 cache 执行 `npm ci --offline`，再启动 MCP server。
+
 ## 命令
 
 ```text
