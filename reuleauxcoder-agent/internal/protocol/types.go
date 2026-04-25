@@ -166,6 +166,29 @@ type MCPToolsReportResponse struct {
 	PeerID string `json:"peer_id,omitempty"`
 }
 
+type EnvironmentManifestRequest struct {
+	PeerToken string `json:"peer_token"`
+	OS        string `json:"os"`
+	Arch      string `json:"arch"`
+	Workspace string `json:"workspace,omitempty"`
+}
+
+type EnvironmentCLIToolManifest struct {
+	Name         string   `json:"name"`
+	Command      string   `json:"command,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	Check        string   `json:"check,omitempty"`
+	Install      string   `json:"install,omitempty"`
+	Version      string   `json:"version,omitempty"`
+	Source       string   `json:"source,omitempty"`
+	Description  string   `json:"description,omitempty"`
+}
+
+type EnvironmentManifestResponse struct {
+	CLITools []EnvironmentCLIToolManifest `json:"cli_tools,omitempty"`
+	Prompt   string                       `json:"prompt,omitempty"`
+}
+
 type ExecToolRequest struct {
 	ToolName   string         `json:"tool_name"`
 	Args       map[string]any `json:"args"`

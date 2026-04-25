@@ -124,6 +124,14 @@ func (c *HTTPClient) ReportMCPTools(ctx context.Context, req protocol.MCPToolsRe
 	return resp, nil
 }
 
+func (c *HTTPClient) EnvironmentManifest(ctx context.Context, req protocol.EnvironmentManifestRequest) (protocol.EnvironmentManifestResponse, error) {
+	var resp protocol.EnvironmentManifestResponse
+	if err := c.postJSON(ctx, "/remote/environment/manifest", req, &resp); err != nil {
+		return protocol.EnvironmentManifestResponse{}, err
+	}
+	return resp, nil
+}
+
 func (c *HTTPClient) postJSON(ctx context.Context, path string, reqBody any, out any) error {
 	buf, err := json.Marshal(reqBody)
 	if err != nil {

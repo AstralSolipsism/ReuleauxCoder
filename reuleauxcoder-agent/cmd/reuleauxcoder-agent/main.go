@@ -18,6 +18,7 @@ func main() {
 		workspaceRoot  string
 		pollInterval   time.Duration
 		interactive    bool
+		envSync        bool
 	)
 
 	flag.StringVar(&host, "host", "", "Remote relay host base URL")
@@ -26,6 +27,7 @@ func main() {
 	flag.StringVar(&workspaceRoot, "workspace-root", "", "Workspace root reported to host")
 	flag.DurationVar(&pollInterval, "poll-interval", 500*time.Millisecond, "Polling interval when no work is available")
 	flag.BoolVar(&interactive, "interactive", false, "Run interactive chat loop proxied through host")
+	flag.BoolVar(&envSync, "env-sync", false, "Run one lightweight CLI environment sync chat and exit")
 	flag.Parse()
 
 	if host == "" {
@@ -44,6 +46,7 @@ func main() {
 		WorkspaceRoot:  workspaceRoot,
 		PollInterval:   pollInterval,
 		Interactive:    interactive,
+		EnvSync:        envSync,
 	})
 	if err := r.Run(context.Background()); err != nil {
 		log.Printf("agent exited with error: %v", err)

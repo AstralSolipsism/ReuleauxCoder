@@ -27,6 +27,7 @@ type Config struct {
 	WorkspaceRoot  string
 	PollInterval   time.Duration
 	Interactive    bool
+	EnvSync        bool
 }
 
 type Runner struct {
@@ -108,6 +109,23 @@ func (r *Runner) Run(ctx context.Context) error {
 	}()
 
 	go r.heartbeatLoop(childCtx, registerResp.PeerToken, heartbeatInterval)
+	if r.cfg.EnvSync {
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- r.runPollLoop(childCtx, registerResp.PeerToken, cwd, pollInterval)
+		}()
+		err := r.runEnvironmentSync(childCtx, registerResp.PeerToken, workspaceRoot)
+		cancel()
+		select {
+		case pollErr := <-errCh:
+			if err == nil && pollErr != nil && childCtx.Err() == nil {
+				return pollErr
+			}
+		default:
+		}
+		return err
+	}
+
 	r.mcp = mcp.NewSupervisor(r.client, registerResp.PeerToken, workspaceRoot)
 	r.mcp.Start(childCtx)
 
@@ -132,6 +150,26 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	return r.runPollLoop(childCtx, registerResp.PeerToken, cwd, pollInterval)
+}
+
+func (r *Runner) runEnvironmentSync(ctx context.Context, peerToken, workspaceRoot string) error {
+	manifestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	resp, err := r.client.EnvironmentManifest(manifestCtx, protocol.EnvironmentManifestRequest{
+		PeerToken: peerToken,
+		OS:        runtimeOS(),
+		Arch:      runtimeArch(),
+		Workspace: workspaceRoot,
+	})
+	cancel()
+	if err != nil {
+		return fmt.Errorf("environment manifest failed: %w", err)
+	}
+	if len(resp.CLITools) == 0 || strings.TrimSpace(resp.Prompt) == "" {
+		fmt.Println("No CLI environment entries are configured on the host.")
+		return nil
+	}
+	fmt.Printf("Starting environment sync agent for %d CLI tool(s).\n", len(resp.CLITools))
+	return r.runRemoteChat(ctx, peerToken, resp.Prompt)
 }
 
 func (r *Runner) runPollLoop(ctx context.Context, peerToken, cwd string, pollInterval time.Duration) error {
