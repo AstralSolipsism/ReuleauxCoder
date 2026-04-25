@@ -175,8 +175,13 @@ class AppRunner:
     ) -> MCPManager | None:
         """Initialize and attach MCP runtime if servers are configured."""
         mcp_manager = None
-        if config.mcp_servers:
-            mcp_manager = self._init_mcp(config.mcp_servers, agent, ui_bus)
+        server_mcp_servers = [
+            server
+            for server in config.mcp_servers
+            if getattr(server, "placement", "server") in {"server", "both"}
+        ]
+        if server_mcp_servers:
+            mcp_manager = self._init_mcp(server_mcp_servers, agent, ui_bus)
         setattr(agent, "mcp_manager", mcp_manager)
         return mcp_manager
 

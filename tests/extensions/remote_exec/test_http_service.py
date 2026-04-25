@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import socket
 import subprocess
@@ -22,6 +23,11 @@ _URLOPEN = request.build_opener(request.ProxyHandler({})).open
 _GO_AVAILABLE = shutil.which("go") is not None
 
 from reuleauxcoder.extensions.remote_exec.http_service import RemoteRelayHTTPService
+from reuleauxcoder.domain.config.models import (
+    MCPArtifactConfig,
+    MCPLaunchConfig,
+    MCPServerConfig,
+)
 from reuleauxcoder.extensions.remote_exec.protocol import (
     ChatResponse,
     CleanupResult,
@@ -65,6 +71,12 @@ def _text_request(url: str, headers: dict[str, str] | None = None) -> tuple[int,
     req = request.Request(url, headers=headers or {}, method="GET")
     with _URLOPEN(req, timeout=5) as resp:
         return resp.status, resp.read().decode("utf-8")
+
+
+def _bytes_request(url: str, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
+    req = request.Request(url, headers=headers or {}, method="GET")
+    with _URLOPEN(req, timeout=5) as resp:
+        return resp.status, resp.read()
 
 
 def _build_go_agent_binary() -> Path:
@@ -131,6 +143,159 @@ class TestRemoteRelayHTTPService:
             ) as resp:
                 assert resp.status == 200
                 assert resp.read() == b"peer-binary"
+        finally:
+            service.stop()
+            relay.stop()
+
+    def test_peer_mcp_manifest_artifact_and_tools_report(self, tmp_path: Path) -> None:
+        artifact_root = tmp_path / "artifacts"
+        artifact_path = artifact_root / "local-filesystem" / "1.0.0" / "linux-amd64.tar.gz"
+        artifact_path.parent.mkdir(parents=True)
+        artifact_content = b"fake-archive"
+        artifact_path.write_bytes(artifact_content)
+        artifact_sha = hashlib.sha256(artifact_content).hexdigest()
+
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            mcp_artifact_root=artifact_root,
+            mcp_servers=[
+                MCPServerConfig(
+                    name="github",
+                    command="github-mcp",
+                    placement="server",
+                ),
+                MCPServerConfig(
+                    name="local-filesystem",
+                    command="",
+                    placement="peer",
+                    version="1.0.0",
+                    launch=MCPLaunchConfig(
+                        command="{{bundle}}/filesystem-mcp",
+                        args=["--root", "{{workspace}}"],
+                    ),
+                    artifacts={
+                        "linux-amd64": MCPArtifactConfig(
+                            path="local-filesystem/1.0.0/linux-amd64.tar.gz",
+                            sha256=artifact_sha,
+                            launch=MCPLaunchConfig(
+                                command="{{bundle}}/run.sh",
+                                args=["--root", "{{workspace}}"],
+                            ),
+                        )
+                    },
+                    requirements={"node": "required", "npm": "required"},
+                    permissions={"tools": {"write_file": "require_approval"}},
+                ),
+                MCPServerConfig(
+                    name="missing-platform",
+                    command="missing",
+                    placement="peer",
+                    version="1.0.0",
+                    launch=MCPLaunchConfig(command="{{bundle}}/missing"),
+                    artifacts={},
+                ),
+                MCPServerConfig(
+                    name="shared-browser",
+                    command="npx",
+                    args=["-y", "@demo/browser@1.0.0"],
+                    placement="both",
+                    version="1.0.0",
+                    launch=MCPLaunchConfig(command="{{bundle}}/browser"),
+                    artifacts={
+                        "linux-amd64": MCPArtifactConfig(
+                            path="shared-browser/1.0.0/linux-amd64.tar.gz",
+                            sha256=artifact_sha,
+                        )
+                    },
+                ),
+            ],
+        )
+        service.start()
+        try:
+            _, register_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/register",
+                {
+                    "bootstrap_token": relay.issue_bootstrap_token(ttl_sec=60),
+                    "cwd": "/tmp/peer",
+                },
+            )
+            peer_id = register_body["payload"]["peer_id"]
+            peer_token = register_body["payload"]["peer_token"]
+
+            try:
+                _json_request(
+                    "POST",
+                    f"{service.base_url}/remote/mcp/manifest",
+                    {"peer_token": "bad", "os": "linux", "arch": "amd64"},
+                )
+                raise AssertionError("manifest should require valid peer token")
+            except HTTPError as exc:
+                assert exc.code == 401
+
+            status, manifest = _json_request(
+                "POST",
+                f"{service.base_url}/remote/mcp/manifest",
+                {
+                    "peer_token": peer_token,
+                    "os": "linux",
+                    "arch": "amd64",
+                    "workspace": "/tmp/peer",
+                },
+            )
+            assert status == 200
+            assert [server["name"] for server in manifest["servers"]] == [
+                "local-filesystem",
+                "shared-browser",
+            ]
+            server_manifest = manifest["servers"][0]
+            assert server_manifest["artifact"]["sha256"] == artifact_sha
+            assert server_manifest["launch"]["command"] == "{{bundle}}/run.sh"
+            assert server_manifest["launch"]["args"] == ["--root", "{{workspace}}"]
+            assert server_manifest["requirements"] == {
+                "node": "required",
+                "npm": "required",
+            }
+            assert server_manifest["permissions"]["tools"]["write_file"] == "require_approval"
+            assert manifest["diagnostics"][0]["server"] == "missing-platform"
+
+            try:
+                _bytes_request(
+                    f"{service.base_url}{server_manifest['artifact']['url']}"
+                )
+                raise AssertionError("artifact should require peer token")
+            except HTTPError as exc:
+                assert exc.code == 401
+
+            status, body = _bytes_request(
+                f"{service.base_url}{server_manifest['artifact']['url']}",
+                headers={"X-RC-Peer-Token": peer_token},
+            )
+            assert status == 200
+            assert body == artifact_content
+
+            status, report = _json_request(
+                "POST",
+                f"{service.base_url}/remote/mcp/tools",
+                {
+                    "peer_token": peer_token,
+                    "tools": [
+                        {
+                            "name": "read_file",
+                            "description": "Read a local file",
+                            "input_schema": {"type": "object"},
+                            "server_name": "local-filesystem",
+                        }
+                    ],
+                },
+            )
+            assert status == 200
+            assert report["ok"] is True
+            assert relay.get_peer_mcp_tools(peer_id)[0].server_name == "local-filesystem"
         finally:
             service.stop()
             relay.stop()

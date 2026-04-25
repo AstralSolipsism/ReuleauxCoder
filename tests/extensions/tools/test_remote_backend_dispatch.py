@@ -12,8 +12,10 @@ from reuleauxcoder.extensions.remote_exec.errors import (
 from reuleauxcoder.extensions.remote_exec.protocol import (
     ExecToolRequest,
     ExecToolResult,
+    RemoteMCPToolInfo,
 )
 from reuleauxcoder.extensions.remote_exec.server import RelayServer
+from reuleauxcoder.extensions.remote_exec.mcp_tools import RemotePeerMCPTool
 from reuleauxcoder.extensions.tools.builtin.edit import EditFileTool
 from reuleauxcoder.extensions.tools.builtin.glob import GlobTool
 from reuleauxcoder.extensions.tools.builtin.grep import GrepTool
@@ -181,6 +183,69 @@ class TestRemoteBackendDispatch:
             t.join(timeout=2)
 
             assert result_holder["result"] == "hello"
+        finally:
+            srv.stop()
+
+    def test_remote_peer_mcp_tool_forwards_to_peer(self) -> None:
+        srv = RelayServer()
+        received: list[tuple[str, object]] = []
+
+        def mock_send(peer_id: str, envelope: object) -> None:
+            received.append((peer_id, envelope))
+
+        srv._send_fn = mock_send
+        srv.start()
+        try:
+            from reuleauxcoder.extensions.remote_exec.protocol import RegisterRequest
+
+            resp = srv._on_register(
+                RegisterRequest(
+                    bootstrap_token=srv.issue_bootstrap_token(ttl_sec=60),
+                    cwd="/tmp",
+                )
+            )
+            backend = RemoteRelayToolBackend(relay_server=srv)
+            backend.context.peer_id = resp.peer_id
+            tool = RemotePeerMCPTool(
+                backend,
+                RemoteMCPToolInfo(
+                    name="search",
+                    description="Search docs",
+                    input_schema={"type": "object"},
+                    server_name="docs",
+                ),
+            )
+
+            import threading
+            import time
+            from reuleauxcoder.extensions.remote_exec.protocol import RelayEnvelope
+
+            holder: dict[str, object] = {}
+
+            def run_tool() -> None:
+                holder["result"] = tool.execute(query="hello")
+
+            t = threading.Thread(target=run_tool)
+            t.start()
+            time.sleep(0.1)
+
+            assert len(received) == 1
+            env = received[0][1]
+            assert env.payload["tool_name"] == "mcp"
+            assert env.payload["args"]["server_name"] == "docs"
+            assert env.payload["args"]["tool_name"] == "search"
+            assert env.payload["args"]["arguments"] == {"query": "hello"}
+            srv.handle_inbound(
+                resp.peer_id,
+                RelayEnvelope(
+                    type="tool_result",
+                    request_id=env.request_id,
+                    peer_id=resp.peer_id,
+                    payload=ExecToolResult(ok=True, result="mcp-ok").to_dict(),
+                ),
+            )
+            t.join(timeout=2)
+            assert holder["result"] == "mcp-ok"
         finally:
             srv.stop()
 

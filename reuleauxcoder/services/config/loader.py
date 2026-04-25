@@ -64,9 +64,10 @@ class ConfigLoader:
             if key in {"mcp", "models", "modes"} and isinstance(value, dict):
                 result_section = result.get(key, {})
 
-                # Merge `*.active` scalar fields with override priority
-                if "active" in value:
-                    result_section["active"] = value.get("active")
+                # Merge scalar fields with override priority.
+                for section_key, section_value in value.items():
+                    if section_key not in {"servers", "profiles"}:
+                        result_section[section_key] = section_value
 
                 # Merge profile maps by name/key, override wins for same key
                 if "servers" in value and isinstance(value.get("servers"), dict):
@@ -165,7 +166,8 @@ class ConfigLoader:
         mcp_servers = []
         servers_data = mcp_config.get("servers", {})
         for name, server_data in servers_data.items():
-            mcp_servers.append(MCPServerConfig.from_dict(name, server_data))
+            if isinstance(server_data, dict):
+                mcp_servers.append(MCPServerConfig.from_dict(name, server_data))
 
         # Parse model profiles
         model_profiles: dict[str, ModelProfileConfig] = {}
@@ -295,6 +297,9 @@ class ConfigLoader:
                 else app_config.get("reasoning_replay_placeholder")
             ),
             mcp_servers=mcp_servers,
+            mcp_artifact_root=str(
+                mcp_config.get("artifact_root", ".rcoder/mcp-artifacts")
+            ),
             model_profiles=model_profiles,
             active_model_profile=active_model_profile,
             active_main_model_profile=active_main_model_profile,

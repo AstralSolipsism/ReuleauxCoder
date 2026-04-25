@@ -12,6 +12,13 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     ExecToolRequest,
     ExecToolResult,
     Heartbeat,
+    MCPArtifactManifest,
+    MCPLaunchManifest,
+    MCPManifestRequest,
+    MCPManifestResponse,
+    MCPServerManifest,
+    PeerMCPToolsReport,
+    RemoteMCPToolInfo,
     RegisterRejected,
     RegisterRequest,
     RegisterResponse,
@@ -79,6 +86,68 @@ class TestHeartbeat:
         restored = Heartbeat.from_dict(d)
         assert restored.peer_token == "pt_tok"
         assert restored.ts == 1234.5
+
+
+class TestMCPManifest:
+    def test_manifest_roundtrip(self) -> None:
+        response = MCPManifestResponse(
+            servers=[
+                MCPServerManifest(
+                    name="filesystem",
+                    version="1.0.0",
+                    artifact=MCPArtifactManifest(
+                        platform="linux-amd64",
+                        path="filesystem/1.0.0/linux-amd64.tar.gz",
+                        sha256="abc",
+                        url="/remote/mcp/artifacts/filesystem/1.0.0/linux-amd64.tar.gz",
+                    ),
+                    launch=MCPLaunchManifest(
+                        command="{{bundle}}/filesystem-mcp",
+                        args=["--root", "{{workspace}}"],
+                        env={"MODE": "local"},
+                    ),
+                    permissions={"tools": {"write_file": "require_approval"}},
+                    requirements={"node": "required", "npm": "required"},
+                )
+            ],
+            diagnostics=[{"server": "missing", "level": "error"}],
+        )
+
+        restored = MCPManifestResponse.from_dict(response.to_dict())
+
+        assert restored.servers[0].name == "filesystem"
+        assert restored.servers[0].artifact.platform == "linux-amd64"
+        assert restored.servers[0].launch.args == ["--root", "{{workspace}}"]
+        assert restored.servers[0].requirements["node"] == "required"
+        assert restored.diagnostics[0]["server"] == "missing"
+
+    def test_manifest_request_roundtrip(self) -> None:
+        req = MCPManifestRequest(
+            peer_token="pt_1", os="linux", arch="amd64", workspace="/repo"
+        )
+        restored = MCPManifestRequest.from_dict(req.to_dict())
+        assert restored.peer_token == "pt_1"
+        assert restored.os == "linux"
+        assert restored.arch == "amd64"
+        assert restored.workspace == "/repo"
+
+    def test_tools_report_roundtrip(self) -> None:
+        report = PeerMCPToolsReport(
+            peer_token="pt_1",
+            tools=[
+                RemoteMCPToolInfo(
+                    name="search",
+                    description="Search docs",
+                    input_schema={"type": "object"},
+                    server_name="docs",
+                )
+            ],
+            diagnostics=[{"level": "warning"}],
+        )
+        restored = PeerMCPToolsReport.from_dict(report.to_dict())
+        assert restored.tools[0].name == "search"
+        assert restored.tools[0].server_name == "docs"
+        assert restored.diagnostics[0]["level"] == "warning"
 
 
 class TestExecToolRequest:

@@ -16,6 +16,7 @@ _URLOPEN = request.build_opener(request.ProxyHandler({})).open
 from reuleauxcoder.domain.config.models import (
     Config,
     ContextConfig,
+    MCPServerConfig,
     ModeConfig,
     RemoteExecConfig,
 )
@@ -311,6 +312,30 @@ class TestRunnerRemoteExec:
         )
         assert ctx.agent.max_context_tokens == config.max_context_tokens
         runner.cleanup(ctx.agent)
+
+    def test_attach_mcp_starts_server_and_both_placements(self, monkeypatch) -> None:
+        config = Config(
+            mcp_servers=[
+                MCPServerConfig(name="server-only", command="a", placement="server"),
+                MCPServerConfig(name="peer-only", command="b", placement="peer"),
+                MCPServerConfig(name="shared", command="c", placement="both"),
+            ]
+        )
+        runner = AppRunner(options=AppOptions())
+        agent = SimpleNamespace()
+        started: list[str] = []
+
+        def fake_init_mcp(servers, _agent, _ui_bus):
+            started.extend(server.name for server in servers)
+            return "manager"
+
+        monkeypatch.setattr(runner, "_init_mcp", fake_init_mcp)
+
+        manager = runner._attach_mcp_if_configured(config, agent, None)
+
+        assert manager == "manager"
+        assert agent.mcp_manager == "manager"
+        assert started == ["server-only", "shared"]
 
     def test_server_mode_smoke_bootstrap_endpoint(self, tmp_path: Path) -> None:
         relay_bind = "127.0.0.1:18765"

@@ -23,6 +23,7 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     ExecToolRequest,
     ExecToolResult,
     Heartbeat,
+    RemoteMCPToolInfo,
     RegisterRejected,
     RegisterRequest,
     RegisterResponse,
@@ -207,8 +208,7 @@ class RelayServer:
 
         elif msg_type == "disconnect":
             if peer_id:
-                self._registry.mark_disconnected(peer_id, "peer_initiated")
-                self._fail_pending_for_peer(peer_id)
+                self.disconnect_peer(peer_id, "peer_initiated")
 
         elif msg_type == "error":
             err = ErrorMessage.from_dict(payload)
@@ -299,6 +299,40 @@ class RelayServer:
             return future.result(timeout=timeout_sec + 2)
         except Exception as e:
             return CleanupResult(ok=False, error_message=str(e))
+
+    def update_peer_mcp_tools(
+        self,
+        peer_id: str,
+        tools: list[RemoteMCPToolInfo],
+        diagnostics: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        """Persist peer-hosted MCP tool metadata for future peer agent creation."""
+        peer = self._registry.get(peer_id)
+        if peer is None:
+            return False
+        peer.meta["mcp_tools"] = [tool.to_dict() for tool in tools if tool.name]
+        peer.meta["mcp_diagnostics"] = list(diagnostics or [])
+        if tools and "mcp" not in peer.capabilities:
+            peer.capabilities.append("mcp")
+        return True
+
+    def get_peer_mcp_tools(self, peer_id: str) -> list[RemoteMCPToolInfo]:
+        peer = self._registry.get(peer_id)
+        if peer is None:
+            return []
+        raw_tools = peer.meta.get("mcp_tools", [])
+        if not isinstance(raw_tools, list):
+            return []
+        return [
+            RemoteMCPToolInfo.from_dict(item)
+            for item in raw_tools
+            if isinstance(item, dict)
+        ]
+
+    def disconnect_peer(self, peer_id: str, reason: str = "peer_initiated") -> None:
+        """Mark a peer disconnected and fail host-side pending requests."""
+        self._registry.mark_disconnected(peer_id, reason)
+        self._fail_pending_for_peer(peer_id)
 
     # ------------------------------------------------------------------
     # Internal: request/response correlation

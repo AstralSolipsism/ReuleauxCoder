@@ -2,6 +2,8 @@ from reuleauxcoder.domain.config.models import (
     ApprovalConfig,
     ApprovalRuleConfig,
     Config,
+    MCPArtifactConfig,
+    MCPLaunchConfig,
     MCPServerConfig,
     ModeConfig,
     ModelProfileConfig,
@@ -20,6 +22,48 @@ def test_mcp_server_config_roundtrip() -> None:
     )
     restored = MCPServerConfig.from_dict("demo", config.to_dict())
     assert restored == config
+
+
+def test_peer_mcp_server_config_roundtrip() -> None:
+    config = MCPServerConfig(
+        name="filesystem",
+        command="",
+        placement="peer",
+        version="1.0.0",
+        launch=MCPLaunchConfig(
+            command="{{bundle}}/filesystem-mcp",
+            args=["--root", "{{workspace}}"],
+            env={"MODE": "local"},
+        ),
+        artifacts={
+            "linux-amd64": MCPArtifactConfig(
+                path="filesystem/1.0.0/linux-amd64.tar.gz",
+                sha256="abc",
+                launch=MCPLaunchConfig(command="{{bundle}}/run.sh"),
+            )
+        },
+        permissions={"tools": {"write_file": "require_approval"}},
+        requirements={"node": "required", "npm": "required"},
+        build={"type": "node", "package": "@demo/filesystem"},
+    )
+
+    restored = MCPServerConfig.from_dict("filesystem", config.to_dict())
+
+    assert restored == config
+
+
+def test_mcp_server_config_accepts_both_placement() -> None:
+    config = MCPServerConfig.from_dict(
+        "browser",
+        {
+            "command": "npx",
+            "args": ["-y", "@demo/browser@1.2.3"],
+            "placement": "both",
+            "version": "1.2.3",
+        },
+    )
+
+    assert config.placement == "both"
 
 
 def test_model_profile_config_from_dict_uses_defaults() -> None:

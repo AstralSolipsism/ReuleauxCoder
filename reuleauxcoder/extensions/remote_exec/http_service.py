@@ -11,8 +11,9 @@ import uuid
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from reuleauxcoder.extensions.remote_exec.bootstrap import (
     generate_bootstrap_script,
@@ -32,6 +33,12 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     DisconnectNotice,
     ExecToolResult,
     Heartbeat,
+    MCPArtifactManifest,
+    MCPLaunchManifest,
+    MCPManifestRequest,
+    MCPManifestResponse,
+    MCPServerManifest,
+    PeerMCPToolsReport,
     RegisterRejected,
     RegisterRequest,
     RelayEnvelope,
@@ -162,6 +169,8 @@ class RemoteRelayHTTPService:
         | None = None,
         bootstrap_access_secret: str = "",
         bootstrap_token_ttl_sec: int = 300,
+        mcp_servers: list[Any] | None = None,
+        mcp_artifact_root: str | Path = ".rcoder/mcp-artifacts",
     ) -> None:
         self.relay_server = relay_server
         self.bind = bind
@@ -171,6 +180,8 @@ class RemoteRelayHTTPService:
         self.stream_chat_handler = stream_chat_handler
         self.bootstrap_access_secret = bootstrap_access_secret
         self.bootstrap_token_ttl_sec = bootstrap_token_ttl_sec
+        self.mcp_servers = list(mcp_servers or [])
+        self.mcp_artifact_root = Path(mcp_artifact_root)
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._queues: dict[str, queue.Queue[RelayEnvelope]] = {}
@@ -299,6 +310,9 @@ class RemoteRelayHTTPService:
                 if parsed.path.startswith("/remote/artifacts/"):
                     self._handle_artifact(parsed.path)
                     return
+                if parsed.path.startswith("/remote/mcp/artifacts/"):
+                    self._handle_mcp_artifact(parsed.path)
+                    return
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
             def do_POST(self) -> None:  # noqa: N802
@@ -314,6 +328,12 @@ class RemoteRelayHTTPService:
                     return
                 if parsed.path == "/remote/result":
                     self._handle_result()
+                    return
+                if parsed.path == "/remote/mcp/manifest":
+                    self._handle_mcp_manifest()
+                    return
+                if parsed.path == "/remote/mcp/tools":
+                    self._handle_mcp_tools()
                     return
                 if parsed.path == "/remote/disconnect":
                     self._handle_disconnect()
@@ -361,6 +381,23 @@ class RemoteRelayHTTPService:
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
+
+            def _send_bytes(
+                self,
+                status: int,
+                content: bytes,
+                content_type: str = "application/octet-stream",
+            ) -> None:
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+
+            def _verify_peer_token(self, peer_token: Any) -> str | None:
+                if not isinstance(peer_token, str) or not peer_token:
+                    return None
+                return service.relay_server.token_manager.verify_peer_token(peer_token)
 
             def _handle_bootstrap(self, parsed, script_kind: str) -> None:
                 del parsed
@@ -435,6 +472,76 @@ class RemoteRelayHTTPService:
                 self.send_header("Content-Length", str(len(content)))
                 self.end_headers()
                 self.wfile.write(content)
+
+            def _handle_mcp_manifest(self) -> None:
+                payload = self._read_json()
+                try:
+                    req = MCPManifestRequest.from_dict(payload)
+                except Exception:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST, {"error": "invalid_mcp_manifest_request"}
+                    )
+                    return
+                peer_id = self._verify_peer_token(req.peer_token)
+                if peer_id is None:
+                    self._send_json(
+                        HTTPStatus.UNAUTHORIZED, {"error": "invalid_peer_token"}
+                    )
+                    return
+                service.relay_server.registry.update_heartbeat(peer_id)
+                response = service._build_mcp_manifest(req.os, req.arch)
+                self._send_json(HTTPStatus.OK, response.to_dict())
+
+            def _handle_mcp_artifact(self, path: str) -> None:
+                peer_token = self.headers.get("X-RC-Peer-Token", "")
+                peer_id = self._verify_peer_token(peer_token)
+                if peer_id is None:
+                    self._send_json(
+                        HTTPStatus.UNAUTHORIZED, {"error": "invalid_peer_token"}
+                    )
+                    return
+                service.relay_server.registry.update_heartbeat(peer_id)
+                suffix = unquote(path.removeprefix("/remote/mcp/artifacts/"))
+                artifact_path = service._resolve_mcp_artifact_path(suffix)
+                if artifact_path is None:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                    return
+                try:
+                    content = artifact_path.read_bytes()
+                except OSError as exc:
+                    self._send_json(
+                        HTTPStatus.NOT_FOUND,
+                        {"error": "artifact_unavailable", "message": str(exc)},
+                    )
+                    return
+                self._send_bytes(HTTPStatus.OK, content)
+
+            def _handle_mcp_tools(self) -> None:
+                payload = self._read_json()
+                try:
+                    report = PeerMCPToolsReport.from_dict(payload)
+                except Exception:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST, {"error": "invalid_mcp_tools_report"}
+                    )
+                    return
+                peer_id = self._verify_peer_token(report.peer_token)
+                if peer_id is None:
+                    self._send_json(
+                        HTTPStatus.UNAUTHORIZED, {"error": "invalid_peer_token"}
+                    )
+                    return
+                service.relay_server.registry.update_heartbeat(peer_id)
+                ok = service.relay_server.update_peer_mcp_tools(
+                    peer_id, report.tools, report.diagnostics
+                )
+                if service.ui_bus is not None:
+                    service.ui_bus.info(
+                        f"Remote peer MCP tools reported: {len(report.tools)}",
+                        kind=UIEventKind.REMOTE,
+                        peer_id=peer_id,
+                    )
+                self._send_json(HTTPStatus.OK, {"ok": ok, "peer_id": peer_id})
 
             def _handle_register(self) -> None:
                 payload = self._read_json()
@@ -710,12 +817,7 @@ class RemoteRelayHTTPService:
                 service._abort_peer_chat_sessions(
                     peer_id, f"peer_disconnected: {notice.reason}"
                 )
-                service.relay_server.handle_inbound(
-                    peer_id,
-                    RelayEnvelope(
-                        type="disconnect", peer_id=peer_id, payload=notice.to_dict()
-                    ),
-                )
+                service.relay_server.disconnect_peer(peer_id, notice.reason)
                 service.ui_bus and service.ui_bus.warning(
                     f"Remote peer disconnected: {peer_id}",
                     kind=UIEventKind.REMOTE,
@@ -725,6 +827,109 @@ class RemoteRelayHTTPService:
                 self._send_json(HTTPStatus.OK, {"ok": True})
 
         return Handler
+
+    def _mcp_artifact_root_abs(self) -> Path:
+        root = self.mcp_artifact_root.expanduser()
+        if not root.is_absolute():
+            root = Path.cwd() / root
+        return root.resolve()
+
+    def _resolve_mcp_artifact_path(self, artifact_path: str) -> Path | None:
+        if not artifact_path or artifact_path.startswith(("/", "\\")):
+            return None
+        root = self._mcp_artifact_root_abs()
+        resolved = (root / artifact_path).resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            return None
+        if not resolved.exists() or not resolved.is_file():
+            return None
+        return resolved
+
+    def _build_mcp_manifest(self, os_name: str, arch: str) -> MCPManifestResponse:
+        platform = f"{os_name}-{arch}"
+        servers: list[MCPServerManifest] = []
+        diagnostics: list[dict[str, Any]] = []
+        for server in self.mcp_servers:
+            if not getattr(server, "enabled", True):
+                continue
+            if getattr(server, "placement", "server") not in {"peer", "both"}:
+                continue
+            server_name = getattr(server, "name", "")
+            version = getattr(server, "version", None)
+            if not version:
+                diagnostics.append(
+                    {
+                        "server": server_name,
+                        "level": "error",
+                        "message": "peer MCP server is missing version",
+                    }
+                )
+                continue
+            artifacts = getattr(server, "artifacts", {}) or {}
+            artifact = artifacts.get(platform)
+            if artifact is None:
+                diagnostics.append(
+                    {
+                        "server": server_name,
+                        "level": "error",
+                        "message": f"peer MCP server has no artifact for {platform}",
+                    }
+                )
+                continue
+            artifact_path = getattr(artifact, "path", "")
+            sha256 = getattr(artifact, "sha256", "")
+            if not artifact_path or not sha256:
+                diagnostics.append(
+                    {
+                        "server": server_name,
+                        "level": "error",
+                        "message": f"peer MCP server artifact for {platform} is incomplete",
+                    }
+                )
+                continue
+            launch = getattr(artifact, "launch", None) or getattr(server, "launch", None)
+            if launch is None:
+                command = getattr(server, "command", "")
+                launch_args = list(getattr(server, "args", []) or [])
+                launch_env = dict(getattr(server, "env", {}) or {})
+                launch_cwd = getattr(server, "cwd", None)
+            else:
+                command = getattr(launch, "command", "")
+                launch_args = list(getattr(launch, "args", []) or [])
+                launch_env = dict(getattr(launch, "env", {}) or {})
+                launch_cwd = getattr(launch, "cwd", None)
+            if not command:
+                diagnostics.append(
+                    {
+                        "server": server_name,
+                        "level": "error",
+                        "message": "peer MCP server launch command is empty",
+                    }
+                )
+                continue
+            servers.append(
+                MCPServerManifest(
+                    name=server_name,
+                    version=str(version),
+                    artifact=MCPArtifactManifest(
+                        platform=platform,
+                        path=artifact_path,
+                        sha256=sha256,
+                        url="/remote/mcp/artifacts/" + quote(artifact_path, safe="/"),
+                    ),
+                    launch=MCPLaunchManifest(
+                        command=command,
+                        args=launch_args,
+                        env=launch_env,
+                        cwd=launch_cwd,
+                    ),
+                    permissions=dict(getattr(server, "permissions", {}) or {}),
+                    requirements=dict(getattr(server, "requirements", {}) or {}),
+                )
+            )
+        return MCPManifestResponse(servers=servers, diagnostics=diagnostics)
 
 
 def _parse_bind(bind: str) -> tuple[str, int]:

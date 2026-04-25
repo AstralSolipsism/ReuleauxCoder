@@ -25,6 +25,7 @@ from reuleauxcoder.domain.approval import (
 )
 from reuleauxcoder.domain.config.models import Config
 from reuleauxcoder.extensions.remote_exec.backend import RemoteRelayToolBackend
+from reuleauxcoder.extensions.remote_exec.mcp_tools import RemotePeerMCPTool
 from reuleauxcoder.extensions.remote_exec.protocol import ChatResponse
 from reuleauxcoder.extensions.remote_exec.server import RelayServer
 from reuleauxcoder.extensions.skills.service import SkillsService
@@ -136,6 +137,10 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
         peer_backend = RemoteRelayToolBackend(relay_server=relay_server, ui_bus=ui_bus)
         peer_tools = runner.dependencies.load_tools(peer_backend)
         peer_agent = runner.dependencies.create_agent(peer_llm, peer_tools, config)
+        server_mcp_manager = getattr(agent, "mcp_manager", None)
+        server_mcp_tools = list(getattr(server_mcp_manager, "tools", []) or [])
+        if server_mcp_tools:
+            peer_agent.add_tools(server_mcp_tools)
         setattr(peer_agent, "runtime_config", config)
         setattr(peer_agent, "skills_service", skills_service)
         setattr(peer_agent, "skills_catalog", getattr(agent, "skills_catalog", ""))
@@ -147,6 +152,8 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
         runtime_cwd = workspace_root or (peer.cwd if peer is not None else None)
         if runtime_cwd:
             setattr(peer_agent, "runtime_working_directory", runtime_cwd)
+        for tool_info in relay_server.get_peer_mcp_tools(peer_id):
+            peer_agent.add_tools([RemotePeerMCPTool(peer_backend, tool_info)])
         for tool in peer_agent.tools:
             backend = getattr(tool, "backend", None)
             if getattr(backend, "backend_id", None) != "remote_relay":

@@ -150,6 +150,57 @@ def test_parse_config_reads_remote_exec_settings() -> None:
     assert config.remote_exec.shell_timeout_sec == 155
 
 
+def test_parse_config_reads_peer_mcp_artifacts() -> None:
+    loader = ConfigLoader()
+    config = loader._parse_config(
+        {
+            "models": {
+                "profiles": {"main": {"model": "gpt-main", "api_key": "key"}}
+            },
+            "mcp": {
+                "artifact_root": "/srv/rcoder/mcp-artifacts",
+                "servers": {
+                    "local-filesystem": {
+                        "placement": "peer",
+                        "version": "1.0.0",
+                        "launch": {
+                            "command": "{{bundle}}/filesystem-mcp",
+                            "args": ["--root", "{{workspace}}"],
+                            "env": {"MODE": "local"},
+                        },
+                        "artifacts": {
+                            "linux-amd64": {
+                                "path": "local-filesystem/1.0.0/linux-amd64.tar.gz",
+                                "sha256": "abc123",
+                                "launch": {"command": "{{bundle}}/run.sh"},
+                            }
+                        },
+                        "requirements": {"node": "required", "npm": "required"},
+                        "build": {"type": "node", "package": "@demo/filesystem"},
+                        "permissions": {
+                            "tools": {"write_file": "require_approval"}
+                        },
+                    }
+                },
+            },
+            "modes": {"profiles": {"coder": {}}},
+        }
+    )
+
+    assert config.mcp_artifact_root == "/srv/rcoder/mcp-artifacts"
+    server = config.mcp_servers[0]
+    assert server.placement == "peer"
+    assert server.version == "1.0.0"
+    assert server.launch is not None
+    assert server.launch.command == "{{bundle}}/filesystem-mcp"
+    assert server.artifacts["linux-amd64"].launch is not None
+    assert server.artifacts["linux-amd64"].launch.command == "{{bundle}}/run.sh"
+    assert server.artifacts["linux-amd64"].sha256 == "abc123"
+    assert server.requirements["node"] == "required"
+    assert server.build["type"] == "node"
+    assert server.permissions["tools"]["write_file"] == "require_approval"
+
+
 def test_parse_config_falls_back_when_active_profile_missing() -> None:
     loader = ConfigLoader()
     config = loader._parse_config(

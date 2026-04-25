@@ -1,7 +1,73 @@
 """Configuration models - domain layer configuration abstractions."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
+
+
+MCPPlacement = Literal["server", "peer", "both"]
+
+
+@dataclass
+class MCPLaunchConfig:
+    """Launch command for a peer-hosted MCP server."""
+
+    command: str = ""
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+    cwd: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "command": self.command,
+            "args": self.args,
+            "env": self.env,
+            "cwd": self.cwd,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "MCPLaunchConfig":
+        raw_args = d.get("args", [])
+        raw_env = d.get("env", {})
+        return cls(
+            command=str(d.get("command", "")),
+            args=[str(arg) for arg in raw_args] if isinstance(raw_args, list) else [],
+            env=(
+                {str(k): str(v) for k, v in raw_env.items()}
+                if isinstance(raw_env, dict)
+                else {}
+            ),
+            cwd=str(d["cwd"]) if d.get("cwd") is not None else None,
+        )
+
+
+@dataclass
+class MCPArtifactConfig:
+    """Versioned artifact for a peer-hosted MCP server."""
+
+    path: str
+    sha256: str
+    launch: MCPLaunchConfig | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"path": self.path, "sha256": self.sha256}
+        if self.launch is not None:
+            data["launch"] = self.launch.to_dict()
+        return data
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "MCPArtifactConfig":
+        raw_launch = d.get("launch")
+        return cls(
+            path=str(d.get("path", "")),
+            sha256=str(d.get("sha256", "")),
+            launch=(
+                MCPLaunchConfig.from_dict(raw_launch)
+                if isinstance(raw_launch, dict)
+                else None
+            ),
+        )
 
 
 @dataclass
@@ -14,6 +80,13 @@ class MCPServerConfig:
     env: dict[str, str] = field(default_factory=dict)
     cwd: Optional[str] = None
     enabled: bool = True
+    placement: MCPPlacement = "server"
+    version: Optional[str] = None
+    launch: MCPLaunchConfig | None = None
+    artifacts: dict[str, MCPArtifactConfig] = field(default_factory=dict)
+    permissions: dict[str, Any] = field(default_factory=dict)
+    requirements: dict[str, str] = field(default_factory=dict)
+    build: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Convert to dictionary format for serialization."""
@@ -23,18 +96,72 @@ class MCPServerConfig:
             "env": self.env,
             "cwd": self.cwd,
             "enabled": self.enabled,
+            "placement": self.placement,
+            "version": self.version,
+            "launch": self.launch.to_dict() if self.launch else None,
+            "artifacts": {
+                platform: artifact.to_dict()
+                for platform, artifact in self.artifacts.items()
+            },
+            "permissions": self.permissions,
+            "requirements": self.requirements,
+            "build": self.build,
         }
 
     @classmethod
     def from_dict(cls, name: str, d: dict) -> "MCPServerConfig":
         """Create from dictionary format."""
+        raw_placement = str(d.get("placement", "server")).lower()
+        placement: MCPPlacement
+        if raw_placement in {"peer", "both"}:
+            placement = raw_placement  # type: ignore[assignment]
+        else:
+            placement = "server"
+        raw_artifacts = d.get("artifacts", {})
+        artifacts = (
+            {
+                str(platform): MCPArtifactConfig.from_dict(artifact)
+                for platform, artifact in raw_artifacts.items()
+                if isinstance(artifact, dict)
+            }
+            if isinstance(raw_artifacts, dict)
+            else {}
+        )
+        raw_launch = d.get("launch")
+        launch = (
+            MCPLaunchConfig.from_dict(raw_launch)
+            if isinstance(raw_launch, dict)
+            else None
+        )
+        raw_permissions = d.get("permissions", {})
+        raw_requirements = d.get("requirements", {})
+        raw_build = d.get("build", {})
+        raw_args = d.get("args", [])
+        raw_env = d.get("env", {})
         return cls(
             name=name,
-            command=d.get("command", ""),
-            args=d.get("args", []),
-            env=d.get("env", {}),
+            command=str(d.get("command", "")),
+            args=[str(arg) for arg in raw_args] if isinstance(raw_args, list) else [],
+            env=(
+                {str(k): str(v) for k, v in raw_env.items()}
+                if isinstance(raw_env, dict)
+                else {}
+            ),
             cwd=d.get("cwd"),
             enabled=d.get("enabled", True),
+            placement=placement,
+            version=str(d["version"]) if d.get("version") is not None else None,
+            launch=launch,
+            artifacts=artifacts,
+            permissions=(
+                dict(raw_permissions) if isinstance(raw_permissions, dict) else {}
+            ),
+            requirements=(
+                {str(k): str(v) for k, v in raw_requirements.items()}
+                if isinstance(raw_requirements, dict)
+                else {}
+            ),
+            build=dict(raw_build) if isinstance(raw_build, dict) else {},
         )
 
 
@@ -206,6 +333,7 @@ class Config:
     reasoning_replay_mode: Optional[str] = None
     reasoning_replay_placeholder: Optional[str] = None
     mcp_servers: list[MCPServerConfig] = field(default_factory=list)
+    mcp_artifact_root: str = ".rcoder/mcp-artifacts"
     model_profiles: dict[str, ModelProfileConfig] = field(default_factory=dict)
     active_model_profile: Optional[str] = None
     active_main_model_profile: Optional[str] = None
