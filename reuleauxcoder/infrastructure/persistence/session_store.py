@@ -84,7 +84,10 @@ class SessionStore:
                 runtime_state=effective_runtime,
             )
             path = self._get_session_path(session_id)
-            path.write_text(json.dumps(session.to_dict(), ensure_ascii=False, indent=2))
+            path.write_text(
+                json.dumps(session.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             return session_id
 
     def append_system_message(
@@ -136,7 +139,7 @@ class SessionStore:
             if not path.exists():
                 return None
 
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
             session = Session.from_dict(data)
             updated_messages = [dict(message) for message in session.messages]
             ensure_message_token_counts(updated_messages)
@@ -147,7 +150,8 @@ class SessionStore:
                 session.runtime_state.active_mode = session.active_mode
             if updated_messages != data.get("messages"):
                 path.write_text(
-                    json.dumps(session.to_dict(), ensure_ascii=False, indent=2)
+                    json.dumps(session.to_dict(), ensure_ascii=False, indent=2),
+                    encoding="utf-8",
                 )
             return session
 
@@ -167,7 +171,7 @@ class SessionStore:
             ] = []
             for file_path in self._sessions_dir.glob("*.json"):
                 try:
-                    data = json.loads(file_path.read_text())
+                    data = json.loads(file_path.read_text(encoding="utf-8"))
                     session = Session.from_dict(data)
                     if fingerprint is not None and session.fingerprint != fingerprint:
                         continue

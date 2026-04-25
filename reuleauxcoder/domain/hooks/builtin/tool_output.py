@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -127,11 +128,26 @@ class ToolOutputTruncationHook(TransformHook[AfterToolExecuteContext]):
         if resolved.suffix.lower() != ".md":
             return False
 
-        roots = [
-            (Path.home() / ".rcoder" / "skills").resolve(strict=False),
-            (Path.cwd() / ".rcoder" / "skills").resolve(strict=False),
-        ]
+        roots = self._skill_markdown_roots()
         for root in roots:
             if resolved == root or resolved.is_relative_to(root):
                 return True
         return False
+
+    def _skill_markdown_roots(self) -> list[Path]:
+        roots: list[Path] = []
+        home_env = os.environ.get("HOME")
+        if home_env:
+            roots.append(
+                (Path(home_env).expanduser() / ".rcoder" / "skills").resolve(
+                    strict=False
+                )
+            )
+
+        roots.extend(
+            [
+                (Path.home() / ".rcoder" / "skills").resolve(strict=False),
+                (Path.cwd() / ".rcoder" / "skills").resolve(strict=False),
+            ]
+        )
+        return roots
