@@ -84,7 +84,7 @@ def _build_go_agent_binary() -> Path:
 def _cleanup_provider_build_dir(provider: object) -> None:
     build_dir = getattr(provider, "_build_dir", None)
     if isinstance(build_dir, Path):
-        subprocess.run(["rm", "-rf", str(build_dir)], check=False, timeout=30)
+        shutil.rmtree(build_dir, ignore_errors=True)
 
 
 class TestRemoteRelayHTTPService:
@@ -131,6 +131,56 @@ class TestRemoteRelayHTTPService:
             ) as resp:
                 assert resp.status == 200
                 assert resp.read() == b"peer-binary"
+        finally:
+            service.stop()
+            relay.stop()
+
+    def test_powershell_bootstrap_endpoint(self) -> None:
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            artifact_provider=lambda _os_name, _arch, _name: (
+                b"peer-binary",
+                "application/octet-stream",
+            ),
+            bootstrap_access_secret="top-secret",
+            bootstrap_token_ttl_sec=60,
+        )
+        service.start()
+        try:
+            try:
+                _text_request(f"{service.base_url}/remote/bootstrap.ps1")
+                raise AssertionError("bootstrap should require secret")
+            except HTTPError as exc:
+                assert exc.code == 403
+                body = json.loads(exc.read().decode("utf-8"))
+                assert body["error"] == "invalid_bootstrap_secret"
+
+            try:
+                _text_request(
+                    f"{service.base_url}/remote/bootstrap.ps1",
+                    headers={"X-RC-Bootstrap-Secret": "wrong"},
+                )
+                raise AssertionError("bootstrap should reject wrong secret")
+            except HTTPError as exc:
+                assert exc.code == 403
+                body = json.loads(exc.read().decode("utf-8"))
+                assert body["error"] == "invalid_bootstrap_secret"
+
+            status, script = _text_request(
+                f"{service.base_url}/remote/bootstrap.ps1",
+                headers={"X-RC-Bootstrap-Secret": "top-secret"},
+            )
+            assert status == 200
+            assert "$ErrorActionPreference" in script
+            assert "bt_" in script
+            assert "rcoder-peer.exe" in script
+            assert "/remote/artifacts/{os}/{arch}/rcoder-peer" in script
+            assert '.Replace("{os}", "windows")' in script
+            assert "--interactive" in script
         finally:
             service.stop()
             relay.stop()

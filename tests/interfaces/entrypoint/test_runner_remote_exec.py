@@ -233,6 +233,29 @@ class TestRunnerRemoteExec:
         runner.cleanup(ctx.agent)
         assert runner._relay_server is None
 
+    def test_remote_relay_uses_configured_peer_token_ttl(
+        self, tmp_path: Path
+    ) -> None:
+        config = Config(
+            remote_exec=RemoteExecConfig(
+                enabled=True,
+                host_mode=True,
+                peer_token_ttl_sec=123,
+            )
+        )
+        runner = AppRunner(
+            options=AppOptions(),
+            dependencies=AppDependencies(
+                load_config=lambda _: config,
+            ),
+        )
+        ctx = runner.initialize()
+        try:
+            assert runner._relay_server is not None
+            assert runner._relay_server._peer_token_ttl_sec == 123
+        finally:
+            runner.cleanup(ctx.agent)
+
     def test_remote_init_failure_does_not_crash(self, tmp_path: Path) -> None:
         def bad_relay_factory(_config: Config) -> RelayServer:
             raise RuntimeError("boom")

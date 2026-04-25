@@ -14,7 +14,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
-from reuleauxcoder.extensions.remote_exec.bootstrap import generate_bootstrap_script
+from reuleauxcoder.extensions.remote_exec.bootstrap import (
+    generate_bootstrap_script,
+    generate_powershell_bootstrap_script,
+)
 from reuleauxcoder.extensions.remote_exec.errors import RegisterRejectedError
 from reuleauxcoder.extensions.remote_exec.protocol import (
     ApprovalReplyRequest,
@@ -288,7 +291,10 @@ class RemoteRelayHTTPService:
             def do_GET(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
                 if parsed.path == "/remote/bootstrap.sh":
-                    self._handle_bootstrap(parsed)
+                    self._handle_bootstrap(parsed, "sh")
+                    return
+                if parsed.path == "/remote/bootstrap.ps1":
+                    self._handle_bootstrap(parsed, "ps1")
                     return
                 if parsed.path.startswith("/remote/artifacts/"):
                     self._handle_artifact(parsed.path)
@@ -356,7 +362,7 @@ class RemoteRelayHTTPService:
                 self.end_headers()
                 self.wfile.write(data)
 
-            def _handle_bootstrap(self, parsed) -> None:
+            def _handle_bootstrap(self, parsed, script_kind: str) -> None:
                 del parsed
                 configured_secret = service.bootstrap_access_secret
                 presented_secret = self.headers.get("X-RC-Bootstrap-Secret", "")
@@ -380,9 +386,18 @@ class RemoteRelayHTTPService:
                     if host_header
                     else service.base_url
                 )
-                script = generate_bootstrap_script(request_base_url, token)
+                if script_kind == "ps1":
+                    script = generate_powershell_bootstrap_script(
+                        request_base_url, token
+                    )
+                    content_type = "text/x-powershell; charset=utf-8"
+                else:
+                    script = generate_bootstrap_script(request_base_url, token)
+                    content_type = "text/x-shellscript; charset=utf-8"
                 self._send_text(
-                    HTTPStatus.OK, script, "text/x-shellscript; charset=utf-8"
+                    HTTPStatus.OK,
+                    script,
+                    content_type,
                 )
 
             def _handle_artifact(self, path: str) -> None:

@@ -50,6 +50,17 @@ class TestRegistration:
         finally:
             srv.stop()
 
+    def test_register_uses_configured_peer_token_ttl(self) -> None:
+        srv = RelayServer(peer_token_ttl_sec=0)
+        srv.start()
+        try:
+            bt = srv.issue_bootstrap_token(ttl_sec=60)
+            resp = srv._on_register(RegisterRequest(bootstrap_token=bt, cwd="/tmp"))
+            time.sleep(0.01)
+            assert srv.token_manager.verify_peer_token(resp.peer_token) is None
+        finally:
+            srv.stop()
+
     def test_register_rejected_bad_token(self) -> None:
         srv = RelayServer()
         srv.start()

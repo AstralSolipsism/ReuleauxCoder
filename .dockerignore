@@ -22,9 +22,7 @@ venv/
 build/
 dist/
 *.egg-info/
-artifacts/*
-!artifacts/remote/
-!artifacts/remote/**
+artifacts/
 
 # OS files
 .DS_Store

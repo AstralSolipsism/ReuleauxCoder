@@ -70,6 +70,14 @@ RC_BOOTSTRAP_SECRET='<你的 bootstrap secret>' \
 sh -c 'curl -fsSL -H "X-RC-Bootstrap-Secret: ${RC_BOOTSTRAP_SECRET}" "${RC_HOST}/remote/bootstrap.sh" | sh'
 ```
 
+Windows PowerShell 可以使用：
+
+```powershell
+$env:RC_HOST = "https://<HOST>"
+$env:RC_BOOTSTRAP_SECRET = "<你的 bootstrap secret>"
+iex (Invoke-WebRequest -UseBasicParsing -Headers @{ "X-RC-Bootstrap-Secret" = $env:RC_BOOTSTRAP_SECRET } "${env:RC_HOST}/remote/bootstrap.ps1").Content
+```
+
 服务端会先通过 HTTPS 校验 `Bootstrap Access Secret`，校验通过后才会签发一个短期、一次性的 bootstrap token，并嵌入返回的脚本中。
 
 > 注意：脚本已内置 TTY 兜底处理。即使通过 pipe 执行（`curl | sh`），也会优先尝试从 `/dev/tty` 进入 `--interactive`；若无可用 TTY，则自动降级为非交互模式并保持 peer 在线。

@@ -48,6 +48,7 @@ class RelayServer:
         heartbeat_timeout_sec: int = 30,
         default_tool_timeout_sec: int = 30,
         shell_timeout_sec: int = 120,
+        peer_token_ttl_sec: int = 3600,
     ):
         self._send_fn = send_fn
         self._token_manager = TokenManager()
@@ -55,6 +56,7 @@ class RelayServer:
         self._heartbeat_interval_sec = heartbeat_interval_sec
         self._default_tool_timeout_sec = default_tool_timeout_sec
         self._shell_timeout_sec = shell_timeout_sec
+        self._peer_token_ttl_sec = peer_token_ttl_sec
 
         # asyncio plumbing
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -369,7 +371,9 @@ class RelayServer:
             "host_info_min": req.host_info_min,
         }
         peer_id = self._registry.register(meta=meta)
-        peer_token = self._token_manager.issue_peer_token(peer_id, ttl_sec=3600)
+        peer_token = self._token_manager.issue_peer_token(
+            peer_id, ttl_sec=self._peer_token_ttl_sec
+        )
         return RegisterResponse(
             peer_id=peer_id,
             peer_token=peer_token,

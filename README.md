@@ -70,6 +70,14 @@ RC_BOOTSTRAP_SECRET='<your-bootstrap-secret>' \
 sh -c 'curl -fsSL -H "X-RC-Bootstrap-Secret: ${RC_BOOTSTRAP_SECRET}" "${RC_HOST}/remote/bootstrap.sh" | sh'
 ```
 
+Windows PowerShell can use:
+
+```powershell
+$env:RC_HOST = "https://<HOST>"
+$env:RC_BOOTSTRAP_SECRET = "<your-bootstrap-secret>"
+iex (Invoke-WebRequest -UseBasicParsing -Headers @{ "X-RC-Bootstrap-Secret" = $env:RC_BOOTSTRAP_SECRET } "${env:RC_HOST}/remote/bootstrap.ps1").Content
+```
+
 The bootstrap access secret is checked over HTTPS before the server issues a short-lived one-time bootstrap token embedded into the returned script.
 
 > Note: the bootstrap script now includes TTY fallback handling. Even when executed via a pipe (`curl | sh`), it will try to attach interactive mode via `/dev/tty`; if no TTY is available, it automatically falls back to non-interactive mode and keeps the peer online.

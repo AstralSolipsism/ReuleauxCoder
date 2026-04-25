@@ -5,7 +5,10 @@ and forwarding of builtin tool execution to a connected peer.
 """
 
 from reuleauxcoder.extensions.remote_exec.backend import RemoteRelayToolBackend
-from reuleauxcoder.extensions.remote_exec.bootstrap import generate_bootstrap_script
+from reuleauxcoder.extensions.remote_exec.bootstrap import (
+    generate_bootstrap_script,
+    generate_powershell_bootstrap_script,
+)
 from reuleauxcoder.extensions.remote_exec.http_service import RemoteRelayHTTPService
 from reuleauxcoder.extensions.remote_exec.errors import (
     AuthError,
@@ -39,6 +42,7 @@ __all__ = [
     "RemoteRelayToolBackend",
     "RemoteRelayHTTPService",
     "generate_bootstrap_script",
+    "generate_powershell_bootstrap_script",
     "AuthError",
     "PeerDisconnectedError",
     "PeerNotFoundError",

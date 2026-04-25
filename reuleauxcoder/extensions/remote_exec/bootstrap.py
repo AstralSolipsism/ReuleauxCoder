@@ -51,6 +51,41 @@ exec "$BIN" --host "$HOST" --bootstrap-token "$TOKEN"
 """
 
 
+POWERSHELL_BOOTSTRAP_SCRIPT_TEMPLATE = """$ErrorActionPreference = "Stop"
+
+# ReuleauxCoder remote bootstrap agent
+$RcHost = if ($env:RC_HOST) { ($env:RC_HOST).TrimEnd("/") } else { "{{host}}" }
+$Token = if ($env:RC_TOKEN) { $env:RC_TOKEN } else { "{{token}}" }
+$TmpRoot = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+$WorkDir = Join-Path $TmpRoot ("rc-peer." + [System.Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
+
+try {
+    $Bin = Join-Path $WorkDir "rcoder-peer.exe"
+    $ArchRaw = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    switch ($ArchRaw.ToLowerInvariant()) {
+        "amd64" { $Arch = "amd64" }
+        "arm64" { $Arch = "arm64" }
+        "aarch64" { $Arch = "arm64" }
+        default {
+            Write-Error "Unsupported architecture: $ArchRaw"
+            exit 1
+        }
+    }
+
+    $ArtifactPath = "{{artifact_path}}".Replace("{os}", "windows").Replace("{arch}", $Arch)
+    $ArtifactUrl = "$RcHost$ArtifactPath"
+
+    Invoke-WebRequest -Uri $ArtifactUrl -OutFile $Bin -UseBasicParsing
+    Unblock-File -Path $Bin -ErrorAction SilentlyContinue
+    & $Bin --host $RcHost --bootstrap-token $Token --interactive
+}
+finally {
+    Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+"""
+
+
 def generate_bootstrap_script(
     host: str,
     token: str,
@@ -60,6 +95,18 @@ def generate_bootstrap_script(
     """Generate a POSIX shell bootstrap script for the remote peer."""
     del heartbeat_interval_sec  # reserved for future peer flags
     script = BOOTSTRAP_SCRIPT_TEMPLATE.replace("{{host}}", host.rstrip("/"))
+    script = script.replace("{{token}}", token)
+    script = script.replace("{{artifact_path}}", artifact_path_template)
+    return script
+
+
+def generate_powershell_bootstrap_script(
+    host: str,
+    token: str,
+    artifact_path_template: str = DEFAULT_ARTIFACT_PATH_TEMPLATE,
+) -> str:
+    """Generate a PowerShell bootstrap script for Windows remote peers."""
+    script = POWERSHELL_BOOTSTRAP_SCRIPT_TEMPLATE.replace("{{host}}", host.rstrip("/"))
     script = script.replace("{{token}}", token)
     script = script.replace("{{artifact_path}}", artifact_path_template)
     return script

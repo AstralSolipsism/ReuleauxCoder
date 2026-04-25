@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -76,7 +77,8 @@ func runShell(
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-lc", command)
+	shell, shellArgs := buildShellCommand(command, runtime.GOOS, exec.LookPath)
+	cmd := exec.CommandContext(ctx, shell, shellArgs...)
 	cmd.Dir = cwd
 
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -153,6 +155,32 @@ func runShell(
 		out = "(no output)"
 	}
 	return protocol.ExecToolResult{OK: true, Result: out, Meta: map[string]any{"exit_code": exitCode}}
+}
+
+func buildShellCommand(
+	command string,
+	goos string,
+	lookPath func(string) (string, error),
+) (string, []string) {
+	if goos != "windows" {
+		return "sh", []string{"-lc", command}
+	}
+
+	shell := "powershell.exe"
+	if _, err := lookPath("pwsh"); err == nil {
+		shell = "pwsh"
+	} else if _, err := lookPath("powershell.exe"); err == nil {
+		shell = "powershell.exe"
+	}
+	normalized := strings.ReplaceAll(command, "&&", ";")
+	return shell, []string{
+		"-NoProfile",
+		"-NonInteractive",
+		"-ExecutionPolicy",
+		"Bypass",
+		"-Command",
+		normalized,
+	}
 }
 
 func readFile(args map[string]any, cwd string) protocol.ExecToolResult {
