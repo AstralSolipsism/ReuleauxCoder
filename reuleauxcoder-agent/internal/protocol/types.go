@@ -113,6 +113,59 @@ type ApprovalReplyResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
+type MCPManifestRequest struct {
+	PeerToken string `json:"peer_token"`
+	OS        string `json:"os"`
+	Arch      string `json:"arch"`
+	Workspace string `json:"workspace,omitempty"`
+}
+
+type MCPArtifactManifest struct {
+	Platform string `json:"platform"`
+	Path     string `json:"path"`
+	SHA256   string `json:"sha256"`
+	URL      string `json:"url"`
+}
+
+type MCPLaunchManifest struct {
+	Command string            `json:"command"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	CWD     string            `json:"cwd,omitempty"`
+}
+
+type MCPServerManifest struct {
+	Name         string              `json:"name"`
+	Version      string              `json:"version"`
+	Artifact     MCPArtifactManifest `json:"artifact"`
+	Launch       MCPLaunchManifest   `json:"launch"`
+	Permissions  map[string]any      `json:"permissions,omitempty"`
+	Requirements map[string]string   `json:"requirements,omitempty"`
+}
+
+type MCPManifestResponse struct {
+	Servers     []MCPServerManifest `json:"servers,omitempty"`
+	Diagnostics []map[string]any    `json:"diagnostics,omitempty"`
+}
+
+type MCPToolInfo struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	InputSchema map[string]any `json:"input_schema,omitempty"`
+	ServerName  string         `json:"server_name,omitempty"`
+}
+
+type MCPToolsReport struct {
+	PeerToken   string           `json:"peer_token"`
+	Tools       []MCPToolInfo    `json:"tools,omitempty"`
+	Diagnostics []map[string]any `json:"diagnostics,omitempty"`
+}
+
+type MCPToolsReportResponse struct {
+	OK     bool   `json:"ok"`
+	PeerID string `json:"peer_id,omitempty"`
+}
+
 type ExecToolRequest struct {
 	ToolName   string         `json:"tool_name"`
 	Args       map[string]any `json:"args"`

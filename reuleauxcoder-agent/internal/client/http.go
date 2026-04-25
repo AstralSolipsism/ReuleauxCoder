@@ -87,6 +87,43 @@ func (c *HTTPClient) ApprovalReply(ctx context.Context, req protocol.ApprovalRep
 	return resp, nil
 }
 
+func (c *HTTPClient) MCPManifest(ctx context.Context, req protocol.MCPManifestRequest) (protocol.MCPManifestResponse, error) {
+	var resp protocol.MCPManifestResponse
+	if err := c.postJSON(ctx, "/remote/mcp/manifest", req, &resp); err != nil {
+		return protocol.MCPManifestResponse{}, err
+	}
+	return resp, nil
+}
+
+func (c *HTTPClient) DownloadMCPArtifact(ctx context.Context, peerToken, artifactURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+artifactURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-RC-Peer-Token", peerToken)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return body, nil
+}
+
+func (c *HTTPClient) ReportMCPTools(ctx context.Context, req protocol.MCPToolsReport) (protocol.MCPToolsReportResponse, error) {
+	var resp protocol.MCPToolsReportResponse
+	if err := c.postJSON(ctx, "/remote/mcp/tools", req, &resp); err != nil {
+		return protocol.MCPToolsReportResponse{}, err
+	}
+	return resp, nil
+}
+
 func (c *HTTPClient) postJSON(ctx context.Context, path string, reqBody any, out any) error {
 	buf, err := json.Marshal(reqBody)
 	if err != nil {

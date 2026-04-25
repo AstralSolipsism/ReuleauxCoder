@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/RC-CHN/ReuleauxCoder/reuleauxcoder-agent/internal/client"
+	"github.com/RC-CHN/ReuleauxCoder/reuleauxcoder-agent/internal/mcp"
 	"github.com/RC-CHN/ReuleauxCoder/reuleauxcoder-agent/internal/protocol"
 	"github.com/RC-CHN/ReuleauxCoder/reuleauxcoder-agent/internal/tools"
 	"github.com/charmbracelet/glamour"
@@ -29,10 +30,11 @@ type Config struct {
 }
 
 type Runner struct {
-	cfg       Config
-	client    *client.HTTPClient
-	scanner   *bufio.Scanner
-	mdRender  *glamour.TermRenderer
+	cfg      Config
+	client   *client.HTTPClient
+	scanner  *bufio.Scanner
+	mdRender *glamour.TermRenderer
+	mcp      *mcp.Supervisor
 }
 
 func New(cfg Config) *Runner {
@@ -94,6 +96,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	childCtx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	defer func() {
+		if r.mcp != nil {
+			r.mcp.Stop()
+		}
 		disconnectCtx, cancelDisconnect := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancelDisconnect()
 		_ = r.client.Disconnect(disconnectCtx, protocol.DisconnectRequest{
@@ -103,6 +108,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	}()
 
 	go r.heartbeatLoop(childCtx, registerResp.PeerToken, heartbeatInterval)
+	r.mcp = mcp.NewSupervisor(r.client, registerResp.PeerToken, workspaceRoot)
+	r.mcp.Start(childCtx)
 
 	if r.cfg.Interactive {
 		errCh := make(chan error, 1)
@@ -158,11 +165,20 @@ func (r *Runner) runPollLoop(ctx context.Context, peerToken, cwd string, pollInt
 				}
 				continue
 			}
-			result := tools.Execute(execReq, cwd, func(chunk protocol.ToolStreamChunk) {
-				if sendErr := r.sendToolStream(ctx, peerToken, env.RequestID, chunk); sendErr != nil {
-					log.Printf("stream send failed: %v", sendErr)
+			var result protocol.ExecToolResult
+			if execReq.ToolName == "mcp" {
+				if r.mcp == nil {
+					result = protocol.ExecToolResult{OK: false, ErrorCode: "REMOTE_MCP_ERROR", ErrorMessage: "MCP supervisor is not running"}
+				} else {
+					result = r.mcp.Execute(execReq.Args)
 				}
-			})
+			} else {
+				result = tools.Execute(execReq, cwd, func(chunk protocol.ToolStreamChunk) {
+					if sendErr := r.sendToolStream(ctx, peerToken, env.RequestID, chunk); sendErr != nil {
+						log.Printf("stream send failed: %v", sendErr)
+					}
+				})
+			}
 			if sendErr := r.sendToolResult(ctx, peerToken, env.RequestID, result); sendErr != nil {
 				return sendErr
 			}
