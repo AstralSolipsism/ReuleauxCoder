@@ -22,6 +22,7 @@ from reuleauxcoder.extensions.mcp.artifacts import (
     run_mcp_artifact_cli,
     run_mcp_install_node_cli,
 )
+from reuleauxcoder.services.config.loader import ExampleConfigError
 
 
 def _run_once(agent, prompt: str):
@@ -51,8 +52,12 @@ def main():
     )
 
     # Initialize application using shared entrypoint
-    runner = AppRunner(options)
-    ctx = runner.initialize()
+    try:
+        runner = AppRunner(options)
+        ctx = runner.initialize()
+    except ExampleConfigError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
 
     ui_registry = UIRegistry([create_cli_registration(ctx.ui_bus)])
     cli_ui = ui_registry.require("cli")

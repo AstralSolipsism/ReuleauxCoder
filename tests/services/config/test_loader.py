@@ -219,3 +219,88 @@ def test_parse_config_falls_back_when_active_profile_missing() -> None:
     assert config.active_sub_model_profile == "first"
     assert config.active_model_profile == "first"
     assert config.model == "gpt-first"
+
+
+def test_merge_dicts_preserves_active_main_and_active_sub_across_layers() -> None:
+    """Workspace active_main / active_sub must override global values."""
+    loader = ConfigLoader()
+
+    # Simulate global config
+    global_data = {
+        "models": {
+            "active": "glm-5",
+            "active_main": "glm-5",
+            "profiles": {
+                "glm-5": {"model": "glm-5", "api_key": "k"},
+                "ds-v4-pro": {"model": "deepseek-v4-pro", "api_key": "k"},
+                "ds-v4-flash": {"model": "deepseek-v4-flash", "api_key": "k"},
+            },
+        }
+    }
+
+    # Simulate workspace override
+    workspace_data = {
+        "models": {
+            "active": "ds-v4-pro",
+            "active_main": "ds-v4-pro",
+            "active_sub": "ds-v4-flash",
+        }
+    }
+
+    merged = loader._merge_dicts(global_data, workspace_data)
+
+    assert merged["models"]["active"] == "ds-v4-pro"
+    assert merged["models"]["active_main"] == "ds-v4-pro"
+    assert merged["models"]["active_sub"] == "ds-v4-flash"
+    # Profiles from global should survive
+    assert "glm-5" in merged["models"]["profiles"]
+    assert merged["models"]["profiles"]["ds-v4-pro"]["model"] == "deepseek-v4-pro"
+
+
+def test_merge_dicts_preserves_mcp_scalar_fields_across_layers() -> None:
+    """MCP scalar fields such as artifact_root must merge with override priority."""
+    loader = ConfigLoader()
+
+    global_data = {
+        "mcp": {
+            "artifact_root": "/srv/rcoder/artifacts",
+            "servers": {"filesystem": {"command": "node", "args": ["server.js"]}},
+        }
+    }
+    workspace_data = {"mcp": {"artifact_root": ".rcoder/mcp-artifacts"}}
+
+    merged = loader._merge_dicts(global_data, workspace_data)
+
+    assert merged["mcp"]["artifact_root"] == ".rcoder/mcp-artifacts"
+    assert "filesystem" in merged["mcp"]["servers"]
+
+
+def test_is_example_config_detects_example_flag() -> None:
+    """Global config with meta.example should be detected as example."""
+    assert ConfigLoader._is_example_config({"meta": {"example": True}})
+    assert ConfigLoader._is_example_config({"meta": {"example": True, "other": 1}})
+    assert not ConfigLoader._is_example_config({})
+    assert not ConfigLoader._is_example_config({"meta": {}})
+    assert not ConfigLoader._is_example_config({"meta": {"example": False}})
+    assert not ConfigLoader._is_example_config({"models": {"profiles": {}}})
+
+
+def test_generate_example_config_creates_valid_yaml(tmp_path: Path) -> None:
+    """Generated example config should be syntactically correct."""
+    from unittest.mock import patch
+
+    loader = ConfigLoader()
+    example_path = tmp_path / "config.yaml"
+
+    with patch.object(ConfigLoader, "GLOBAL_CONFIG_PATH", example_path):
+        loader._generate_example_global_config()
+
+    assert example_path.exists()
+    data = loader._load_yaml(example_path)
+    assert data["meta"]["example"] is True
+    assert "models" in data
+    assert "profiles" in data["models"]
+    assert "default" in data["models"]["profiles"]
+    assert data["models"]["profiles"]["default"]["api_key"] == "your-api-key-here"
+    assert "modes" in data
+    assert data["modes"]["active"] == "coder"
