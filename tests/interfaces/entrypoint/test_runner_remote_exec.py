@@ -218,7 +218,13 @@ class TestRunnerRemoteExec:
             runner.cleanup(ctx.agent)
 
     def test_remote_enabled_host_mode_starts_relay(self, tmp_path: Path) -> None:
-        config = Config(remote_exec=RemoteExecConfig(enabled=True, host_mode=True))
+        config = Config(
+            remote_exec=RemoteExecConfig(
+                enabled=True,
+                host_mode=True,
+                relay_bind=f"127.0.0.1:{_free_port()}",
+            )
+        )
         runner = AppRunner(
             options=AppOptions(),
             dependencies=AppDependencies(
@@ -241,6 +247,7 @@ class TestRunnerRemoteExec:
             remote_exec=RemoteExecConfig(
                 enabled=True,
                 host_mode=True,
+                relay_bind=f"127.0.0.1:{_free_port()}",
                 peer_token_ttl_sec=123,
             )
         )
@@ -275,7 +282,13 @@ class TestRunnerRemoteExec:
         runner.cleanup(ctx.agent)
 
     def test_cleanup_runs_relay_cleanup(self, tmp_path: Path) -> None:
-        config = Config(remote_exec=RemoteExecConfig(enabled=True, host_mode=True))
+        config = Config(
+            remote_exec=RemoteExecConfig(
+                enabled=True,
+                host_mode=True,
+                relay_bind=f"127.0.0.1:{_free_port()}",
+            )
+        )
         runner = AppRunner(
             options=AppOptions(),
             dependencies=AppDependencies(
