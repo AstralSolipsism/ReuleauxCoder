@@ -173,6 +173,7 @@ class TestRemoteRelayHTTPService:
                     name="local-filesystem",
                     command="",
                     placement="peer",
+                    distribution="artifact",
                     version="1.0.0",
                     launch=MCPLaunchConfig(
                         command="{{bundle}}/filesystem-mcp",
@@ -195,6 +196,7 @@ class TestRemoteRelayHTTPService:
                     name="missing-platform",
                     command="missing",
                     placement="peer",
+                    distribution="artifact",
                     version="1.0.0",
                     launch=MCPLaunchConfig(command="{{bundle}}/missing"),
                     artifacts={},
@@ -204,6 +206,7 @@ class TestRemoteRelayHTTPService:
                     command="npx",
                     args=["-y", "@demo/browser@1.0.0"],
                     placement="both",
+                    distribution="artifact",
                     version="1.0.0",
                     launch=MCPLaunchConfig(command="{{bundle}}/browser"),
                     artifacts={
@@ -255,6 +258,7 @@ class TestRemoteRelayHTTPService:
             ]
             server_manifest = manifest["servers"][0]
             assert server_manifest["artifact"]["sha256"] == artifact_sha
+            assert server_manifest["distribution"] == "artifact"
             assert server_manifest["launch"]["command"] == "{{bundle}}/run.sh"
             assert server_manifest["launch"]["args"] == ["--root", "{{workspace}}"]
             assert server_manifest["requirements"] == {
@@ -301,6 +305,69 @@ class TestRemoteRelayHTTPService:
             service.stop()
             relay.stop()
 
+    def test_peer_mcp_manifest_command_distribution_without_artifact(self) -> None:
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            mcp_servers=[
+                MCPServerConfig(
+                    name="gitnexus",
+                    command="gitnexus",
+                    args=["mcp"],
+                    placement="peer",
+                    distribution="command",
+                    version="1.6.3",
+                    check="gitnexus --version",
+                    install="npm install -g gitnexus@1.6.3",
+                    requirements={"node": ">=20", "npm": "required"},
+                    artifacts={
+                        "linux-amd64": MCPArtifactConfig(
+                            path="gitnexus/1.6.3/linux-amd64.tar.gz",
+                            sha256="legacy",
+                        )
+                    },
+                )
+            ],
+        )
+        service.start()
+        try:
+            _, register_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/register",
+                {
+                    "bootstrap_token": relay.issue_bootstrap_token(ttl_sec=60),
+                    "cwd": "/tmp/peer",
+                },
+            )
+            peer_token = register_body["payload"]["peer_token"]
+
+            status, manifest = _json_request(
+                "POST",
+                f"{service.base_url}/remote/mcp/manifest",
+                {
+                    "peer_token": peer_token,
+                    "os": "linux",
+                    "arch": "amd64",
+                    "workspace": "/tmp/peer",
+                },
+            )
+
+            assert status == 200
+            assert manifest["diagnostics"] == []
+            server = manifest["servers"][0]
+            assert server["name"] == "gitnexus"
+            assert server["distribution"] == "command"
+            assert server["artifact"] is None
+            assert server["launch"]["command"] == "gitnexus"
+            assert server["launch"]["args"] == ["mcp"]
+            assert server["requirements"]["node"] == ">=20"
+        finally:
+            service.stop()
+            relay.stop()
+
     def test_environment_manifest_endpoint_returns_cli_prompt(self) -> None:
         relay = RelayServer()
         relay.start()
@@ -308,6 +375,18 @@ class TestRemoteRelayHTTPService:
         service = RemoteRelayHTTPService(
             relay_server=relay,
             bind=f"127.0.0.1:{port}",
+            mcp_servers=[
+                MCPServerConfig(
+                    name="gitnexus-mcp",
+                    command="gitnexus",
+                    args=["mcp"],
+                    placement="peer",
+                    distribution="command",
+                    check="gitnexus --version",
+                    install="npm install -g gitnexus@1.6.3",
+                    requirements={"node": ">=20"},
+                )
+            ],
             environment_cli_tools={
                 "beads": {
                     "command": "beads",
@@ -361,10 +440,14 @@ class TestRemoteRelayHTTPService:
 
             assert status == 200
             tools = {tool["name"]: tool for tool in manifest["cli_tools"]}
+            mcp_servers = {server["name"]: server for server in manifest["mcp_servers"]}
             assert tools["gitnexus"]["check"] == "gitnexus --version"
             assert tools["beads"]["capabilities"] == ["issue_tracking"]
+            assert mcp_servers["gitnexus-mcp"]["distribution"] == "command"
+            assert mcp_servers["gitnexus-mcp"]["requirements"]["node"] == ">=20"
             assert "do not scan PATH broadly" in manifest["prompt"]
             assert "npm install -g gitnexus" in manifest["prompt"]
+            assert "mcp_servers" in manifest["prompt"]
         finally:
             service.stop()
             relay.stop()

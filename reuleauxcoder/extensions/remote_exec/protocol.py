@@ -181,10 +181,13 @@ class MCPLaunchManifest:
 
 @dataclass
 class MCPServerManifest:
-    name: str
-    version: str
-    artifact: MCPArtifactManifest
-    launch: MCPLaunchManifest
+    name: str = ""
+    version: str = ""
+    distribution: str = "artifact"
+    artifact: MCPArtifactManifest | None = None
+    launch: MCPLaunchManifest = field(
+        default_factory=lambda: MCPLaunchManifest(command="")
+    )
     permissions: dict[str, Any] = field(default_factory=dict)
     requirements: dict[str, str] = field(default_factory=dict)
 
@@ -192,7 +195,8 @@ class MCPServerManifest:
         return {
             "name": self.name,
             "version": self.version,
-            "artifact": self.artifact.to_dict(),
+            "distribution": self.distribution,
+            "artifact": self.artifact.to_dict() if self.artifact is not None else None,
             "launch": self.launch.to_dict(),
             "permissions": self.permissions,
             "requirements": self.requirements,
@@ -200,10 +204,16 @@ class MCPServerManifest:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "MCPServerManifest":
+        raw_artifact = d.get("artifact")
         return cls(
             name=str(d.get("name", "")),
             version=str(d.get("version", "")),
-            artifact=MCPArtifactManifest.from_dict(d.get("artifact", {})),
+            distribution=str(d.get("distribution", "artifact") or "artifact"),
+            artifact=(
+                MCPArtifactManifest.from_dict(raw_artifact)
+                if isinstance(raw_artifact, dict)
+                else None
+            ),
             launch=MCPLaunchManifest.from_dict(d.get("launch", {})),
             permissions=(
                 dict(d.get("permissions", {}))
@@ -378,6 +388,71 @@ class EnvironmentCLIToolManifest:
 
 
 @dataclass
+class EnvironmentMCPServerManifest:
+    name: str
+    command: str = ""
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+    cwd: str | None = None
+    placement: str = "peer"
+    distribution: str = "command"
+    requirements: dict[str, str] = field(default_factory=dict)
+    check: str = ""
+    install: str = ""
+    version: str | None = None
+    source: str = ""
+    description: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "name": self.name,
+            "command": self.command,
+            "args": self.args,
+            "env": self.env,
+            "cwd": self.cwd,
+            "placement": self.placement,
+            "distribution": self.distribution,
+            "requirements": self.requirements,
+            "check": self.check,
+            "install": self.install,
+            "source": self.source,
+            "description": self.description,
+        }
+        if self.version is not None:
+            data["version"] = self.version
+        return data
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "EnvironmentMCPServerManifest":
+        raw_args = d.get("args", [])
+        raw_env = d.get("env", {})
+        raw_requirements = d.get("requirements", {})
+        return cls(
+            name=str(d.get("name", "")),
+            command=str(d.get("command", "")),
+            args=[str(item) for item in raw_args] if isinstance(raw_args, list) else [],
+            env=(
+                {str(k): str(v) for k, v in raw_env.items()}
+                if isinstance(raw_env, dict)
+                else {}
+            ),
+            cwd=str(d["cwd"]) if d.get("cwd") is not None else None,
+            placement=str(d.get("placement", "peer") or "peer"),
+            distribution=str(d.get("distribution", "command") or "command"),
+            requirements=(
+                {str(k): str(v) for k, v in raw_requirements.items()}
+                if isinstance(raw_requirements, dict)
+                else {}
+            ),
+            check=str(d.get("check", "")),
+            install=str(d.get("install", "")),
+            version=str(d["version"]) if d.get("version") is not None else None,
+            source=str(d.get("source", "")),
+            description=str(d.get("description", "")),
+        )
+
+
+@dataclass
 class EnvironmentManifestRequest:
     peer_token: str
     os: str
@@ -405,11 +480,13 @@ class EnvironmentManifestRequest:
 @dataclass
 class EnvironmentManifestResponse:
     cli_tools: list[EnvironmentCLIToolManifest] = field(default_factory=list)
+    mcp_servers: list[EnvironmentMCPServerManifest] = field(default_factory=list)
     prompt: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "cli_tools": [tool.to_dict() for tool in self.cli_tools],
+            "mcp_servers": [server.to_dict() for server in self.mcp_servers],
             "prompt": self.prompt,
         }
 
@@ -419,6 +496,11 @@ class EnvironmentManifestResponse:
             cli_tools=[
                 EnvironmentCLIToolManifest.from_dict(item)
                 for item in d.get("cli_tools", [])
+                if isinstance(item, dict)
+            ],
+            mcp_servers=[
+                EnvironmentMCPServerManifest.from_dict(item)
+                for item in d.get("mcp_servers", [])
                 if isinstance(item, dict)
             ],
             prompt=str(d.get("prompt", "")),

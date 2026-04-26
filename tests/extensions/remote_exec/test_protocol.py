@@ -9,6 +9,7 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     CleanupResult,
     DisconnectNotice,
     EnvironmentCLIToolManifest,
+    EnvironmentMCPServerManifest,
     EnvironmentManifestRequest,
     EnvironmentManifestResponse,
     ErrorMessage,
@@ -119,6 +120,8 @@ class TestMCPManifest:
         restored = MCPManifestResponse.from_dict(response.to_dict())
 
         assert restored.servers[0].name == "filesystem"
+        assert restored.servers[0].artifact is not None
+        assert restored.servers[0].distribution == "artifact"
         assert restored.servers[0].artifact.platform == "linux-amd64"
         assert restored.servers[0].launch.args == ["--root", "{{workspace}}"]
         assert restored.servers[0].requirements["node"] == "required"
@@ -167,6 +170,18 @@ class TestEnvironmentManifest:
                     source="npm",
                 )
             ],
+            mcp_servers=[
+                EnvironmentMCPServerManifest(
+                    name="gitnexus",
+                    command="gitnexus",
+                    args=["mcp"],
+                    placement="peer",
+                    distribution="command",
+                    check="gitnexus --version",
+                    install="npm install -g gitnexus@1.6.3",
+                    requirements={"node": ">=20", "npm": "required"},
+                )
+            ],
             prompt="check gitnexus",
         )
 
@@ -176,6 +191,10 @@ class TestEnvironmentManifest:
         assert restored.cli_tools[0].capabilities == ["repo_index"]
         assert restored.cli_tools[0].check == "gitnexus --version"
         assert restored.cli_tools[0].install == "npm install -g gitnexus"
+        assert restored.mcp_servers[0].name == "gitnexus"
+        assert restored.mcp_servers[0].args == ["mcp"]
+        assert restored.mcp_servers[0].distribution == "command"
+        assert restored.mcp_servers[0].requirements["node"] == ">=20"
         assert restored.prompt == "check gitnexus"
 
     def test_manifest_request_roundtrip(self) -> None:

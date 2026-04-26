@@ -32,6 +32,7 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     CleanupResult,
     DisconnectNotice,
     EnvironmentCLIToolManifest,
+    EnvironmentMCPServerManifest,
     EnvironmentManifestRequest,
     EnvironmentManifestResponse,
     ExecToolResult,
@@ -887,39 +888,52 @@ class RemoteRelayHTTPService:
             if getattr(server, "placement", "server") not in {"peer", "both"}:
                 continue
             server_name = getattr(server, "name", "")
+            distribution = str(getattr(server, "distribution", "") or "").lower()
+            if distribution not in {"command", "artifact"}:
+                distribution = "artifact" if getattr(server, "artifacts", {}) else "command"
             version = getattr(server, "version", None)
-            if not version:
-                diagnostics.append(
-                    {
-                        "server": server_name,
-                        "level": "error",
-                        "message": "peer MCP server is missing version",
-                    }
+            artifact_manifest: MCPArtifactManifest | None = None
+            if distribution == "artifact":
+                if not version:
+                    diagnostics.append(
+                        {
+                            "server": server_name,
+                            "level": "error",
+                            "message": "peer MCP server is missing version",
+                        }
+                    )
+                    continue
+                artifacts = getattr(server, "artifacts", {}) or {}
+                artifact = artifacts.get(platform)
+                if artifact is None:
+                    diagnostics.append(
+                        {
+                            "server": server_name,
+                            "level": "error",
+                            "message": f"peer MCP server has no artifact for {platform}",
+                        }
+                    )
+                    continue
+                artifact_path = getattr(artifact, "path", "")
+                sha256 = getattr(artifact, "sha256", "")
+                if not artifact_path or not sha256:
+                    diagnostics.append(
+                        {
+                            "server": server_name,
+                            "level": "error",
+                            "message": f"peer MCP server artifact for {platform} is incomplete",
+                        }
+                    )
+                    continue
+                artifact_manifest = MCPArtifactManifest(
+                    platform=platform,
+                    path=artifact_path,
+                    sha256=sha256,
+                    url="/remote/mcp/artifacts/" + quote(artifact_path, safe="/"),
                 )
-                continue
-            artifacts = getattr(server, "artifacts", {}) or {}
-            artifact = artifacts.get(platform)
-            if artifact is None:
-                diagnostics.append(
-                    {
-                        "server": server_name,
-                        "level": "error",
-                        "message": f"peer MCP server has no artifact for {platform}",
-                    }
-                )
-                continue
-            artifact_path = getattr(artifact, "path", "")
-            sha256 = getattr(artifact, "sha256", "")
-            if not artifact_path or not sha256:
-                diagnostics.append(
-                    {
-                        "server": server_name,
-                        "level": "error",
-                        "message": f"peer MCP server artifact for {platform} is incomplete",
-                    }
-                )
-                continue
-            launch = getattr(artifact, "launch", None) or getattr(server, "launch", None)
+                launch = getattr(artifact, "launch", None) or getattr(server, "launch", None)
+            else:
+                launch = getattr(server, "launch", None)
             if launch is None:
                 command = getattr(server, "command", "")
                 launch_args = list(getattr(server, "args", []) or [])
@@ -942,13 +956,9 @@ class RemoteRelayHTTPService:
             servers.append(
                 MCPServerManifest(
                     name=server_name,
-                    version=str(version),
-                    artifact=MCPArtifactManifest(
-                        platform=platform,
-                        path=artifact_path,
-                        sha256=sha256,
-                        url="/remote/mcp/artifacts/" + quote(artifact_path, safe="/"),
-                    ),
+                    version=str(version) if version is not None else "",
+                    distribution=distribution,
+                    artifact=artifact_manifest,
                     launch=MCPLaunchManifest(
                         command=command,
                         args=launch_args,
@@ -988,19 +998,67 @@ class RemoteRelayHTTPService:
                     description=str(_env_tool_value(tool, "description", "") or ""),
                 )
             )
+        mcp_servers: list[EnvironmentMCPServerManifest] = []
+        for server in self.mcp_servers:
+            if not getattr(server, "enabled", True):
+                continue
+            if getattr(server, "placement", "server") not in {"peer", "both"}:
+                continue
+            launch = getattr(server, "launch", None)
+            if launch is None:
+                command = str(getattr(server, "command", "") or "")
+                launch_args = list(getattr(server, "args", []) or [])
+                launch_env = dict(getattr(server, "env", {}) or {})
+                launch_cwd = getattr(server, "cwd", None)
+            else:
+                command = str(getattr(launch, "command", "") or "")
+                launch_args = list(getattr(launch, "args", []) or [])
+                launch_env = dict(getattr(launch, "env", {}) or {})
+                launch_cwd = getattr(launch, "cwd", None)
+            if not command:
+                continue
+            mcp_servers.append(
+                EnvironmentMCPServerManifest(
+                    name=str(getattr(server, "name", "") or ""),
+                    command=command,
+                    args=[str(arg) for arg in launch_args],
+                    env={str(k): str(v) for k, v in launch_env.items()},
+                    cwd=str(launch_cwd) if launch_cwd is not None else None,
+                    placement=str(getattr(server, "placement", "peer") or "peer"),
+                    distribution=str(
+                        getattr(server, "distribution", "command") or "command"
+                    ),
+                    requirements=dict(getattr(server, "requirements", {}) or {}),
+                    check=str(getattr(server, "check", "") or ""),
+                    install=str(getattr(server, "install", "") or ""),
+                    version=(
+                        str(getattr(server, "version"))
+                        if getattr(server, "version", None) is not None
+                        else None
+                    ),
+                    source=str(getattr(server, "source", "") or ""),
+                    description=str(getattr(server, "description", "") or ""),
+                )
+            )
         return EnvironmentManifestResponse(
             cli_tools=tools,
-            prompt=self._build_environment_sync_prompt(tools, workspace),
+            mcp_servers=mcp_servers,
+            prompt=self._build_environment_sync_prompt(tools, mcp_servers, workspace),
         )
 
     @staticmethod
     def _build_environment_sync_prompt(
-        tools: list[EnvironmentCLIToolManifest], workspace: str
+        tools: list[EnvironmentCLIToolManifest],
+        mcp_servers: list[EnvironmentMCPServerManifest],
+        workspace: str,
     ) -> str:
-        if not tools:
+        if not tools and not mcp_servers:
             return ""
         manifest = json.dumps(
-            [tool.to_dict() for tool in tools],
+            {
+                "cli_tools": [tool.to_dict() for tool in tools],
+                "mcp_servers": [server.to_dict() for server in mcp_servers],
+            },
             ensure_ascii=False,
             indent=2,
         )
@@ -1011,11 +1069,11 @@ class RemoteRelayHTTPService:
             "this manifest; do not scan PATH broadly, discover unrelated tools, or "
             "build a persistent inventory database.\n\n"
             f"Peer workspace: {workspace_line}\n\n"
-            "CLI manifest:\n"
+            "Environment manifest:\n"
             f"```json\n{manifest}\n```\n\n"
             "Procedure:\n"
-            "1. For each manifest entry, use the shell tool to run exactly its "
-            "`check` command from the peer workspace.\n"
+            "1. For each CLI and MCP entry with a `check` command, use the shell "
+            "tool to run exactly that command from the peer workspace.\n"
             "2. Treat successful checks as available. For failures, explain the "
             "missing or mismatched tool and quote the configured `install` command "
             "if one is present.\n"
