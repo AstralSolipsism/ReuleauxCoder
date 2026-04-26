@@ -16,6 +16,7 @@ func main() {
 		bootstrapToken string
 		cwd            string
 		workspaceRoot  string
+		peerInfoFile   string
 		pollInterval   time.Duration
 		interactive    bool
 		envSync        bool
@@ -25,6 +26,7 @@ func main() {
 	flag.StringVar(&bootstrapToken, "bootstrap-token", "", "One-time bootstrap token")
 	flag.StringVar(&cwd, "cwd", "", "Working directory for remote tool execution")
 	flag.StringVar(&workspaceRoot, "workspace-root", "", "Workspace root reported to host")
+	flag.StringVar(&peerInfoFile, "peer-info-file", "", "Write peer registration info to this JSON file")
 	flag.DurationVar(&pollInterval, "poll-interval", 500*time.Millisecond, "Polling interval when no work is available")
 	flag.BoolVar(&interactive, "interactive", false, "Run interactive chat loop proxied through host")
 	flag.BoolVar(&envSync, "env-sync", false, "Run one lightweight CLI environment sync chat and exit")
@@ -44,6 +46,7 @@ func main() {
 		BootstrapToken: bootstrapToken,
 		CWD:            cwd,
 		WorkspaceRoot:  workspaceRoot,
+		PeerInfoFile:   peerInfoFile,
 		PollInterval:   pollInterval,
 		Interactive:    interactive,
 		EnvSync:        envSync,

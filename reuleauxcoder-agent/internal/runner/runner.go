@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -25,6 +26,7 @@ type Config struct {
 	BootstrapToken string
 	CWD            string
 	WorkspaceRoot  string
+	PeerInfoFile   string
 	PollInterval   time.Duration
 	Interactive    bool
 	EnvSync        bool
@@ -81,6 +83,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("register failed: %w", err)
+	}
+	if r.cfg.PeerInfoFile != "" {
+		if err := writePeerInfoFile(r.cfg.PeerInfoFile, registerResp); err != nil {
+			return fmt.Errorf("write peer info failed: %w", err)
+		}
 	}
 	log.Printf("registered peer_id=%s", registerResp.PeerID)
 	fmt.Printf("\n=== REMOTE PEER CONNECTED ===\nPeer: %s\nWorkspace: %s\nHost: %s\n============================\n\n", registerResp.PeerID, workspaceRoot, r.cfg.Host)
@@ -171,6 +178,21 @@ func (r *Runner) runEnvironmentSync(ctx context.Context, peerToken, workspaceRoo
 	}
 	fmt.Printf("Starting environment sync agent for %d environment entry(s).\n", entryCount)
 	return r.runRemoteChat(ctx, peerToken, resp.Prompt)
+}
+
+func writePeerInfoFile(path string, resp protocol.RegisterResponse) error {
+	payload, err := json.MarshalIndent(map[string]any{
+		"peer_id":                resp.PeerID,
+		"peer_token":             resp.PeerToken,
+		"heartbeat_interval_sec": resp.HeartbeatIntervalSec,
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, payload, 0o600)
 }
 
 func (r *Runner) runPollLoop(ctx context.Context, peerToken, cwd string, pollInterval time.Duration) error {
