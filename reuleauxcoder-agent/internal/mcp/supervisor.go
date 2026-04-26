@@ -120,10 +120,32 @@ func (s *Supervisor) startServer(ctx context.Context, server protocol.MCPServerM
 	if err := checkRequirements(server.Requirements); err != nil {
 		return fmt.Errorf("MCP server %s requirements not met: %w", server.Name, err)
 	}
-	cacheDir := filepath.Join(s.workspace, ".rcoder", "mcp-cache", server.Name, server.Version, server.Artifact.Platform)
+	distribution := strings.TrimSpace(server.Distribution)
+	if distribution == "" {
+		if server.Artifact != nil && strings.TrimSpace(server.Artifact.URL) != "" {
+			distribution = "artifact"
+		} else {
+			distribution = "command"
+		}
+	}
+	if distribution != "command" && distribution != "artifact" {
+		return fmt.Errorf("MCP server %s has unsupported distribution %q", server.Name, distribution)
+	}
+
+	platform := runtime.GOOS + "-" + runtime.GOARCH
+	if server.Artifact != nil && strings.TrimSpace(server.Artifact.Platform) != "" {
+		platform = server.Artifact.Platform
+	}
+	version := strings.TrimSpace(server.Version)
+	if version == "" {
+		version = "command"
+	}
+	cacheDir := filepath.Join(s.workspace, ".rcoder", "mcp-cache", server.Name, version, platform)
 	bundleDir := filepath.Join(cacheDir, "bundle")
-	if err := s.ensureArtifact(ctx, server, cacheDir, bundleDir); err != nil {
-		return fmt.Errorf("prepare MCP server %s: %w", server.Name, err)
+	if distribution == "artifact" {
+		if err := s.ensureArtifact(ctx, server, cacheDir, bundleDir); err != nil {
+			return fmt.Errorf("prepare MCP server %s: %w", server.Name, err)
+		}
 	}
 	launch := expandLaunch(server.Launch, templateVars{
 		workspace: s.workspace,
@@ -134,7 +156,11 @@ func (s *Supervisor) startServer(ctx context.Context, server protocol.MCPServerM
 		return fmt.Errorf("MCP server %s launch command is empty", server.Name)
 	}
 	if launch.CWD == "" {
-		launch.CWD = bundleDir
+		if distribution == "artifact" {
+			launch.CWD = bundleDir
+		} else {
+			launch.CWD = s.workspace
+		}
 	}
 	client, err := startStdioClient(s.ctx, server.Name, launch)
 	if err != nil {
@@ -144,7 +170,11 @@ func (s *Supervisor) startServer(ctx context.Context, server protocol.MCPServerM
 	defer cancel()
 	tools, err := client.initialize(initCtx)
 	if err != nil {
+		stderrSummary := client.stderrSummary()
 		client.stop()
+		if stderrSummary != "" {
+			return fmt.Errorf("initialize MCP server %s: %w; stderr: %s", server.Name, err, stderrSummary)
+		}
 		return fmt.Errorf("initialize MCP server %s: %w", server.Name, err)
 	}
 	s.mu.Lock()
@@ -155,7 +185,7 @@ func (s *Supervisor) startServer(ctx context.Context, server protocol.MCPServerM
 }
 
 func (s *Supervisor) ensureArtifact(ctx context.Context, server protocol.MCPServerManifest, cacheDir, bundleDir string) error {
-	if server.Artifact.URL == "" || server.Artifact.SHA256 == "" {
+	if server.Artifact == nil || server.Artifact.URL == "" || server.Artifact.SHA256 == "" {
 		return fmt.Errorf("artifact URL and sha256 are required")
 	}
 	markerPath := filepath.Join(cacheDir, ".sha256")

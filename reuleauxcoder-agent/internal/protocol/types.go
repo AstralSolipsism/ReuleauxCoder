@@ -135,12 +135,13 @@ type MCPLaunchManifest struct {
 }
 
 type MCPServerManifest struct {
-	Name         string              `json:"name"`
-	Version      string              `json:"version"`
-	Artifact     MCPArtifactManifest `json:"artifact"`
-	Launch       MCPLaunchManifest   `json:"launch"`
-	Permissions  map[string]any      `json:"permissions,omitempty"`
-	Requirements map[string]string   `json:"requirements,omitempty"`
+	Name         string               `json:"name"`
+	Version      string               `json:"version"`
+	Distribution string               `json:"distribution,omitempty"`
+	Artifact     *MCPArtifactManifest `json:"artifact,omitempty"`
+	Launch       MCPLaunchManifest    `json:"launch"`
+	Permissions  map[string]any       `json:"permissions,omitempty"`
+	Requirements map[string]string    `json:"requirements,omitempty"`
 }
 
 type MCPManifestResponse struct {
@@ -184,9 +185,26 @@ type EnvironmentCLIToolManifest struct {
 	Description  string   `json:"description,omitempty"`
 }
 
+type EnvironmentMCPServerManifest struct {
+	Name         string            `json:"name"`
+	Command      string            `json:"command,omitempty"`
+	Args         []string          `json:"args,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	CWD          string            `json:"cwd,omitempty"`
+	Placement    string            `json:"placement,omitempty"`
+	Distribution string            `json:"distribution,omitempty"`
+	Requirements map[string]string `json:"requirements,omitempty"`
+	Check        string            `json:"check,omitempty"`
+	Install      string            `json:"install,omitempty"`
+	Version      string            `json:"version,omitempty"`
+	Source       string            `json:"source,omitempty"`
+	Description  string            `json:"description,omitempty"`
+}
+
 type EnvironmentManifestResponse struct {
-	CLITools []EnvironmentCLIToolManifest `json:"cli_tools,omitempty"`
-	Prompt   string                       `json:"prompt,omitempty"`
+	CLITools   []EnvironmentCLIToolManifest   `json:"cli_tools,omitempty"`
+	MCPServers []EnvironmentMCPServerManifest `json:"mcp_servers,omitempty"`
+	Prompt     string                         `json:"prompt,omitempty"`
 }
 
 type ExecToolRequest struct {

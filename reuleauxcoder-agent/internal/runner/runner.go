@@ -164,11 +164,12 @@ func (r *Runner) runEnvironmentSync(ctx context.Context, peerToken, workspaceRoo
 	if err != nil {
 		return fmt.Errorf("environment manifest failed: %w", err)
 	}
-	if len(resp.CLITools) == 0 || strings.TrimSpace(resp.Prompt) == "" {
-		fmt.Println("No CLI environment entries are configured on the host.")
+	entryCount := len(resp.CLITools) + len(resp.MCPServers)
+	if entryCount == 0 || strings.TrimSpace(resp.Prompt) == "" {
+		fmt.Println("No environment entries are configured on the host.")
 		return nil
 	}
-	fmt.Printf("Starting environment sync agent for %d CLI tool(s).\n", len(resp.CLITools))
+	fmt.Printf("Starting environment sync agent for %d environment entry(s).\n", entryCount)
 	return r.runRemoteChat(ctx, peerToken, resp.Prompt)
 }
 

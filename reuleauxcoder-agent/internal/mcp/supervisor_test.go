@@ -101,7 +101,7 @@ func TestSupervisorDoesNotDownloadWhenRequirementsMissing(t *testing.T) {
 				{
 					Name:    "node-mcp",
 					Version: "1.0.0",
-					Artifact: protocol.MCPArtifactManifest{
+					Artifact: &protocol.MCPArtifactManifest{
 						Platform: runtime.GOOS + "-" + runtime.GOARCH,
 						Path:     "node-mcp/1.0.0/fake.zip",
 						SHA256:   "abc",
@@ -179,7 +179,7 @@ func TestSupervisorDownloadsStartsReportsAndExecutesMCP(t *testing.T) {
 				{
 					Name:    "fake",
 					Version: "1.0.0",
-					Artifact: protocol.MCPArtifactManifest{
+					Artifact: &protocol.MCPArtifactManifest{
 						Platform: runtime.GOOS + "-" + runtime.GOARCH,
 						Path:     "fake/1.0.0/fake.zip",
 						SHA256:   sha,
@@ -231,6 +231,121 @@ func TestSupervisorDownloadsStartsReportsAndExecutesMCP(t *testing.T) {
 	})
 	if !result.OK || result.Result != "echo:hello" {
 		t.Fatalf("execute result = %#v", result)
+	}
+}
+
+func TestSupervisorCommandDistributionStartsLocalMCP(t *testing.T) {
+	if os.Getenv("RCODER_FAKE_MCP") == "1" {
+		runFakeMCPServer()
+		return
+	}
+
+	var artifactHits int
+	var reported protocol.MCPToolsReport
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/remote/mcp/manifest":
+			resp := protocol.MCPManifestResponse{Servers: []protocol.MCPServerManifest{
+				{
+					Name:         "fake-command",
+					Version:      "1.0.0",
+					Distribution: "command",
+					Launch: protocol.MCPLaunchManifest{
+						Command: os.Args[0],
+						Args:    []string{"-test.run=TestSupervisorCommandDistributionStartsLocalMCP"},
+						Env:     map[string]string{"RCODER_FAKE_MCP": "1"},
+					},
+				},
+			}}
+			_ = json.NewEncoder(w).Encode(resp)
+		case "/remote/mcp/artifacts/fake-command/1.0.0/fake.zip":
+			artifactHits++
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/remote/mcp/tools":
+			if err := json.NewDecoder(r.Body).Decode(&reported); err != nil {
+				t.Errorf("decode tools report: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(protocol.MCPToolsReportResponse{OK: true, PeerID: "peer"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	supervisor := NewSupervisor(client.New(server.URL), "pt_test", t.TempDir())
+	supervisor.Start(ctx)
+	defer supervisor.Stop()
+
+	if artifactHits != 0 {
+		t.Fatalf("artifact downloads = %d", artifactHits)
+	}
+	if len(reported.Diagnostics) != 0 {
+		t.Fatalf("reported diagnostics = %#v", reported.Diagnostics)
+	}
+	if len(reported.Tools) != 1 {
+		t.Fatalf("reported tools = %#v", reported.Tools)
+	}
+	if reported.Tools[0].Name != "echo" || reported.Tools[0].ServerName != "fake-command" {
+		t.Fatalf("unexpected reported tool = %#v", reported.Tools[0])
+	}
+}
+
+func TestSupervisorCommandDistributionReportsStderrOnStartupFailure(t *testing.T) {
+	if os.Getenv("RCODER_FAIL_MCP") == "1" {
+		_, _ = os.Stderr.WriteString("gitnexus: libstdc++.so.6: version `GLIBCXX_3.4.32' not found\n")
+		time.Sleep(250 * time.Millisecond)
+		os.Exit(1)
+	}
+
+	var reported protocol.MCPToolsReport
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/remote/mcp/manifest":
+			resp := protocol.MCPManifestResponse{Servers: []protocol.MCPServerManifest{
+				{
+					Name:         "broken-command",
+					Version:      "1.0.0",
+					Distribution: "command",
+					Launch: protocol.MCPLaunchManifest{
+						Command: os.Args[0],
+						Args:    []string{"-test.run=TestSupervisorCommandDistributionReportsStderrOnStartupFailure"},
+						Env:     map[string]string{"RCODER_FAIL_MCP": "1"},
+					},
+				},
+			}}
+			_ = json.NewEncoder(w).Encode(resp)
+		case "/remote/mcp/tools":
+			if err := json.NewDecoder(r.Body).Decode(&reported); err != nil {
+				t.Errorf("decode tools report: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(protocol.MCPToolsReportResponse{OK: true, PeerID: "peer"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	supervisor := NewSupervisor(client.New(server.URL), "pt_test", t.TempDir())
+	supervisor.Start(ctx)
+	defer supervisor.Stop()
+
+	if len(reported.Tools) != 0 {
+		t.Fatalf("reported tools = %#v", reported.Tools)
+	}
+	if len(reported.Diagnostics) != 1 {
+		t.Fatalf("reported diagnostics = %#v", reported.Diagnostics)
+	}
+	message, _ := reported.Diagnostics[0]["message"].(string)
+	if !strings.Contains(message, "stderr:") || !strings.Contains(message, "GLIBCXX_3.4.32") {
+		t.Fatalf("diagnostic message = %q", message)
 	}
 }
 

@@ -23,6 +23,9 @@ type stdioClient struct {
 	pending map[int]chan rpcResponse
 	nextID  int
 	mu      sync.Mutex
+
+	stderrMu    sync.Mutex
+	stderrLines []string
 }
 
 type rpcResponse struct {
@@ -71,7 +74,7 @@ func startStdioClient(ctx context.Context, name string, launch protocol.MCPLaunc
 		pending: map[int]chan rpcResponse{},
 	}
 	go client.receiveLoop(stdout)
-	go logMCPStderr(name, stderr)
+	go logMCPStderr(client, stderr)
 	return client, nil
 }
 
@@ -153,6 +156,24 @@ func (c *stdioClient) stop() {
 	}
 }
 
+func (c *stdioClient) addStderrLine(line string) {
+	c.stderrMu.Lock()
+	defer c.stderrMu.Unlock()
+	c.stderrLines = append(c.stderrLines, line)
+	if len(c.stderrLines) > 8 {
+		c.stderrLines = c.stderrLines[len(c.stderrLines)-8:]
+	}
+}
+
+func (c *stdioClient) stderrSummary() string {
+	c.stderrMu.Lock()
+	defer c.stderrMu.Unlock()
+	if len(c.stderrLines) == 0 {
+		return ""
+	}
+	return strings.Join(c.stderrLines, " | ")
+}
+
 func (c *stdioClient) request(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
 	c.mu.Lock()
 	c.nextID++
@@ -230,6 +251,20 @@ func (c *stdioClient) receiveLoop(stdout io.Reader) {
 			ch <- rpcResponse{Result: result, Err: err}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		c.failPending(fmt.Errorf("MCP stdout closed: %w", err))
+	} else {
+		c.failPending(fmt.Errorf("MCP stdout closed"))
+	}
+}
+
+func (c *stdioClient) failPending(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id, ch := range c.pending {
+		delete(c.pending, id)
+		ch <- rpcResponse{Err: err}
+	}
 }
 
 func rpcID(value any) (int, bool) {
@@ -243,10 +278,12 @@ func rpcID(value any) (int, bool) {
 	}
 }
 
-func logMCPStderr(name string, stderr io.Reader) {
+func logMCPStderr(client *stdioClient, stderr io.Reader) {
 	scanner := bufio.NewScanner(stderr)
 	for scanner.Scan() {
-		log.Printf("[mcp:%s] %s", name, scanner.Text())
+		line := scanner.Text()
+		client.addStderrLine(line)
+		log.Printf("[mcp:%s] %s", client.name, line)
 	}
 }
 
