@@ -15,6 +15,8 @@ RUN set -eux; \
     CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o /out/windows/amd64/rcoder-peer.exe ./cmd/reuleauxcoder-agent; \
     CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -o /out/windows/arm64/rcoder-peer.exe ./cmd/reuleauxcoder-agent
 
+FROM node:22-bookworm-slim AS node-runtime
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -22,8 +24,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends gettext-base \
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
+
+RUN set -eux; \
+    ln -sfn /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm; \
+    ln -sfn /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx; \
+    apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gettext-base \
+        git \
+        g++ \
+        make \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md README_CN.md /app/
