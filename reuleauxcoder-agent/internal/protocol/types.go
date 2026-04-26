@@ -208,10 +208,11 @@ type EnvironmentManifestResponse struct {
 }
 
 type ExecToolRequest struct {
-	ToolName   string         `json:"tool_name"`
-	Args       map[string]any `json:"args"`
-	CWD        *string        `json:"cwd"`
-	TimeoutSec int            `json:"timeout_sec"`
+	ToolName      string         `json:"tool_name"`
+	Args          map[string]any `json:"args"`
+	CWD           *string        `json:"cwd"`
+	TimeoutSec    int            `json:"timeout_sec"`
+	ExpectedState map[string]any `json:"expected_state,omitempty"`
 }
 
 type ExecToolResult struct {
@@ -220,6 +221,29 @@ type ExecToolResult struct {
 	ErrorCode    string         `json:"error_code,omitempty"`
 	ErrorMessage string         `json:"error_message,omitempty"`
 	Meta         map[string]any `json:"meta,omitempty"`
+}
+
+type ToolPreviewRequest struct {
+	ToolName   string         `json:"tool_name"`
+	Args       map[string]any `json:"args"`
+	CWD        *string        `json:"cwd"`
+	TimeoutSec int            `json:"timeout_sec"`
+}
+
+type ToolPreviewResult struct {
+	OK           bool             `json:"ok"`
+	Sections     []map[string]any `json:"sections,omitempty"`
+	ResolvedPath string           `json:"resolved_path,omitempty"`
+	OldSHA256    string           `json:"old_sha256,omitempty"`
+	OldExists    *bool            `json:"old_exists,omitempty"`
+	OldSize      *int64           `json:"old_size,omitempty"`
+	OldMTimeNS   *int64           `json:"old_mtime_ns,omitempty"`
+	Diff         string           `json:"diff,omitempty"`
+	OriginalText string           `json:"original_text,omitempty"`
+	ModifiedText string           `json:"modified_text,omitempty"`
+	ErrorCode    string           `json:"error_code,omitempty"`
+	ErrorMessage string           `json:"error_message,omitempty"`
+	Meta         map[string]any   `json:"meta,omitempty"`
 }
 
 type ToolStreamChunk struct {
@@ -241,6 +265,16 @@ type NoopEnvelope struct {
 
 func DecodeExecToolRequest(payload map[string]any) (ExecToolRequest, error) {
 	var req ExecToolRequest
+	buf, err := json.Marshal(payload)
+	if err != nil {
+		return req, err
+	}
+	err = json.Unmarshal(buf, &req)
+	return req, err
+}
+
+func DecodeToolPreviewRequest(payload map[string]any) (ToolPreviewRequest, error) {
+	var req ToolPreviewRequest
 	buf, err := json.Marshal(payload)
 	if err != nil {
 		return req, err

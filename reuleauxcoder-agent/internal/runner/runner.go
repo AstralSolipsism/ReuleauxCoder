@@ -74,7 +74,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		BootstrapToken: r.cfg.BootstrapToken,
 		CWD:            cwd,
 		WorkspaceRoot:  workspaceRoot,
-		Capabilities:   []string{"shell", "read_file", "write_file", "edit_file", "glob", "grep"},
+		Capabilities:   []string{"shell", "read_file", "write_file", "edit_file", "glob", "grep", "tool_preview"},
 		HostInfoMin: map[string]any{
 			"os":       runtimeOS(),
 			"arch":     runtimeArch(),
@@ -241,6 +241,22 @@ func (r *Runner) runPollLoop(ctx context.Context, peerToken, cwd string, pollInt
 				})
 			}
 			if sendErr := r.sendToolResult(ctx, peerToken, env.RequestID, result); sendErr != nil {
+				return sendErr
+			}
+		case "preview_tool":
+			previewReq, err := protocol.DecodeToolPreviewRequest(env.Payload)
+			if err != nil {
+				if sendErr := r.sendToolPreviewResult(ctx, peerToken, env.RequestID, protocol.ToolPreviewResult{
+					OK:           false,
+					ErrorCode:    "REMOTE_TOOL_ERROR",
+					ErrorMessage: err.Error(),
+				}); sendErr != nil {
+					return sendErr
+				}
+				continue
+			}
+			result := tools.Preview(previewReq, cwd)
+			if sendErr := r.sendToolPreviewResult(ctx, peerToken, env.RequestID, result); sendErr != nil {
 				return sendErr
 			}
 		case "cleanup":
@@ -477,6 +493,17 @@ func (r *Runner) sendToolStream(ctx context.Context, peerToken, requestID string
 		RequestID: requestID,
 		Type:      "tool_stream",
 		Payload:   mapFromStruct(chunk),
+	})
+}
+
+func (r *Runner) sendToolPreviewResult(ctx context.Context, peerToken, requestID string, result protocol.ToolPreviewResult) error {
+	sendCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	return r.client.SendResult(sendCtx, protocol.ResultRequest{
+		PeerToken: peerToken,
+		RequestID: requestID,
+		Type:      "tool_preview_result",
+		Payload:   mapFromStruct(result),
 	})
 }
 

@@ -39,6 +39,8 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     RegisterRequest,
     RegisterResponse,
     RelayEnvelope,
+    ToolPreviewRequest,
+    ToolPreviewResult,
     ToolStreamChunk,
 )
 from reuleauxcoder.extensions.remote_exec.server import RelayServer
@@ -75,6 +77,8 @@ __all__ = [
     "RegisterRequest",
     "RegisterResponse",
     "RelayEnvelope",
+    "ToolPreviewRequest",
+    "ToolPreviewResult",
     "ToolStreamChunk",
     "RelayServer",
 ]

@@ -28,6 +28,8 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     RegisterRequest,
     RegisterResponse,
     RelayEnvelope,
+    ToolPreviewRequest,
+    ToolPreviewResult,
     ToolStreamChunk,
 )
 
@@ -197,6 +199,16 @@ class RelayServer:
                 if fut is not None and not fut.done():
                     fut.set_result(result)
 
+        elif msg_type == "tool_preview_result":
+            result = ToolPreviewResult.from_dict(payload)
+            if req_id:
+                with self._lock:
+                    fut = self._pending.pop(req_id, None)
+                    self._pending_peer_ids.pop(req_id, None)
+                    self._stream_handlers.pop(req_id, None)
+                if fut is not None and not fut.done():
+                    fut.set_result(result)
+
         elif msg_type == "cleanup_result":
             result = CleanupResult.from_dict(payload)
             if req_id:
@@ -270,6 +282,34 @@ class RelayServer:
                 effective_timeout,
                 stream_handler=stream_handler,
             ),
+            self._loop,
+        )
+        return future.result()
+
+    def send_preview_request(
+        self,
+        peer_id: str,
+        request: ToolPreviewRequest,
+        timeout_sec: int | None = None,
+    ) -> ToolPreviewResult:
+        """Send an internal tool preview request to a peer and wait for the result."""
+        if self._loop is None:
+            raise RuntimeError("RelayServer not started")
+
+        peer = self._registry.get(peer_id)
+        if peer is None:
+            raise PeerNotFoundError(peer_id)
+
+        req_id = str(uuid.uuid4())
+        envelope = RelayEnvelope(
+            type="preview_tool",
+            request_id=req_id,
+            peer_id=peer_id,
+            payload=request.to_dict(),
+        )
+        effective_timeout = timeout_sec if timeout_sec is not None else 30
+        future = asyncio.run_coroutine_threadsafe(
+            self._send_and_wait(req_id, peer_id, envelope, effective_timeout),
             self._loop,
         )
         return future.result()

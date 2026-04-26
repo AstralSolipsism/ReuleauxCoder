@@ -51,6 +51,7 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     RegisterRejected,
     RegisterRequest,
     RelayEnvelope,
+    ToolPreviewResult,
 )
 from reuleauxcoder.extensions.remote_exec.server import RelayServer
 from reuleauxcoder.interfaces.events import UIEventBus, UIEventKind
@@ -738,6 +739,14 @@ class RemoteRelayHTTPService:
                         request_id=request_id,
                         peer_id=peer_id,
                         payload=result_payload,
+                    )
+                elif result_type == "tool_preview_result":
+                    result = ToolPreviewResult.from_dict(result_payload)
+                    env = RelayEnvelope(
+                        type="tool_preview_result",
+                        request_id=request_id,
+                        peer_id=peer_id,
+                        payload=result.to_dict(),
                     )
                 else:
                     result = ExecToolResult.from_dict(result_payload)
