@@ -102,6 +102,7 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
 
     relay_server: RelayServer = runner._relay_server
     config = getattr(agent, "runtime_config", None)
+    runtime_config: dict[str, Config | None] = {"value": config}
     ui_bus = getattr(agent.context, "_ui_bus", None)
     sessions_dir = (
         Path(config.session_dir)
@@ -111,6 +112,37 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
     skills_service: SkillsService | None = getattr(agent, "skills_service", None)
     session_store = runner.dependencies.create_session_store(sessions_dir)
     startup_announced: set[tuple[str, str, str]] = set()
+
+    def _current_config() -> Config | None:
+        return runtime_config["value"]
+
+    def _reload_config() -> None:
+        next_config = runner.dependencies.load_config(runner.options.config_path)
+        setattr(next_config, "_source_path", runner.options.config_path)
+        if runner.options.server_mode:
+            next_config.remote_exec.enabled = True
+            next_config.remote_exec.host_mode = True
+        errors = next_config.validate()
+        if errors:
+            raise ValueError("; ".join(errors))
+        runtime_config["value"] = next_config
+        runner._relay_http_service.mcp_servers = list(next_config.mcp_servers)
+        runner._relay_http_service.mcp_artifact_root = Path(
+            next_config.mcp_artifact_root
+        )
+        runner._relay_http_service.environment_cli_tools = dict(
+            next_config.environment.cli_tools
+        )
+        runner._relay_http_service.bootstrap_access_secret = (
+            next_config.remote_exec.bootstrap_access_secret
+        )
+        runner._relay_http_service.admin_access_secret = (
+            next_config.remote_exec.admin_access_secret
+        )
+        if ui_bus is not None:
+            ui_bus.info("Remote admin config reloaded.", kind=UIEventKind.REMOTE)
+
+    runner._relay_http_service.admin_manager.reload_handler = _reload_config
 
     def _peer_fingerprint(peer_id: str) -> str:
         peer = relay_server.registry.get(peer_id)
@@ -129,22 +161,25 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
     def _create_peer_agent(
         peer_id: str, remote_stream_handler: Callable[[str, Any], None] | None = None
     ) -> Agent:
-        if config is None:
+        current_config = _current_config()
+        if current_config is None:
             return agent
 
-        peer_llm = runner.dependencies.create_llm(config)
+        peer_llm = runner.dependencies.create_llm(current_config)
         peer_llm.ui_bus = ui_bus
         peer_backend = RemoteRelayToolBackend(relay_server=relay_server, ui_bus=ui_bus)
         peer_tools = runner.dependencies.load_tools(peer_backend)
-        peer_agent = runner.dependencies.create_agent(peer_llm, peer_tools, config)
+        peer_agent = runner.dependencies.create_agent(
+            peer_llm, peer_tools, current_config
+        )
         server_mcp_manager = getattr(agent, "mcp_manager", None)
         server_mcp_tools = list(getattr(server_mcp_manager, "tools", []) or [])
         if server_mcp_tools:
             peer_agent.add_tools(server_mcp_tools)
-        setattr(peer_agent, "runtime_config", config)
+        setattr(peer_agent, "runtime_config", current_config)
         setattr(peer_agent, "skills_service", skills_service)
         setattr(peer_agent, "skills_catalog", getattr(agent, "skills_catalog", ""))
-        runner._register_hooks(peer_agent, config)
+        runner._register_hooks(peer_agent, current_config)
         runner._wire_agent_tool_parent(peer_agent)
 
         peer = relay_server.registry.get(peer_id)
@@ -173,25 +208,26 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
         if latest:
             loaded = session_store.load(latest.id)
             if loaded is not None:
-                apply_session_runtime_state(loaded, config, peer_agent)
+                apply_session_runtime_state(loaded, current_config, peer_agent)
                 setattr(peer_agent, "current_session_id", latest.id)
                 return peer_agent
 
-        restore_config_runtime_defaults(config, peer_agent)
+        restore_config_runtime_defaults(current_config, peer_agent)
         setattr(peer_agent, "current_session_id", session_store.generate_session_id())
         return peer_agent
 
     def _save_peer_session(peer_agent: Agent, peer_id: str) -> None:
-        if config is None or not getattr(peer_agent, "messages", None):
+        current_config = _current_config()
+        if current_config is None or not getattr(peer_agent, "messages", None):
             return
         sid = session_store.save(
             peer_agent.messages,
-            getattr(peer_agent.llm, "model", config.model),
+            getattr(peer_agent.llm, "model", current_config.model),
             getattr(peer_agent, "current_session_id", None),
             total_prompt_tokens=peer_agent.state.total_prompt_tokens,
             total_completion_tokens=peer_agent.state.total_completion_tokens,
             active_mode=getattr(peer_agent, "active_mode", None),
-            runtime_state=build_session_runtime_state(config, peer_agent),
+            runtime_state=build_session_runtime_state(current_config, peer_agent),
             fingerprint=_peer_fingerprint(peer_id),
         )
         setattr(peer_agent, "current_session_id", sid)
@@ -243,12 +279,13 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                 )
             startup_announced.add(startup_key)
 
-        if prompt.strip().startswith("/") and config is not None:
+        current_config = _current_config()
+        if prompt.strip().startswith("/") and current_config is not None:
             command_bus = UIEventBus()
             command_result = handle_command(
                 prompt.strip(),
                 peer_agent,
-                config,
+                current_config,
                 getattr(peer_agent, "current_session_id", None),
                 command_bus,
                 CLI_PROFILE,
