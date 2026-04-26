@@ -77,6 +77,7 @@ class MCPArtifactManager:
             launch=None,
             requirements=None,
             build_update=None,
+            placement="peer",
         )
         self._save_data(data)
         return ArtifactRecord(
@@ -114,7 +115,7 @@ class MCPArtifactManager:
             package_name=package_name,
             version=version,
             bin_name=bin_name,
-            platforms=platforms,
+            platforms=_flatten_platforms(platforms),
             placement=placement,
             launch_args=launch_args or [],
             launch_env=launch_env or {},
@@ -165,7 +166,7 @@ class MCPArtifactManager:
                 package_name=package_name,
                 version=version,
                 bin_name=bin_name,
-                platforms=list(platforms or DEFAULT_PEER_PLATFORMS),
+                platforms=_flatten_platforms(platforms or DEFAULT_PEER_PLATFORMS),
                 placement=placement,
                 launch_args=install_args,
                 launch_env=install_env,
@@ -379,9 +380,20 @@ class MCPArtifactManager:
                         "setlocal",
                         'set "DIR=%~dp0"',
                         'cd /d "%DIR%package"',
-                        "if not exist node_modules (",
+                        'if not exist "node_modules\\.install-complete" (',
+                        '  if exist "node_modules" rmdir /s /q "node_modules"',
+                        '  if exist "%DIR%package.tmp" rmdir /s /q "%DIR%package.tmp"',
+                        '  mkdir "%DIR%package.tmp"',
+                        '  copy /y "package.json" "%DIR%package.tmp\\package.json" >nul',
+                        '  copy /y "package-lock.json" "%DIR%package.tmp\\package-lock.json" >nul',
+                        '  pushd "%DIR%package.tmp"',
                         '  npm ci --offline --cache "%DIR%npm-cache" --omit=dev --no-audit --no-fund',
                         "  if errorlevel 1 exit /b %errorlevel%",
+                        "  popd",
+                        '  move "%DIR%package.tmp\\node_modules" "node_modules" >nul',
+                        "  if errorlevel 1 exit /b %errorlevel%",
+                        '  rmdir /s /q "%DIR%package.tmp"',
+                        '  echo ok>"node_modules\\.install-complete"',
                         ")",
                         f'if exist "node_modules\\.bin\\{bin_name}.cmd" (',
                         f'  call "node_modules\\.bin\\{bin_name}.cmd" %*',
@@ -407,8 +419,14 @@ class MCPArtifactManager:
                     "set -eu",
                     'DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"',
                     'cd "$DIR/package"',
-                    'if [ ! -d node_modules ]; then',
-                    '  npm ci --offline --cache "$DIR/npm-cache" --omit=dev --no-audit --no-fund',
+                    'if [ ! -f node_modules/.install-complete ]; then',
+                    '  rm -rf node_modules "$DIR/package.tmp"',
+                    '  mkdir -p "$DIR/package.tmp"',
+                    '  cp package.json package-lock.json "$DIR/package.tmp/"',
+                    '  (cd "$DIR/package.tmp" && npm ci --offline --cache "$DIR/npm-cache" --omit=dev --no-audit --no-fund)',
+                    '  mv "$DIR/package.tmp/node_modules" node_modules',
+                    '  rm -rf "$DIR/package.tmp"',
+                    '  printf "ok\\n" > node_modules/.install-complete',
                     "fi",
                     f'exec "$DIR/package/node_modules/.bin/{bin_name}" "$@"',
                 ]
@@ -460,6 +478,9 @@ class MCPArtifactManager:
         server_data.setdefault("cwd", None)
         server_data["enabled"] = True
         server_data["placement"] = placement
+        server_data["distribution"] = (
+            "artifact" if placement in {"peer", "both"} else "command"
+        )
         server_data["version"] = version
         existing_build = server_data.setdefault("build", {})
         existing_build.update(
@@ -546,6 +567,7 @@ class MCPArtifactManager:
         server_data.setdefault("env", {})
         server_data.setdefault("enabled", True)
         server_data["placement"] = placement
+        server_data["distribution"] = "artifact"
         server_data["version"] = version
         artifact_data: dict[str, Any] = {"path": artifact_path, "sha256": sha256}
         if launch is not None:
@@ -613,7 +635,7 @@ def run_mcp_install_node_cli(args: argparse.Namespace) -> int:
             args.package,
             args.bin,
             placement=args.placement,
-            platforms=list(args.platform or []),
+            platforms=_flatten_platforms(args.platform or []),
             args=list(args.node_arg or []),
             env=_parse_env_entries(list(args.env or [])),
         )
@@ -653,6 +675,16 @@ def _split_npm_package_spec(spec: str) -> tuple[str, str | None]:
         package, version = spec.rsplit("@", 1)
         return package, version or None
     return spec, None
+
+
+def _flatten_platforms(values: list[Any]) -> list[str]:
+    platforms: list[str] = []
+    for value in values:
+        if isinstance(value, (list, tuple)):
+            platforms.extend(str(item) for item in value if str(item).strip())
+        elif str(value).strip():
+            platforms.append(str(value))
+    return platforms
 
 
 def _parse_env_entries(entries: list[str]) -> dict[str, str]:

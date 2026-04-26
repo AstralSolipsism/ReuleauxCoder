@@ -25,6 +25,7 @@ def test_import_artifact_updates_config_and_verify(tmp_path: Path) -> None:
     data = load_yaml_config(config_path)
     server = data["mcp"]["servers"]["filesystem"]
     assert server["placement"] == "peer"
+    assert server["distribution"] == "artifact"
     assert server["version"] == "1.0.0"
     artifact = server["artifacts"]["windows-amd64"]
     assert artifact["path"] == "filesystem/1.0.0/windows-amd64.zip"
@@ -59,6 +60,7 @@ def test_build_node_creates_platform_artifacts_and_updates_config(
     data = load_yaml_config(config_path)
     server = data["mcp"]["servers"]["browser-tools"]
     assert server["placement"] == "peer"
+    assert server["distribution"] == "artifact"
     assert server["version"] == "1.2.3"
     assert server["requirements"] == {"node": "required", "npm": "required"}
     assert server["build"]["type"] == "node"
@@ -73,14 +75,19 @@ def test_build_node_creates_platform_artifacts_and_updates_config(
     assert "package/package.json" in names
     assert "package/package-lock.json" in names
     assert "npm-cache/cache-marker" in names
+    with zipfile.ZipFile(artifact_root / windows["path"]) as zf:
+        run_cmd = zf.read("run.cmd").decode("utf-8")
+    assert ".install-complete" in run_cmd
 
     linux = server["artifacts"]["linux-amd64"]
     assert linux["launch"]["command"] == "{{bundle}}/run.sh"
     with tarfile.open(artifact_root / linux["path"], "r:gz") as tf:
         names = {member.name for member in tf.getmembers()}
+        run_sh = tf.extractfile("run.sh").read().decode("utf-8")  # type: ignore[union-attr]
     assert "run.sh" in names
     assert "package/package.json" in names
     assert "npm-cache/cache-marker" in names
+    assert ".install-complete" in run_sh
 
     verified = manager.verify_artifacts()
     assert len(verified) == 2
@@ -114,6 +121,7 @@ def test_install_node_server_writes_pinned_npx_config(
     assert result.artifacts == []
     server = load_yaml_config(config_path)["mcp"]["servers"]["github"]
     assert server["placement"] == "server"
+    assert server["distribution"] == "command"
     assert server["command"] == "npx"
     assert server["args"] == ["-y", "@demo/github@1.2.3", "--read-only"]
     assert server["env"] == {"TOKEN": "secret"}
@@ -150,6 +158,7 @@ def test_install_node_peer_defaults_to_windows_and_linux_artifacts(
     }
     server = load_yaml_config(config_path)["mcp"]["servers"]["filesystem"]
     assert server["placement"] == "peer"
+    assert server["distribution"] == "artifact"
     assert server["version"] == "1.2.3"
     assert server["requirements"] == {"node": "required", "npm": "required"}
     assert set(server["artifacts"]) == {"windows-amd64", "linux-amd64"}
@@ -186,11 +195,40 @@ def test_install_node_both_writes_server_config_and_artifacts(
     assert [record.platform for record in result.artifacts] == ["windows-amd64"]
     server = load_yaml_config(config_path)["mcp"]["servers"]["browser"]
     assert server["placement"] == "both"
+    assert server["distribution"] == "artifact"
     assert server["command"] == "npx"
     assert server["args"] == ["-y", "@demo/browser@1.2.3", "--port", "9222"]
     assert server["artifacts"]["windows-amd64"]["launch"]["args"] == [
         "--port",
         "9222",
+    ]
+
+
+def test_install_node_accepts_repeated_platform_groups(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / ".rcoder" / "config.yaml"
+    save_yaml_config(
+        config_path,
+        {"mcp": {"artifact_root": str(tmp_path / "artifacts"), "servers": {}}},
+    )
+    fake_npm = _write_fake_npm(tmp_path)
+    monkeypatch.setenv(
+        "PATH", str(fake_npm.parent) + os.pathsep + os.environ.get("PATH", "")
+    )
+
+    manager = MCPArtifactManager(config_path, npm_cmd=fake_npm.name)
+    result = manager.install_node(
+        "filesystem",
+        "@demo/filesystem@latest",
+        "filesystem-mcp",
+        placement="peer",
+        platforms=[["linux-amd64"], ["windows-amd64"]],  # type: ignore[list-item]
+    )
+
+    assert [record.platform for record in result.artifacts] == [
+        "linux-amd64",
+        "windows-amd64",
     ]
 
 
