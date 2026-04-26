@@ -33,6 +33,9 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     ChatResponse,
     CleanupResult,
     ExecToolResult,
+    ToolPreviewRequest,
+    ToolPreviewResult,
+    RelayEnvelope,
 )
 from reuleauxcoder.extensions.remote_exec.server import RelayServer
 from reuleauxcoder.extensions.tools.builtin.edit import EditFileTool
@@ -104,6 +107,58 @@ def _cleanup_provider_build_dir(provider: object) -> None:
 
 
 class TestRemoteRelayHTTPService:
+    def test_relay_send_preview_request_roundtrips_result(self) -> None:
+        captured: list[RelayEnvelope] = []
+
+        def send_fn(peer_id: str, envelope: RelayEnvelope) -> None:
+            captured.append(envelope)
+            relay.handle_inbound(
+                peer_id,
+                RelayEnvelope(
+                    type="tool_preview_result",
+                    request_id=envelope.request_id,
+                    peer_id=peer_id,
+                    payload=ToolPreviewResult(
+                        ok=True,
+                        sections=[
+                            {
+                                "id": "diff",
+                                "kind": "diff",
+                                "content": "--- a/a.txt\n+++ b/a.txt\n",
+                            }
+                        ],
+                        resolved_path="/repo/a.txt",
+                        old_sha256="abc",
+                        old_exists=True,
+                    ).to_dict(),
+                ),
+            )
+
+        relay = RelayServer(send_fn=send_fn)
+        relay.start()
+        try:
+            peer_id = relay.registry.register(
+                {"capabilities": ["tool_preview"], "cwd": "/repo"}
+            )
+            result = relay.send_preview_request(
+                peer_id,
+                ToolPreviewRequest(
+                    tool_name="write_file",
+                    args={"file_path": "a.txt", "content": "new"},
+                    cwd="/repo",
+                ),
+                timeout_sec=2,
+            )
+
+            assert captured[0].type == "preview_tool"
+            assert result.ok is True
+            assert result.sections[0]["kind"] == "diff"
+            assert result.resolved_path == "/repo/a.txt"
+            assert result.old_sha256 == "abc"
+            assert result.old_exists is True
+        finally:
+            relay.stop()
+
     def test_admin_provider_and_model_endpoints_require_secret_and_mask_keys(
         self, tmp_path: Path
     ) -> None:

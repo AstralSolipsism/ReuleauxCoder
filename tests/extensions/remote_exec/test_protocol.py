@@ -27,6 +27,8 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     RegisterRequest,
     RegisterResponse,
     RelayEnvelope,
+    ToolPreviewRequest,
+    ToolPreviewResult,
     ToolStreamChunk,
 )
 
@@ -217,6 +219,7 @@ class TestExecToolRequest:
             args={"command": "ls"},
             cwd="/tmp",
             timeout_sec=60,
+            expected_state={"old_sha256": "abc"},
         )
         d = req.to_dict()
         restored = ExecToolRequest.from_dict(d)
@@ -224,12 +227,14 @@ class TestExecToolRequest:
         assert restored.args == {"command": "ls"}
         assert restored.cwd == "/tmp"
         assert restored.timeout_sec == 60
+        assert restored.expected_state == {"old_sha256": "abc"}
 
     def test_defaults(self) -> None:
         req = ExecToolRequest(tool_name="read_file")
         assert req.args == {}
         assert req.cwd is None
         assert req.timeout_sec == 30
+        assert req.expected_state == {}
 
 
 class TestExecToolResult:
@@ -246,6 +251,57 @@ class TestExecToolResult:
         assert restored.ok is False
         assert restored.error_code == "PEER_DISCONNECTED"
         assert restored.meta["exit_code"] == 1
+
+
+class TestToolPreview:
+    def test_request_roundtrip(self) -> None:
+        req = ToolPreviewRequest(
+            tool_name="write_file",
+            args={"file_path": "a.txt", "content": "hello"},
+            cwd="/repo",
+            timeout_sec=12,
+        )
+
+        restored = ToolPreviewRequest.from_dict(req.to_dict())
+
+        assert restored.tool_name == "write_file"
+        assert restored.args["file_path"] == "a.txt"
+        assert restored.cwd == "/repo"
+        assert restored.timeout_sec == 12
+
+    def test_result_roundtrip(self) -> None:
+        result = ToolPreviewResult(
+            ok=True,
+            sections=[
+                {
+                    "id": "diff",
+                    "kind": "diff",
+                    "content": "--- a/a.txt\n+++ b/a.txt\n",
+                }
+            ],
+            resolved_path="/repo/a.txt",
+            old_sha256="abc",
+            old_exists=True,
+            old_size=10,
+            old_mtime_ns=123,
+            diff="diff",
+            original_text="old",
+            modified_text="new",
+            meta={"mode": "preview"},
+        )
+
+        restored = ToolPreviewResult.from_dict(result.to_dict())
+
+        assert restored.ok is True
+        assert restored.sections[0]["kind"] == "diff"
+        assert restored.resolved_path == "/repo/a.txt"
+        assert restored.old_sha256 == "abc"
+        assert restored.old_exists is True
+        assert restored.old_size == 10
+        assert restored.old_mtime_ns == 123
+        assert restored.original_text == "old"
+        assert restored.modified_text == "new"
+        assert restored.meta["mode"] == "preview"
 
 
 class TestToolStreamChunk:

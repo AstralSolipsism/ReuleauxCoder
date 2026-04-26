@@ -20,10 +20,12 @@ from reuleauxcoder.domain.config.models import (
     ModeConfig,
     RemoteExecConfig,
 )
+from reuleauxcoder.domain.approval import ApprovalRequest
 from reuleauxcoder.domain.hooks.registry import HookRegistry
 from reuleauxcoder.domain.llm.models import LLMResponse, ToolCall
 from reuleauxcoder.extensions.remote_exec.backend import RemoteRelayToolBackend
 from reuleauxcoder.extensions.remote_exec.http_service import RemoteRelayHTTPService
+from reuleauxcoder.extensions.remote_exec.protocol import ToolPreviewResult
 from reuleauxcoder.extensions.remote_exec.server import RelayServer
 from reuleauxcoder.interfaces.entrypoint.runner import (
     AppDependencies,
@@ -77,9 +79,9 @@ class FakeContext:
 
 
 class FakeAgent:
-    def __init__(self, llm: FakeLLM, chat_behavior=None) -> None:
+    def __init__(self, llm: FakeLLM, tools=None, chat_behavior=None) -> None:
         self.llm = llm
-        self.tools = []
+        self.tools = list(tools or [])
         self.context = FakeContext()
         self.state = SimpleNamespace(
             messages=[],
@@ -117,7 +119,9 @@ class FakeAgent:
         return response
 
 
-def _build_runner_with_fake_agent(relay_bind: str, chat_behavior=None) -> AppRunner:
+def _build_runner_with_fake_agent(
+    relay_bind: str, chat_behavior=None, load_tools=None
+) -> AppRunner:
     config = Config(
         api_key="key",
         remote_exec=RemoteExecConfig(
@@ -135,19 +139,29 @@ def _build_runner_with_fake_agent(relay_bind: str, chat_behavior=None) -> AppRun
         dependencies=AppDependencies(
             load_config=lambda _: config,
             create_llm=lambda cfg: FakeLLM(cfg.model),
-            load_tools=lambda _backend: [],
+            load_tools=load_tools or (lambda _backend: []),
             create_agent=lambda llm, _tools, _config: FakeAgent(
-                llm, chat_behavior=chat_behavior
+                llm, tools=_tools, chat_behavior=chat_behavior
             ),
         ),
     )
 
 
-def _register_peer(base_url: str, bootstrap_token: str, cwd: str) -> tuple[str, str]:
+def _register_peer(
+    base_url: str,
+    bootstrap_token: str,
+    cwd: str,
+    capabilities: list[str] | None = None,
+) -> tuple[str, str]:
     _, register_body = _json_request(
         "POST",
         f"{base_url}/remote/register",
-        {"bootstrap_token": bootstrap_token, "cwd": cwd, "workspace_root": cwd},
+        {
+            "bootstrap_token": bootstrap_token,
+            "cwd": cwd,
+            "workspace_root": cwd,
+            "capabilities": capabilities or [],
+        },
     )
     payload = register_body["payload"]
     return payload["peer_id"], payload["peer_token"]
@@ -425,6 +439,117 @@ class TestRunnerRemoteExec:
             assert "Fingerprint" in merged
             assert "Mode" in merged
             assert "Model" in merged
+        finally:
+            runner.cleanup(ctx.agent)
+
+    def test_runner_remote_approval_uses_peer_preview(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        preview_calls: list[dict] = []
+
+        def fake_preview(self, peer_id, request, timeout_sec=None):
+            preview_calls.append(
+                {"peer_id": peer_id, "tool_name": request.tool_name, "args": request.args}
+            )
+            return ToolPreviewResult(
+                ok=True,
+                sections=[
+                    {
+                        "id": "diff",
+                        "title": "Proposed file diff",
+                        "kind": "diff",
+                        "content": "--- a/demo.txt\n+++ b/demo.txt\n-peer\n+host\n",
+                        "resolved_path": str(tmp_path / "demo.txt"),
+                        "original_text": "peer\n",
+                        "modified_text": "host\n",
+                    }
+                ],
+                resolved_path=str(tmp_path / "demo.txt"),
+                old_sha256="peer-sha",
+                old_exists=True,
+            )
+
+        monkeypatch.setattr(RelayServer, "send_preview_request", fake_preview)
+
+        def chat_behavior(agent: FakeAgent, _prompt: str) -> str:
+            decision = agent.approval_provider.request_approval(
+                ApprovalRequest(
+                    tool_name="write_file",
+                    tool_args={"file_path": "demo.txt", "content": "host\n"},
+                    tool_source="builtin",
+                    reason="confirm write",
+                )
+            )
+            assert decision.approved
+            return "approved"
+
+        port = _free_port()
+        runner = _build_runner_with_fake_agent(
+            f"127.0.0.1:{port}",
+            chat_behavior=chat_behavior,
+            load_tools=lambda backend: [SimpleNamespace(name="write_file", backend=backend)],
+        )
+        ctx = runner.initialize()
+        try:
+            peer_id, peer_token = _register_peer(
+                runner._relay_http_service.base_url,
+                runner._relay_server.issue_bootstrap_token(ttl_sec=60),
+                str(tmp_path),
+                capabilities=["tool_preview"],
+            )
+            _, start_body = _json_request(
+                "POST",
+                f"{runner._relay_http_service.base_url}/remote/chat/start",
+                {"peer_token": peer_token, "prompt": "write"},
+            )
+            cursor = 0
+            approval_events: list[dict] = []
+            deadline = time.time() + 3
+            while time.time() < deadline and not approval_events:
+                _, stream_body = _json_request(
+                    "POST",
+                    f"{runner._relay_http_service.base_url}/remote/chat/stream",
+                    {
+                        "peer_token": peer_token,
+                        "chat_id": start_body["chat_id"],
+                        "cursor": cursor,
+                        "timeout_sec": 0.5,
+                    },
+                )
+                cursor = stream_body["next_cursor"]
+                approval_events = [
+                    event
+                    for event in stream_body["events"]
+                    if event["type"] == "approval_request"
+                ]
+            assert approval_events
+            payload = approval_events[0]["payload"]
+            assert preview_calls[0]["peer_id"] == peer_id
+            assert payload["preview_unavailable"] is False
+            assert payload["sections"][0]["kind"] == "diff"
+            assert payload["sections"][0]["original_text"] == "peer\n"
+            assert "confirm write" in payload["content"]
+
+            _json_request(
+                "POST",
+                f"{runner._relay_http_service.base_url}/remote/approval/reply",
+                {
+                    "peer_token": peer_token,
+                    "chat_id": start_body["chat_id"],
+                    "approval_id": payload["approval_id"],
+                    "decision": "allow_once",
+                },
+            )
+            events = _collect_stream_events(
+                runner._relay_http_service.base_url,
+                peer_token,
+                start_body["chat_id"],
+            )
+            assert any(
+                event["type"] == "chat_end"
+                and event["payload"].get("response") == "approved"
+                for event in events
+            )
         finally:
             runner.cleanup(ctx.agent)
 
