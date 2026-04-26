@@ -30,6 +30,7 @@ remote_exec:
   host_mode: true
   relay_bind: 0.0.0.0:8765
   bootstrap_access_secret: ${RCODER_BOOTSTRAP_ACCESS_SECRET}
+  admin_access_secret: ${RCODER_ADMIN_ACCESS_SECRET}
   bootstrap_token_ttl_sec: 120
   peer_token_ttl_sec: 3600
   heartbeat_interval_sec: 10

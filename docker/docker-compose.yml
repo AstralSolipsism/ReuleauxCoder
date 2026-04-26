@@ -11,6 +11,6 @@ services:
     ports:
       - "8765:8765"
     volumes:
-      - ../.rcoder/sessions:/app/.rcoder/sessions
+      - ../.rcoder:/app/.rcoder
     tty: true
     stdin_open: true
