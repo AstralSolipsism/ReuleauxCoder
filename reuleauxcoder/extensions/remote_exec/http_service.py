@@ -1082,7 +1082,14 @@ class RemoteRelayHTTPService:
             "pipx, or other base runtimes automatically; report them as blockers if "
             "they are missing.\n"
             "4. After any approved install command, rerun that tool's `check` command.\n"
-            "5. Finish with a compact status table: tool, capability, check result, "
+            "5. If a check still fails because the declared command is not found, run "
+            "`command -v <command>` on Unix-like peers or `Get-Command <command>` "
+            "on Windows peers, then report the active PATH and the directory that "
+            "should be added.\n"
+            "6. Do not edit shell profiles, PATH, npm prefix, PowerShell profiles, "
+            "or system environment variables unless the user approves that exact "
+            "change.\n"
+            "7. Finish with a compact status table: tool, capability, check result, "
             "action taken, remaining blocker.\n"
         )
 

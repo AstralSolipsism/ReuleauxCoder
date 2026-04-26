@@ -42,7 +42,7 @@ if [ -t 0 ]; then
   exec "$BIN" --host "$HOST" --bootstrap-token "$TOKEN" --interactive
 fi
 
-if [ -r /dev/tty ]; then
+if ( : </dev/tty ) 2>/dev/null; then
   exec "$BIN" --host "$HOST" --bootstrap-token "$TOKEN" --interactive </dev/tty
 fi
 

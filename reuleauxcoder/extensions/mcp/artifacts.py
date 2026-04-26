@@ -30,6 +30,7 @@ class ArtifactRecord:
     path: str
     sha256: str
     exists: bool
+    distribution: str = "artifact"
     verified: bool | None = None
 
 
@@ -87,6 +88,7 @@ class MCPArtifactManager:
             path=rel_path.as_posix(),
             sha256=sha256,
             exists=True,
+            distribution="artifact",
             verified=True,
         )
 
@@ -260,6 +262,12 @@ class MCPArtifactManager:
             artifacts = server_data.get("artifacts", {}) or {}
             if not isinstance(artifacts, dict):
                 continue
+            distribution = str(
+                server_data.get("distribution")
+                or ("artifact" if artifacts else "command")
+            ).lower()
+            if distribution not in {"command", "artifact"}:
+                distribution = "artifact" if artifacts else "command"
             for platform, artifact_data in sorted(artifacts.items()):
                 if not isinstance(artifact_data, dict):
                     continue
@@ -274,6 +282,7 @@ class MCPArtifactManager:
                         path=rel_path,
                         sha256=sha256,
                         exists=abs_path.exists(),
+                        distribution=distribution,
                     )
                 )
         return records
@@ -293,6 +302,7 @@ class MCPArtifactManager:
                     path=record.path,
                     sha256=record.sha256,
                     exists=record.exists,
+                    distribution=record.distribution,
                     verified=ok,
                 )
             )
@@ -360,6 +370,7 @@ class MCPArtifactManager:
             path=rel_path.as_posix(),
             sha256=sha256,
             exists=True,
+            distribution="artifact",
             verified=True,
         )
 
@@ -653,9 +664,13 @@ def run_mcp_install_node_cli(args: argparse.Namespace) -> int:
 
 def _print_record(prefix: str, record: ArtifactRecord) -> None:
     status = "ok" if record.verified is not False and record.exists else "missing"
+    notes = ""
+    if record.distribution == "command":
+        notes = " usage=retained-not-default"
     print(
         f"{prefix}: {record.server} {record.version} {record.platform} "
-        f"{record.path} sha256={record.sha256} status={status}"
+        f"{record.path} sha256={record.sha256} status={status} "
+        f"distribution={record.distribution}{notes}"
     )
 
 

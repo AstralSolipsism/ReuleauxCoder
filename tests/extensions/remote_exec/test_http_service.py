@@ -137,6 +137,9 @@ class TestRemoteRelayHTTPService:
             assert "rcoder-peer" in script
             assert service.base_url in script
             assert "/remote/artifacts/{os}/{arch}/rcoder-peer" in script
+            assert "( : </dev/tty ) 2>/dev/null" in script
+            assert "[ -r /dev/tty ]" not in script
+            assert 'exec "$BIN" --host "$HOST" --bootstrap-token "$TOKEN"\n' in script
 
             with _URLOPEN(
                 f"{service.base_url}/remote/artifacts/linux/amd64/rcoder-peer",
@@ -448,6 +451,10 @@ class TestRemoteRelayHTTPService:
             assert "do not scan PATH broadly" in manifest["prompt"]
             assert "npm install -g gitnexus" in manifest["prompt"]
             assert "mcp_servers" in manifest["prompt"]
+            assert "command -v <command>" in manifest["prompt"]
+            assert "Get-Command <command>" in manifest["prompt"]
+            assert "active PATH" in manifest["prompt"]
+            assert "unless the user approves that exact change" in manifest["prompt"]
         finally:
             service.stop()
             relay.stop()

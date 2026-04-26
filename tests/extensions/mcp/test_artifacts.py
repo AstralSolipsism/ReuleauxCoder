@@ -4,8 +4,12 @@ import os
 import tarfile
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
-from reuleauxcoder.extensions.mcp.artifacts import MCPArtifactManager
+from reuleauxcoder.extensions.mcp.artifacts import (
+    MCPArtifactManager,
+    run_mcp_artifact_cli,
+)
 from reuleauxcoder.infrastructure.yaml.loader import load_yaml_config, save_yaml_config
 
 
@@ -32,6 +36,49 @@ def test_import_artifact_updates_config_and_verify(tmp_path: Path) -> None:
     verified = manager.verify_artifacts("filesystem")
     assert len(verified) == 1
     assert verified[0].verified is True
+
+
+def test_artifact_list_marks_command_distribution_retained_artifacts(
+    tmp_path: Path, capsys
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    artifact_path = artifact_root / "gitnexus" / "1.6.3" / "linux-amd64.tar.gz"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_bytes(b"artifact")
+    config_path = tmp_path / ".rcoder" / "config.yaml"
+    save_yaml_config(
+        config_path,
+        {
+            "mcp": {
+                "artifact_root": str(artifact_root),
+                "servers": {
+                    "gitnexus": {
+                        "distribution": "command",
+                        "version": "1.6.3",
+                        "artifacts": {
+                            "linux-amd64": {
+                                "path": "gitnexus/1.6.3/linux-amd64.tar.gz",
+                                "sha256": "unused",
+                            }
+                        },
+                    }
+                },
+            }
+        },
+    )
+
+    exit_code = run_mcp_artifact_cli(
+        SimpleNamespace(
+            artifact_command="list",
+            server_name="gitnexus",
+            config=str(config_path),
+        )
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "distribution=command" in out
+    assert "usage=retained-not-default" in out
 
 
 def test_build_node_creates_platform_artifacts_and_updates_config(
