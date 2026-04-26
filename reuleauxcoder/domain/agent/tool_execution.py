@@ -15,6 +15,7 @@ from reuleauxcoder.domain.hooks.types import (
     BeforeToolExecuteContext,
     HookPoint,
 )
+from reuleauxcoder.extensions.tools.registry import get_tool
 
 
 class ToolExecutor:
@@ -27,8 +28,6 @@ class ToolExecutor:
         """Execute a single tool call."""
         tool = self.agent.get_tool(tc.name)
         if tool is None:
-            from reuleauxcoder.extensions.tools.registry import get_tool
-
             tool = get_tool(tc.name)
 
         before_context = BeforeToolExecuteContext(
@@ -140,8 +139,6 @@ class ToolExecutor:
         # First check agent's tools, then fall back to global registry
         tool = self.agent.get_tool(tool_call.name)
         if tool is None:
-            from reuleauxcoder.extensions.tools.registry import get_tool
-
             tool = get_tool(tool_call.name)
 
         if tool is None:
@@ -153,6 +150,8 @@ class ToolExecutor:
 
         try:
             result = tool.execute(**tool_call.arguments)
+            if (shell_cwd := getattr(tool, "_cwd", None)) is not None:
+                setattr(self.agent, "runtime_working_directory", str(shell_cwd))
             after_context = AfterToolExecuteContext(
                 hook_point=HookPoint.AFTER_TOOL_EXECUTE,
                 tool_call=tool_call,

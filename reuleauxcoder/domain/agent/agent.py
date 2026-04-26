@@ -10,14 +10,17 @@ if TYPE_CHECKING:
     from reuleauxcoder.domain.approval import ApprovalProvider
     from reuleauxcoder.services.llm.client import LLM
     from reuleauxcoder.extensions.tools.base import Tool
-    from reuleauxcoder.domain.context.manager import ContextManager
     from reuleauxcoder.domain.config.models import Config
 
 from reuleauxcoder.domain.agent.events import AgentEvent, AgentEventType
 from reuleauxcoder.domain.agent.loop import AgentLoop
 from reuleauxcoder.domain.agent.tool_execution import ToolExecutor
 from reuleauxcoder.domain.config.models import ModeConfig
+from reuleauxcoder.domain.context.manager import ContextManager
 from reuleauxcoder.domain.hooks import HookBase, HookPoint, HookRegistry
+from reuleauxcoder.extensions.subagent.manager import get_subagent_manager
+from reuleauxcoder.infrastructure.platform import get_platform_info
+from reuleauxcoder.services.prompt.builder import system_prompt
 
 
 @dataclass
@@ -44,6 +47,8 @@ class Agent:
         approval_provider: "ApprovalProvider" | None = None,
         available_modes: dict[str, ModeConfig] | None = None,
         active_mode: str | None = None,
+        loop: AgentLoop | None = None,
+        executor: ToolExecutor | None = None,
     ):
         self.llm = llm
         self.tools = tools if tools is not None else []
@@ -61,8 +66,6 @@ class Agent:
         self._stop_event = threading.Event()
 
         # Context manager
-        from reuleauxcoder.domain.context.manager import ContextManager
-
         context_cfg = getattr(config, "context", None)
         if context_cfg:
             self.context = ContextManager(
@@ -71,6 +74,7 @@ class Agent:
                 snip_threshold_chars=context_cfg.snip_threshold_chars,
                 snip_min_lines=context_cfg.snip_min_lines,
                 summarize_keep_recent_turns=context_cfg.summarize_keep_recent_turns,
+                token_fudge_factor=getattr(context_cfg, "token_fudge_factor", 1.1),
             )
         else:
             self.context = ContextManager(max_tokens=max_context_tokens)
@@ -80,8 +84,12 @@ class Agent:
 
         # Execution components
         self.approval_provider = approval_provider
-        self._loop = AgentLoop(self)
-        self._executor = ToolExecutor(self)
+        if loop is not None:
+            self._loop = loop
+        else:
+            shell = get_platform_info().get_preferred_shell().value
+            self._loop = AgentLoop(self, prompt_fn=system_prompt, shell_name=shell)
+        self._executor = executor or ToolExecutor(self)
 
         # Event handlers
         self._event_handlers: List[Callable[[AgentEvent], None]] = []
@@ -292,8 +300,6 @@ class Agent:
     def _inject_completed_subagent_jobs(self) -> int:
         """Inject completed background sub-agent summaries into parent history."""
         try:
-            from reuleauxcoder.extensions.subagent.manager import get_subagent_manager
-
             manager = get_subagent_manager(self)
         except Exception:
             return 0
