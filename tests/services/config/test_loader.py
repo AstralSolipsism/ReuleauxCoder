@@ -191,6 +191,7 @@ def test_parse_config_reads_peer_mcp_artifacts() -> None:
     assert config.mcp_artifact_root == "/srv/rcoder/mcp-artifacts"
     server = config.mcp_servers[0]
     assert server.placement == "peer"
+    assert server.distribution == "artifact"
     assert server.version == "1.0.0"
     assert server.launch is not None
     assert server.launch.command == "{{bundle}}/filesystem-mcp"
@@ -200,6 +201,44 @@ def test_parse_config_reads_peer_mcp_artifacts() -> None:
     assert server.requirements["node"] == "required"
     assert server.build["type"] == "node"
     assert server.permissions["tools"]["write_file"] == "require_approval"
+
+
+def test_parse_config_reads_command_mcp_manifest_fields() -> None:
+    loader = ConfigLoader()
+    config = loader._parse_config(
+        {
+            "models": {
+                "profiles": {"main": {"model": "gpt-main", "api_key": "key"}}
+            },
+            "mcp": {
+                "servers": {
+                    "gitnexus": {
+                        "command": "gitnexus",
+                        "args": ["mcp"],
+                        "placement": "peer",
+                        "distribution": "command",
+                        "version": "1.6.3",
+                        "check": "gitnexus --version",
+                        "install": "npm install -g gitnexus@1.6.3",
+                        "source": "npm:gitnexus",
+                        "description": "Repository indexing MCP server",
+                        "requirements": {"node": ">=20", "npm": "required"},
+                    }
+                }
+            },
+            "modes": {"profiles": {"coder": {}}},
+        }
+    )
+
+    server = config.mcp_servers[0]
+    assert server.name == "gitnexus"
+    assert server.distribution == "command"
+    assert server.args == ["mcp"]
+    assert server.check == "gitnexus --version"
+    assert server.install == "npm install -g gitnexus@1.6.3"
+    assert server.source == "npm:gitnexus"
+    assert server.description == "Repository indexing MCP server"
+    assert server.requirements["node"] == ">=20"
 
 
 def test_parse_config_reads_environment_cli_tools() -> None:

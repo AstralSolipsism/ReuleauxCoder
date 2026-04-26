@@ -7,6 +7,7 @@ from typing import Any, Literal, Optional
 
 
 MCPPlacement = Literal["server", "peer", "both"]
+MCPDistribution = Literal["command", "artifact"]
 
 
 @dataclass
@@ -81,12 +82,17 @@ class MCPServerConfig:
     cwd: Optional[str] = None
     enabled: bool = True
     placement: MCPPlacement = "server"
+    distribution: MCPDistribution = "command"
     version: Optional[str] = None
     launch: MCPLaunchConfig | None = None
     artifacts: dict[str, MCPArtifactConfig] = field(default_factory=dict)
     permissions: dict[str, Any] = field(default_factory=dict)
     requirements: dict[str, str] = field(default_factory=dict)
     build: dict[str, Any] = field(default_factory=dict)
+    check: str = ""
+    install: str = ""
+    source: str = ""
+    description: str = ""
 
     def to_dict(self) -> dict:
         """Convert to dictionary format for serialization."""
@@ -97,6 +103,7 @@ class MCPServerConfig:
             "cwd": self.cwd,
             "enabled": self.enabled,
             "placement": self.placement,
+            "distribution": self.distribution,
             "version": self.version,
             "launch": self.launch.to_dict() if self.launch else None,
             "artifacts": {
@@ -106,6 +113,10 @@ class MCPServerConfig:
             "permissions": self.permissions,
             "requirements": self.requirements,
             "build": self.build,
+            "check": self.check,
+            "install": self.install,
+            "source": self.source,
+            "description": self.description,
         }
 
     @classmethod
@@ -117,6 +128,7 @@ class MCPServerConfig:
             placement = raw_placement  # type: ignore[assignment]
         else:
             placement = "server"
+        raw_distribution = str(d.get("distribution", "")).lower()
         raw_artifacts = d.get("artifacts", {})
         artifacts = (
             {
@@ -127,6 +139,13 @@ class MCPServerConfig:
             if isinstance(raw_artifacts, dict)
             else {}
         )
+        distribution: MCPDistribution
+        if raw_distribution in {"command", "artifact"}:
+            distribution = raw_distribution  # type: ignore[assignment]
+        elif artifacts:
+            distribution = "artifact"
+        else:
+            distribution = "command"
         raw_launch = d.get("launch")
         launch = (
             MCPLaunchConfig.from_dict(raw_launch)
@@ -150,6 +169,7 @@ class MCPServerConfig:
             cwd=d.get("cwd"),
             enabled=d.get("enabled", True),
             placement=placement,
+            distribution=distribution,
             version=str(d["version"]) if d.get("version") is not None else None,
             launch=launch,
             artifacts=artifacts,
@@ -162,6 +182,10 @@ class MCPServerConfig:
                 else {}
             ),
             build=dict(raw_build) if isinstance(raw_build, dict) else {},
+            check=str(d.get("check", "")),
+            install=str(d.get("install", "")),
+            source=str(d.get("source", "")),
+            description=str(d.get("description", "")),
         )
 
 

@@ -42,6 +42,30 @@ def parse_args():
     mcp_parser = subparsers.add_parser("mcp", help="Manage MCP configuration")
     mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command")
 
+    mcp_record = mcp_subparsers.add_parser(
+        "record", help="Record a server-authoritative MCP manifest entry"
+    )
+    mcp_record.add_argument("server_name")
+    mcp_record.add_argument("--command", required=True, dest="mcp_tool_command")
+    mcp_record.add_argument("--arg", action="append", dest="mcp_arg", default=[])
+    mcp_record.add_argument("--env", action="append", default=[])
+    mcp_record.add_argument(
+        "--placement",
+        choices=["server", "peer", "both"],
+        default="peer",
+    )
+    mcp_record.add_argument(
+        "--distribution",
+        choices=["command", "artifact"],
+        default="command",
+    )
+    mcp_record.add_argument("--version")
+    mcp_record.add_argument("--check")
+    mcp_record.add_argument("--install")
+    mcp_record.add_argument("--requirement", action="append", default=[])
+    mcp_record.add_argument("--source")
+    mcp_record.add_argument("--description")
+
     install_node = mcp_subparsers.add_parser(
         "install-node", help="Install a Node/npx MCP server"
     )
@@ -53,7 +77,7 @@ def parse_args():
         choices=["server", "peer", "both"],
         default="server",
     )
-    install_node.add_argument("--platform", nargs="*")
+    install_node.add_argument("--platform", nargs="+", action="append")
     install_node.add_argument("--arg", action="append", dest="node_arg", default=[])
     install_node.add_argument("--env", action="append", default=[])
 

@@ -47,6 +47,7 @@ def test_peer_mcp_server_config_roundtrip() -> None:
         name="filesystem",
         command="",
         placement="peer",
+        distribution="artifact",
         version="1.0.0",
         launch=MCPLaunchConfig(
             command="{{bundle}}/filesystem-mcp",
@@ -68,6 +69,49 @@ def test_peer_mcp_server_config_roundtrip() -> None:
     restored = MCPServerConfig.from_dict("filesystem", config.to_dict())
 
     assert restored == config
+
+
+def test_legacy_peer_mcp_with_artifacts_defaults_to_artifact_distribution() -> None:
+    config = MCPServerConfig.from_dict(
+        "filesystem",
+        {
+            "command": "",
+            "placement": "peer",
+            "version": "1.0.0",
+            "artifacts": {
+                "linux-amd64": {
+                    "path": "filesystem/1.0.0/linux-amd64.tar.gz",
+                    "sha256": "abc",
+                }
+            },
+        },
+    )
+
+    assert config.distribution == "artifact"
+
+
+def test_mcp_server_config_reads_manifest_fields() -> None:
+    config = MCPServerConfig.from_dict(
+        "gitnexus",
+        {
+            "command": "gitnexus",
+            "args": ["mcp"],
+            "placement": "peer",
+            "distribution": "command",
+            "check": "gitnexus --version",
+            "install": "npm install -g gitnexus@1.6.3",
+            "source": "npm:gitnexus",
+            "description": "Repository indexing MCP server",
+            "requirements": {"node": ">=20", "npm": "required"},
+        },
+    )
+
+    assert config.distribution == "command"
+    assert config.check == "gitnexus --version"
+    assert config.install == "npm install -g gitnexus@1.6.3"
+    assert config.source == "npm:gitnexus"
+    assert config.description == "Repository indexing MCP server"
+    assert config.requirements["node"] == ">=20"
 
 
 def test_mcp_server_config_accepts_both_placement() -> None:

@@ -105,6 +105,53 @@ def test_parse_env_record(monkeypatch: pytest.MonkeyPatch) -> None:
     assert args.source == "npm"
 
 
+def test_parse_mcp_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "rcoder",
+            "-c",
+            "config.yaml",
+            "mcp",
+            "record",
+            "gitnexus",
+            "--command",
+            "gitnexus",
+            "--arg",
+            "mcp",
+            "--placement",
+            "peer",
+            "--distribution",
+            "command",
+            "--version",
+            "1.6.3",
+            "--check",
+            "gitnexus --version",
+            "--install",
+            "npm install -g gitnexus@1.6.3",
+            "--requirement",
+            "node=>=20",
+            "--requirement",
+            "npm=required",
+            "--source",
+            "npm:gitnexus",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.config == "config.yaml"
+    assert args.command == "mcp"
+    assert args.mcp_command == "record"
+    assert args.server_name == "gitnexus"
+    assert args.mcp_tool_command == "gitnexus"
+    assert args.mcp_arg == ["mcp"]
+    assert args.placement == "peer"
+    assert args.distribution == "command"
+    assert args.requirement == ["node=>=20", "npm=required"]
+
+
 def test_parse_mcp_install_node_defaults_to_server(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         sys,
@@ -160,9 +207,36 @@ def test_parse_mcp_install_node_peer_options(monkeypatch: pytest.MonkeyPatch) ->
     args = parse_args()
 
     assert args.placement == "both"
-    assert args.platform == ["windows-amd64"]
+    assert args.platform == [["windows-amd64"]]
     assert args.node_arg == ["--root", "{{workspace}}"]
     assert args.env == ["MODE=local"]
+
+
+def test_parse_mcp_install_node_repeated_platforms(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "rcoder",
+            "mcp",
+            "install-node",
+            "filesystem",
+            "--package",
+            "@demo/filesystem@latest",
+            "--bin",
+            "filesystem-mcp",
+            "--placement",
+            "peer",
+            "--platform",
+            "linux-amd64",
+            "--platform",
+            "windows-amd64",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.platform == [["linux-amd64"], ["windows-amd64"]]
 
 
 def test_parse_args_version_exits(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -23,6 +23,7 @@ from reuleauxcoder.extensions.mcp.artifacts import (
     run_mcp_artifact_cli,
     run_mcp_install_node_cli,
 )
+from reuleauxcoder.extensions.mcp.manifest import run_mcp_record_cli
 from reuleauxcoder.services.config.loader import ExampleConfigError
 
 
@@ -38,6 +39,10 @@ def main():
         args, "env_command", None
     ) == "record":
         sys.exit(run_env_record_cli(args))
+    if getattr(args, "command", None) == "mcp" and getattr(
+        args, "mcp_command", None
+    ) == "record":
+        sys.exit(run_mcp_record_cli(args))
     if getattr(args, "command", None) == "mcp" and getattr(
         args, "mcp_command", None
     ) == "artifact":
