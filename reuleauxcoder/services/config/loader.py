@@ -464,6 +464,9 @@ class ConfigLoader:
                 bootstrap_access_secret=str(
                     remote_exec_config.get("bootstrap_access_secret", "")
                 ),
+                admin_access_secret=str(
+                    remote_exec_config.get("admin_access_secret", "")
+                ),
                 bootstrap_token_ttl_sec=int(
                     remote_exec_config.get("bootstrap_token_ttl_sec", 300)
                 ),

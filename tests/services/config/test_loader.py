@@ -220,6 +220,7 @@ def test_parse_config_reads_remote_exec_settings() -> None:
                 "host_mode": True,
                 "relay_bind": "0.0.0.0:9999",
                 "bootstrap_access_secret": "top-secret",
+                "admin_access_secret": "admin-secret",
                 "bootstrap_token_ttl_sec": 111,
                 "peer_token_ttl_sec": 222,
                 "heartbeat_interval_sec": 7,
@@ -234,6 +235,7 @@ def test_parse_config_reads_remote_exec_settings() -> None:
     assert config.remote_exec.host_mode is True
     assert config.remote_exec.relay_bind == "0.0.0.0:9999"
     assert config.remote_exec.bootstrap_access_secret == "top-secret"
+    assert config.remote_exec.admin_access_secret == "admin-secret"
     assert config.remote_exec.bootstrap_token_ttl_sec == 111
     assert config.remote_exec.peer_token_ttl_sec == 222
     assert config.remote_exec.heartbeat_interval_sec == 7

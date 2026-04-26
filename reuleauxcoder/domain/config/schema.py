@@ -109,6 +109,19 @@ CONFIG_SCHEMA = {
             }
         }
     },
+    "remote_exec": {
+        "enabled": "bool (default: false)",
+        "host_mode": "bool (default: false)",
+        "relay_bind": "string (default: 127.0.0.1:8765)",
+        "bootstrap_access_secret": "string (optional, used only for peer bootstrap)",
+        "admin_access_secret": "string (optional, used only for /remote/admin/* configuration APIs)",
+        "bootstrap_token_ttl_sec": "int (default: 300)",
+        "peer_token_ttl_sec": "int (default: 3600)",
+        "heartbeat_interval_sec": "int (default: 10)",
+        "heartbeat_timeout_sec": "int (default: 30)",
+        "default_tool_timeout_sec": "int (default: 30)",
+        "shell_timeout_sec": "int (default: 120)",
+    },
 }
 
 # Default values for configuration

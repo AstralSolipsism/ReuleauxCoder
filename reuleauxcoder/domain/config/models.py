@@ -510,6 +510,7 @@ class RemoteExecConfig:
     host_mode: bool = False
     relay_bind: str = "127.0.0.1:8765"
     bootstrap_access_secret: str = ""
+    admin_access_secret: str = ""
     bootstrap_token_ttl_sec: int = 300
     peer_token_ttl_sec: int = 3600
     heartbeat_interval_sec: int = 10
