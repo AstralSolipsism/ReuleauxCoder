@@ -117,6 +117,7 @@ class ProviderConfig:
     id: str
     type: ProviderType = "openai_chat"
     compat: ProviderCompat = "generic"
+    enabled: bool = True
     api_key: str = ""
     base_url: Optional[str] = None
     headers: dict[str, str] = field(default_factory=dict)
@@ -131,6 +132,7 @@ class ProviderConfig:
         data: dict[str, Any] = {
             "type": self.type,
             "compat": self.compat,
+            "enabled": self.enabled,
             "api_key": self.api_key,
             "base_url": self.base_url,
             "headers": dict(self.headers),
@@ -161,6 +163,7 @@ class ProviderConfig:
             id=provider_id,
             type=provider_type,
             compat=compat,
+            enabled=bool(d.get("enabled", True)),
             api_key=str(d.get("api_key", "") or ""),
             base_url=base_url,
             headers=(
