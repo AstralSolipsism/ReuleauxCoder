@@ -109,6 +109,7 @@ def restore_config_runtime_defaults(config: Config, agent: Agent) -> None:
             agent.llm,
             profile,
             debug_trace=getattr(config, "llm_debug_trace", False),
+            providers=getattr(config, "providers", None),
         )
         agent.context.reconfigure(profile.max_context_tokens)
     else:
@@ -168,19 +169,11 @@ def apply_session_runtime_state(session: Session, config: Config, agent: Agent) 
     profiles = getattr(config, "model_profiles", {}) or {}
     if main_profile and main_profile in profiles:
         profile = profiles[main_profile]
-        agent.llm.reconfigure(
-            model=profile.model,
-            api_key=profile.api_key,
-            base_url=profile.base_url,
-            temperature=profile.temperature,
-            max_tokens=profile.max_tokens,
-            preserve_reasoning_content=profile.preserve_reasoning_content,
-            backfill_reasoning_content_for_tool_calls=profile.backfill_reasoning_content_for_tool_calls,
-            reasoning_effort=profile.reasoning_effort,
-            thinking_enabled=profile.thinking_enabled,
-            reasoning_replay_mode=profile.reasoning_replay_mode,
-            reasoning_replay_placeholder=profile.reasoning_replay_placeholder,
+        reconfigure_llm_from_settings(
+            agent.llm,
+            profile,
             debug_trace=agent.llm.debug_trace,
+            providers=getattr(config, "providers", None),
         )
         agent.context.reconfigure(profile.max_context_tokens)
         setattr(agent, "active_main_model_profile", main_profile)

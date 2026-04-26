@@ -1,0 +1,296 @@
+"""OpenAI Responses provider adapter."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from openai import OpenAI
+
+from reuleauxcoder.domain.config.models import ProviderConfig
+from reuleauxcoder.domain.llm.models import ToolCall
+from reuleauxcoder.domain.providers.models import (
+    ProviderDiagnostic,
+    ProviderRequest,
+    ProviderResponse,
+)
+from reuleauxcoder.services.providers.compat import apply_openai_responses_qwen
+
+
+def convert_chat_tools_to_responses_tools(tools: list[dict[str, Any]]) -> list[dict]:
+    converted: list[dict] = []
+    for tool in tools:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        if not isinstance(function, dict):
+            continue
+        converted.append(
+            {
+                "type": "function",
+                "name": function.get("name", ""),
+                "description": function.get("description", ""),
+                "parameters": function.get("parameters", {"type": "object"}),
+            }
+        )
+    return converted
+
+
+def convert_messages_to_responses_input(messages: list[dict[str, Any]]) -> list[dict]:
+    converted: list[dict] = []
+    for message in messages:
+        role = message.get("role")
+        if role == "tool":
+            converted.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": message.get("tool_call_id", ""),
+                    "output": str(message.get("content") or ""),
+                }
+            )
+            continue
+        if role == "assistant" and message.get("tool_calls"):
+            content = message.get("content")
+            if content:
+                converted.append({"role": "assistant", "content": str(content)})
+            for tool_call in message.get("tool_calls") or []:
+                function = tool_call.get("function") or {}
+                converted.append(
+                    {
+                        "type": "function_call",
+                        "call_id": tool_call.get("id", ""),
+                        "name": function.get("name", ""),
+                        "arguments": function.get("arguments", "{}"),
+                    }
+                )
+            continue
+        if role in {"system", "user", "assistant"}:
+            converted.append(
+                {
+                    "role": "developer" if role == "system" else role,
+                    "content": str(message.get("content") or ""),
+                }
+            )
+    return converted
+
+
+class OpenAIResponsesProvider:
+    """Provider adapter for OpenAI Responses API."""
+
+    provider_type = "openai_responses"
+
+    def __init__(self, config: ProviderConfig):
+        self.config = config
+        self.provider_id = config.id
+        client_kwargs: dict[str, Any] = {
+            "api_key": config.api_key,
+            "base_url": config.base_url,
+            "timeout": config.timeout_sec,
+        }
+        if config.headers:
+            client_kwargs["default_headers"] = config.headers
+        self.client = OpenAI(**client_kwargs)
+
+    def build_request_params(self, request: ProviderRequest) -> dict:
+        diagnostics: list[ProviderDiagnostic] = []
+        params: dict[str, Any] = {
+            "model": request.model,
+            "input": convert_messages_to_responses_input(request.messages),
+            "stream": True,
+            "max_output_tokens": request.max_tokens,
+        }
+        if self.config.extra.get("send_temperature"):
+            params["temperature"] = request.temperature
+        if request.tools:
+            if not self.config.capabilities.tools:
+                raise RuntimeError(
+                    f"Provider '{self.provider_id}' does not support tools"
+                )
+            params["tools"] = convert_chat_tools_to_responses_tools(request.tools)
+        if request.tool_choice:
+            if (
+                request.tool_choice == "required"
+                and not self.config.capabilities.tool_choice_required
+            ):
+                params["tool_choice"] = "auto"
+                diagnostics.append(
+                    ProviderDiagnostic(
+                        code="tool_choice_required_downgraded",
+                        message=(
+                            f"Provider '{self.provider_id}' does not declare required tool_choice support; "
+                            "tool_choice was downgraded to auto."
+                        ),
+                    )
+                )
+            else:
+                params["tool_choice"] = request.tool_choice
+        qwen_compat = apply_openai_responses_qwen(
+            self.config, request, params, diagnostics
+        )
+        if request.reasoning_effort and not qwen_compat:
+            if self.config.capabilities.reasoning_effort:
+                reasoning: dict[str, Any] = {"effort": request.reasoning_effort}
+                summary = self.config.extra.get("reasoning_summary", "auto")
+                if summary:
+                    reasoning["summary"] = str(summary)
+                params["reasoning"] = reasoning
+            else:
+                diagnostics.append(
+                    ProviderDiagnostic(
+                        code="reasoning_effort_unsupported",
+                        message=(
+                            f"Provider '{self.provider_id}' does not declare reasoning_effort support; "
+                            "the option was ignored."
+                        ),
+                    )
+                )
+        if (
+            request.thinking_enabled is not None
+            and not qwen_compat
+            and not self.config.capabilities.thinking
+        ):
+            diagnostics.append(
+                ProviderDiagnostic(
+                    code="thinking_unsupported",
+                    message=(
+                        f"Provider '{self.provider_id}' does not declare thinking support; "
+                        "the option was ignored."
+                    ),
+                )
+            )
+        if diagnostics:
+            request.metadata.setdefault("provider_diagnostics", []).extend(
+                diagnostics
+            )
+        return params
+
+    def chat(self, request: ProviderRequest) -> ProviderResponse:
+        params = request.request_params or self.build_request_params(request)
+        diagnostics = [
+            item
+            for item in request.metadata.get("provider_diagnostics", [])
+            if isinstance(item, ProviderDiagnostic)
+        ]
+        stream = self.client.responses.create(**params)
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tokens: list[str] = []
+        debug_events: list[dict[str, Any]] = []
+        tool_calls: dict[str, dict[str, str]] = {}
+        prompt_tokens = 0
+        completion_tokens = 0
+        provider_response_id: str | None = None
+
+        for event in stream:
+            event_type = getattr(event, "type", "")
+            debug_events.append({"type": event_type})
+            if event_type == "response.created":
+                response = getattr(event, "response", None)
+                provider_response_id = getattr(response, "id", None)
+                continue
+            if event_type == "response.output_text.delta":
+                delta = str(getattr(event, "delta", "") or "")
+                if delta:
+                    content_parts.append(delta)
+                    tokens.append(delta)
+                    if request.on_token is not None:
+                        request.on_token(delta)
+                continue
+            if event_type in {
+                "response.reasoning_text.delta",
+                "response.reasoning_summary_text.delta",
+            }:
+                delta = str(getattr(event, "delta", "") or "")
+                if delta:
+                    reasoning_parts.append(delta)
+                continue
+            if event_type == "response.output_item.added":
+                item = getattr(event, "item", None)
+                if getattr(item, "type", None) == "function_call":
+                    item_id = str(getattr(item, "id", None) or getattr(item, "call_id", ""))
+                    tool_calls[item_id] = {
+                        "id": str(getattr(item, "call_id", item_id) or item_id),
+                        "name": str(getattr(item, "name", "") or ""),
+                        "args": str(getattr(item, "arguments", "") or ""),
+                    }
+                continue
+            if event_type == "response.function_call_arguments.delta":
+                item_id = str(getattr(event, "item_id", "") or getattr(event, "call_id", ""))
+                if item_id:
+                    tool_calls.setdefault(
+                        item_id,
+                        {
+                            "id": str(getattr(event, "call_id", item_id) or item_id),
+                            "name": "",
+                            "args": "",
+                        },
+                    )["args"] += str(getattr(event, "delta", "") or "")
+                continue
+            if event_type == "response.output_item.done":
+                item = getattr(event, "item", None)
+                if getattr(item, "type", None) == "function_call":
+                    item_id = str(getattr(item, "id", None) or getattr(item, "call_id", ""))
+                    raw = tool_calls.setdefault(
+                        item_id,
+                        {
+                            "id": str(getattr(item, "call_id", item_id) or item_id),
+                            "name": "",
+                            "args": "",
+                        },
+                    )
+                    raw["id"] = str(getattr(item, "call_id", raw["id"]) or raw["id"])
+                    raw["name"] = str(getattr(item, "name", raw["name"]) or raw["name"])
+                    raw["args"] = str(
+                        getattr(item, "arguments", raw["args"]) or raw["args"]
+                    )
+                continue
+            if event_type == "response.completed":
+                response = getattr(event, "response", None)
+                provider_response_id = getattr(response, "id", provider_response_id)
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    prompt_tokens = getattr(usage, "input_tokens", 0) or getattr(
+                        usage, "prompt_tokens", 0
+                    ) or 0
+                    completion_tokens = getattr(
+                        usage, "output_tokens", 0
+                    ) or getattr(usage, "completion_tokens", 0) or 0
+                continue
+            if event_type == "error":
+                error = getattr(event, "error", None)
+                raise RuntimeError(str(getattr(error, "message", error)))
+
+        parsed: list[ToolCall] = []
+        for raw in tool_calls.values():
+            try:
+                arguments = json.loads(raw.get("args") or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            parsed.append(
+                ToolCall(
+                    id=raw.get("id") or f"tool_call_{len(parsed)}",
+                    name=raw.get("name") or "",
+                    arguments=arguments,
+                )
+            )
+        return ProviderResponse(
+            content="".join(content_parts),
+            reasoning_content="".join(reasoning_parts) if reasoning_parts else None,
+            tool_calls=parsed,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            tokens=tokens,
+            provider_response_id=provider_response_id,
+            diagnostics=diagnostics,
+            provider_extra={
+                "request_params": dict(params),
+                "debug_stream_events": debug_events,
+            },
+        )
+
+    def test(self, *, model: str, prompt: str = "ping") -> ProviderResponse:
+        return self.chat(
+            ProviderRequest(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=32,
+            )
+        )

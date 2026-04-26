@@ -9,6 +9,7 @@ CONFIG_SCHEMA = {
         "profiles": {
             "profile_name": {
                 "model": "string (required)",
+                "provider": "string (optional, references providers.items.<provider_id>)",
                 "api_key": "string (required)",
                 "base_url": "string (optional)",
                 "max_tokens": "int (default: 4096)",
@@ -22,6 +23,21 @@ CONFIG_SCHEMA = {
                 "reasoning_replay_placeholder": "string (optional, placeholder text injected when backfilling missing reasoning_content; default: [PLACE_HOLDER])",
             }
         },
+    },
+    "providers": {
+        "items": {
+            "provider_id": {
+                "type": "string (one of openai_chat, anthropic_messages, openai_responses)",
+                "compat": "string (optional, one of generic, deepseek, kimi, glm, qwen, zenmux; inferred from base_url when omitted)",
+                "api_key": "string (optional, supports ${ENV_NAME})",
+                "base_url": "string (optional, supports ${ENV_NAME})",
+                "headers": "dict of strings (optional)",
+                "timeout_sec": "int (default: 120)",
+                "max_retries": "int (default: 3)",
+                "capabilities": "dict of booleans (optional)",
+                "extra": "dict (optional, provider-specific settings)",
+            }
+        }
     },
     "modes": {
         "active": "string (optional, default: coder)",

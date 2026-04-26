@@ -186,6 +186,7 @@ starting the MCP server.
 - `/reset` only clears the current in-memory conversation. It does not delete saved sessions.
 - `/new` starts a fresh conversation and auto-saves the previous one first.
 - `/model` lists configured model profiles from `config.yaml`; `/model <profile>` switches to one and persists the active profile.
+- Model profiles may reference server-side LLM providers. The provider keeps API keys, base URLs, protocol type, and capability flags on the host, while `/model` remains the runtime switching command.
 - `/skills` shows discovered skills; `/skills reload` rescans workspace/user skill directories; `/skills enable|disable <name>` persists skill state in workspace config.
 - `/session <id>` resumes a saved session in the current process; `rcoder -r <id>` resumes directly on startup.
 - `/approval set` currently supports targets like `tool:<name>`, `mcp`, `mcp:<server>`, and `mcp:<server>:<tool>` with actions `allow`, `warn`, `require_approval`, or `deny`.
@@ -202,6 +203,57 @@ rcoder [-c CONFIG] [-m MODEL] [-p PROMPT] [-r ID]
 - `-p, --prompt`: one-shot prompt mode (non-interactive)
 - `-r, --resume`: resume a saved session by ID
 - `-v, --version`: show version
+
+## Provider Management
+
+LLM providers are stored in `providers.items`. A model profile can reference a
+provider by id, while keeping model-specific settings in `models.profiles`.
+
+```yaml
+providers:
+  items:
+    anthropic-main:
+      type: anthropic_messages
+      compat: generic
+      api_key: ${ANTHROPIC_API_KEY}
+      capabilities:
+        tools: true
+        thinking: true
+
+models:
+  active_main: claude-coder
+  profiles:
+    claude-coder:
+      provider: anthropic-main
+      model: claude-sonnet-4-5
+      max_tokens: 8192
+```
+
+```bash
+rcoder provider record anthropic-main --type anthropic_messages --compat generic --api-key-env ANTHROPIC_API_KEY
+rcoder provider list
+rcoder provider test anthropic-main --model claude-sonnet-4-5
+```
+
+Supported provider types are `openai_chat`, `anthropic_messages`, and
+`openai_responses`. `provider record` only writes config; `provider test` is the
+explicit live smoke command.
+
+Provider `compat` profiles describe service-specific behavior on top of the
+wire protocol. Supported values are `generic`, `deepseek`, `kimi`, `glm`,
+`qwen`, and `zenmux`. If omitted, EZCode infers common providers from
+`base_url`; new entries should record it explicitly.
+
+```bash
+rcoder provider record deepseek --type openai_chat --compat deepseek --api-key-env DEEPSEEK_API_KEY --base-url https://api.deepseek.com --capability thinking=true
+rcoder provider record kimi --type openai_chat --compat kimi --api-key-env MOONSHOT_API_KEY --base-url https://api.moonshot.ai/v1 --capability thinking=true
+rcoder provider record glm --type openai_chat --compat glm --api-key-env BIGMODEL_API_KEY --base-url https://open.bigmodel.cn/api/paas/v4 --capability thinking=true
+rcoder provider record qwen --type openai_chat --compat qwen --api-key-env DASHSCOPE_API_KEY --base-url https://dashscope.aliyuncs.com/compatible-mode/v1 --capability thinking=true --extra preserve_thinking=true
+rcoder provider record zenmux --type openai_chat --compat zenmux --api-key-env ZENMUX_API_KEY --base-url https://zenmux.ai/api/v1 --capability thinking=true
+```
+
+Compat profiles keep provider keys and service quirks on the host. Remote peers
+never receive provider API keys, base URLs, or model credentials.
 
 ## License
 

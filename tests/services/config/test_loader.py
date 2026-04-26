@@ -1,7 +1,10 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from reuleauxcoder.services.config.loader import ConfigLoader
+from reuleauxcoder.services.config.loader import ConfigEnvironmentError
 
 
 def test_load_yaml_returns_empty_dict_for_missing_file(tmp_path: Path) -> None:
@@ -113,6 +116,94 @@ def test_parse_config_selects_active_profiles_and_modes() -> None:
     assert config.prompt.system_append == "Always answer in Chinese."
     assert config.preserve_reasoning_content is True
     assert config.backfill_reasoning_content_for_tool_calls is True
+
+
+def test_parse_config_reads_provider_backed_profiles() -> None:
+    loader = ConfigLoader()
+    config = loader._parse_config(
+        {
+            "providers": {
+                "items": {
+                    "anthropic-main": {
+                        "type": "anthropic_messages",
+                        "compat": "deepseek",
+                        "api_key": "sk-ant",
+                        "base_url": "https://api.anthropic.com",
+                        "capabilities": {"thinking": True},
+                    }
+                }
+            },
+            "models": {
+                "active_main": "main",
+                "profiles": {
+                    "main": {
+                        "provider": "anthropic-main",
+                        "model": "claude-sonnet",
+                    }
+                },
+            },
+            "modes": {"profiles": {"coder": {}}},
+        }
+    )
+
+    assert config.providers.items["anthropic-main"].type == "anthropic_messages"
+    assert config.providers.items["anthropic-main"].compat == "deepseek"
+    assert config.model_profiles["main"].provider == "anthropic-main"
+    assert config.api_key == "sk-ant"
+    assert config.base_url == "https://api.anthropic.com"
+
+
+def test_expand_env_refs_expands_provider_and_profile_runtime_fields(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EZ_PROVIDER_KEY", "sk-env")
+    monkeypatch.setenv("EZ_BASE_URL", "https://env.example/v1")
+
+    expanded = ConfigLoader()._expand_env_refs(
+        {
+            "providers": {
+                "items": {
+                    "openai": {
+                        "type": "openai_chat",
+                        "api_key": "${EZ_PROVIDER_KEY}",
+                    }
+                }
+            },
+            "models": {
+                "profiles": {
+                    "main": {
+                        "model": "gpt",
+                        "api_key": "${EZ_PROVIDER_KEY}",
+                        "base_url": "${EZ_BASE_URL}",
+                    }
+                }
+            },
+        }
+    )
+
+    assert expanded["providers"]["items"]["openai"]["api_key"] == "sk-env"
+    assert expanded["models"]["profiles"]["main"]["api_key"] == "sk-env"
+    assert expanded["models"]["profiles"]["main"]["base_url"] == "https://env.example/v1"
+
+
+def test_expand_env_refs_reports_missing_env_var() -> None:
+    loader = ConfigLoader()
+
+    with pytest.raises(ConfigEnvironmentError) as exc:
+        loader._expand_env_refs(
+            {
+                "providers": {
+                    "items": {
+                        "openai": {
+                            "type": "openai_chat",
+                            "api_key": "${EZ_MISSING_KEY}",
+                        }
+                    }
+                }
+            }
+        )
+
+    assert "EZ_MISSING_KEY" in str(exc.value)
 
 
 def test_parse_config_reads_remote_exec_settings() -> None:

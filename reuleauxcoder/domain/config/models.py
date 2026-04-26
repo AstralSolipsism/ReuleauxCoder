@@ -8,6 +8,180 @@ from typing import Any, Literal, Optional
 
 MCPPlacement = Literal["server", "peer", "both"]
 MCPDistribution = Literal["command", "artifact"]
+ProviderType = Literal["openai_chat", "anthropic_messages", "openai_responses"]
+ProviderCompat = Literal["generic", "deepseek", "kimi", "glm", "qwen", "zenmux"]
+
+SUPPORTED_PROVIDER_COMPATS = {"generic", "deepseek", "kimi", "glm", "qwen", "zenmux"}
+
+
+def normalize_provider_compat(value: Any) -> ProviderCompat:
+    """Normalize a configured provider compatibility profile."""
+
+    normalized = str(value or "generic").strip().lower()
+    if normalized in SUPPORTED_PROVIDER_COMPATS:
+        return normalized  # type: ignore[return-value]
+    return "generic"
+
+
+def infer_provider_compat(base_url: str | None) -> ProviderCompat:
+    """Infer a provider compat profile from a known service endpoint."""
+
+    url = str(base_url or "").lower()
+    if "api.deepseek.com" in url:
+        return "deepseek"
+    if "moonshot" in url or "kimi" in url:
+        return "kimi"
+    if "bigmodel.cn" in url or "zhipu" in url or "z.ai" in url:
+        return "glm"
+    if "dashscope" in url or "aliyuncs.com" in url or "bailian" in url:
+        return "qwen"
+    if "zenmux.ai" in url:
+        return "zenmux"
+    return "generic"
+
+
+@dataclass
+class ProviderCapabilities:
+    """Declared LLM provider capabilities used for request shaping."""
+
+    chat: bool = True
+    streaming: bool = True
+    tools: bool = True
+    parallel_tools: bool = True
+    tool_choice_required: bool = False
+    reasoning_effort: bool = False
+    thinking: bool = False
+    thinking_signature: bool = False
+    image_input: bool = False
+    responses_api: bool = False
+
+    def to_dict(self) -> dict[str, bool]:
+        return {
+            "chat": self.chat,
+            "streaming": self.streaming,
+            "tools": self.tools,
+            "parallel_tools": self.parallel_tools,
+            "tool_choice_required": self.tool_choice_required,
+            "reasoning_effort": self.reasoning_effort,
+            "thinking": self.thinking,
+            "thinking_signature": self.thinking_signature,
+            "image_input": self.image_input,
+            "responses_api": self.responses_api,
+        }
+
+    @classmethod
+    def defaults_for(cls, provider_type: str) -> "ProviderCapabilities":
+        normalized = provider_type.strip().lower()
+        if normalized == "anthropic_messages":
+            return cls(
+                tools=True,
+                parallel_tools=True,
+                tool_choice_required=True,
+                thinking=True,
+                thinking_signature=True,
+            )
+        if normalized == "openai_responses":
+            return cls(
+                tools=True,
+                parallel_tools=True,
+                tool_choice_required=True,
+                reasoning_effort=True,
+                responses_api=True,
+            )
+        return cls(
+            tools=True,
+            parallel_tools=True,
+            tool_choice_required=False,
+            reasoning_effort=True,
+            thinking=True,
+        )
+
+    @classmethod
+    def from_dict(
+        cls, d: dict[str, Any] | None, *, provider_type: str = "openai_chat"
+    ) -> "ProviderCapabilities":
+        defaults = cls.defaults_for(provider_type)
+        if not isinstance(d, dict):
+            return defaults
+        data = defaults.to_dict()
+        for key, value in d.items():
+            if key in data:
+                data[key] = bool(value)
+        return cls(**data)
+
+
+@dataclass
+class ProviderConfig:
+    """Server-side LLM provider configuration."""
+
+    id: str
+    type: ProviderType = "openai_chat"
+    compat: ProviderCompat = "generic"
+    api_key: str = ""
+    base_url: Optional[str] = None
+    headers: dict[str, str] = field(default_factory=dict)
+    timeout_sec: int = 120
+    max_retries: int = 3
+    capabilities: ProviderCapabilities = field(
+        default_factory=lambda: ProviderCapabilities.defaults_for("openai_chat")
+    )
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "type": self.type,
+            "compat": self.compat,
+            "api_key": self.api_key,
+            "base_url": self.base_url,
+            "headers": dict(self.headers),
+            "timeout_sec": self.timeout_sec,
+            "max_retries": self.max_retries,
+            "capabilities": self.capabilities.to_dict(),
+            "extra": dict(self.extra),
+        }
+        return data
+
+    @classmethod
+    def from_dict(cls, provider_id: str, d: dict[str, Any]) -> "ProviderConfig":
+        raw_type = str(d.get("type", "openai_chat")).strip().lower()
+        provider_type: ProviderType
+        if raw_type in {"anthropic_messages", "openai_responses"}:
+            provider_type = raw_type  # type: ignore[assignment]
+        else:
+            provider_type = "openai_chat"
+        raw_headers = d.get("headers", {})
+        raw_extra = d.get("extra", {})
+        base_url = str(d["base_url"]) if d.get("base_url") is not None else None
+        compat = (
+            normalize_provider_compat(d.get("compat"))
+            if d.get("compat") is not None
+            else infer_provider_compat(base_url)
+        )
+        return cls(
+            id=provider_id,
+            type=provider_type,
+            compat=compat,
+            api_key=str(d.get("api_key", "") or ""),
+            base_url=base_url,
+            headers=(
+                {str(k): str(v) for k, v in raw_headers.items()}
+                if isinstance(raw_headers, dict)
+                else {}
+            ),
+            timeout_sec=int(d.get("timeout_sec", 120) or 120),
+            max_retries=int(d.get("max_retries", 3) or 3),
+            capabilities=ProviderCapabilities.from_dict(
+                d.get("capabilities"), provider_type=provider_type
+            ),
+            extra=dict(raw_extra) if isinstance(raw_extra, dict) else {},
+        )
+
+
+@dataclass
+class ProvidersConfig:
+    """Configured LLM providers keyed by provider id."""
+
+    items: dict[str, ProviderConfig] = field(default_factory=dict)
 
 
 @dataclass
@@ -196,6 +370,7 @@ class ModelProfileConfig:
     name: str
     model: str
     api_key: str
+    provider: Optional[str] = None
     base_url: Optional[str] = None
     max_tokens: int = 4096
     temperature: float = 0.0
@@ -212,6 +387,7 @@ class ModelProfileConfig:
         return {
             "model": self.model,
             "api_key": self.api_key,
+            "provider": self.provider,
             "base_url": self.base_url,
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
@@ -231,6 +407,7 @@ class ModelProfileConfig:
             name=name,
             model=d.get("model", "gpt-4o"),
             api_key=d.get("api_key", ""),
+            provider=str(d["provider"]) if d.get("provider") is not None else None,
             base_url=d.get("base_url"),
             max_tokens=d.get("max_tokens", 4096),
             temperature=d.get("temperature", 0.0),
@@ -412,6 +589,7 @@ class Config:
     mcp_servers: list[MCPServerConfig] = field(default_factory=list)
     mcp_artifact_root: str = ".rcoder/mcp-artifacts"
     model_profiles: dict[str, ModelProfileConfig] = field(default_factory=dict)
+    providers: ProvidersConfig = field(default_factory=ProvidersConfig)
     active_model_profile: Optional[str] = None
     active_main_model_profile: Optional[str] = None
     active_sub_model_profile: Optional[str] = None
@@ -455,7 +633,10 @@ class Config:
     def validate(self) -> list[str]:
         """Validate configuration and return list of errors."""
         errors = []
-        if not self.api_key:
+        has_provider_backed_key = any(
+            provider.api_key for provider in self.providers.items.values()
+        )
+        if not self.api_key and not has_provider_backed_key:
             errors.append("api_key is required")
         if self.max_tokens < 1:
             errors.append("max_tokens must be positive")
@@ -482,7 +663,12 @@ class Config:
         ):
             errors.append("active_sub_model_profile must exist in model_profiles")
         for name, profile in self.model_profiles.items():
-            if not profile.api_key:
+            if profile.provider:
+                if profile.provider not in self.providers.items:
+                    errors.append(
+                        f"model_profiles[{name}].provider must exist in providers.items"
+                    )
+            elif not profile.api_key:
                 errors.append(f"model_profiles[{name}].api_key is required")
             if profile.max_tokens < 1:
                 errors.append(f"model_profiles[{name}].max_tokens must be positive")
@@ -493,6 +679,28 @@ class Config:
             if profile.temperature < 0 or profile.temperature > 2:
                 errors.append(
                     f"model_profiles[{name}].temperature must be between 0 and 2"
+                )
+
+        for provider_id, provider in self.providers.items.items():
+            if provider.compat not in SUPPORTED_PROVIDER_COMPATS:
+                errors.append(
+                    f"providers.items[{provider_id}].compat must be one of deepseek, generic, glm, kimi, qwen, zenmux"
+                )
+            if provider.type not in {
+                "openai_chat",
+                "anthropic_messages",
+                "openai_responses",
+            }:
+                errors.append(
+                    f"providers.items[{provider_id}].type must be one of openai_chat, anthropic_messages, openai_responses"
+                )
+            if provider.timeout_sec < 1:
+                errors.append(
+                    f"providers.items[{provider_id}].timeout_sec must be positive"
+                )
+            if provider.max_retries < 0:
+                errors.append(
+                    f"providers.items[{provider_id}].max_retries must be non-negative"
                 )
 
         if self.active_mode and self.active_mode not in self.modes:

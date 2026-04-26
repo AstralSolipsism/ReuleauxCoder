@@ -185,6 +185,7 @@ def _apply_main_profile_to_runtime(ctx, profile_name: str, profile) -> None:
         ctx.agent.llm,
         profile,
         debug_trace=debug_trace,
+        providers=getattr(ctx.config, "providers", None),
     )
     ctx.agent.context.reconfigure(profile.max_context_tokens)
     setattr(ctx.agent, "active_main_model_profile", profile_name)
@@ -253,8 +254,9 @@ def _handle_set_main_model(command, ctx) -> CommandResult:
     ctx.config.active_model_profile = profile_name
     ctx.config.active_main_model_profile = profile_name
     ctx.config.model = profile.model
-    ctx.config.api_key = profile.api_key
-    ctx.config.base_url = profile.base_url
+    provider = _profile_provider(ctx.config, profile)
+    ctx.config.api_key = profile.api_key or (provider.api_key if provider else "")
+    ctx.config.base_url = profile.base_url or (provider.base_url if provider else None)
     ctx.config.temperature = profile.temperature
     ctx.config.max_tokens = profile.max_tokens
     ctx.config.max_context_tokens = profile.max_context_tokens
@@ -374,6 +376,9 @@ def _build_model_profiles_payload(config, runtime_state=None) -> dict:
                 badges.append("SUB")
             badge_text = f" [{' | '.join(badges)}]" if badges else ""
             api_key = getattr(p, "api_key", "")
+            provider = _profile_provider(config, p)
+            if not api_key and provider is not None:
+                api_key = provider.api_key
             if api_key and len(api_key) >= 4:
                 api_hint = f"...{api_key[-4:]}"
             elif api_key:
@@ -387,7 +392,13 @@ def _build_model_profiles_payload(config, runtime_state=None) -> dict:
                 "active_main": active_main == name,
                 "active_sub": active_sub == name,
                 "model": p.model,
-                "base_url": p.base_url,
+                "provider": p.provider,
+                "provider_type": provider.type if provider else None,
+                "provider_compat": provider.compat if provider else None,
+                "provider_capabilities": (
+                    provider.capabilities.to_dict() if provider else {}
+                ),
+                "base_url": p.base_url or (provider.base_url if provider else None),
                 "max_tokens": p.max_tokens,
                 "temperature": p.temperature,
                 "max_context_tokens": p.max_context_tokens,
@@ -397,8 +408,20 @@ def _build_model_profiles_payload(config, runtime_state=None) -> dict:
 
             lines.append(f"### {name}{badge_text}")
             lines.append(f"- model: `{p.model}`")
-            if p.base_url:
-                lines.append(f"- base_url: `{p.base_url}`")
+            if provider is not None:
+                lines.append(
+                    f"- provider: `{provider.id}` ({provider.type}, compat={provider.compat})"
+                )
+                caps = [
+                    cap
+                    for cap, enabled in provider.capabilities.to_dict().items()
+                    if enabled
+                ]
+                if caps:
+                    lines.append(f"- capabilities: `{', '.join(sorted(caps))}`")
+            effective_base_url = p.base_url or (provider.base_url if provider else None)
+            if effective_base_url:
+                lines.append(f"- base_url: `{effective_base_url}`")
             lines.append(f"- max_tokens: {p.max_tokens}")
             lines.append(f"- temperature: {p.temperature}")
             lines.append(f"- max_context_tokens: {p.max_context_tokens}")
@@ -413,6 +436,14 @@ def _build_model_profiles_payload(config, runtime_state=None) -> dict:
         "markdown": "\n".join(lines),
         "profiles": profile_items,
     }
+
+
+def _profile_provider(config, profile):
+    provider_name = getattr(profile, "provider", None)
+    providers = getattr(getattr(config, "providers", None), "items", {}) or {}
+    if provider_name:
+        return providers.get(provider_name)
+    return None
 
 
 @register_command_module

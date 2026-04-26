@@ -39,6 +39,46 @@ def parse_args():
     env_record.add_argument("--source")
     env_record.add_argument("--description")
 
+    provider_parser = subparsers.add_parser(
+        "provider", help="Manage server-side LLM providers"
+    )
+    provider_subparsers = provider_parser.add_subparsers(dest="provider_command")
+
+    provider_list = provider_subparsers.add_parser(
+        "list", help="List configured LLM providers"
+    )
+
+    provider_record = provider_subparsers.add_parser(
+        "record", help="Record or update an LLM provider entry"
+    )
+    provider_record.add_argument("provider_id")
+    provider_record.add_argument(
+        "--type",
+        required=True,
+        dest="provider_type",
+        choices=["openai_chat", "anthropic_messages", "openai_responses"],
+    )
+    provider_record.add_argument(
+        "--compat",
+        choices=["generic", "deepseek", "kimi", "glm", "qwen", "zenmux"],
+    )
+    provider_record.add_argument("--api-key")
+    provider_record.add_argument("--api-key-env")
+    provider_record.add_argument("--base-url")
+    provider_record.add_argument("--base-url-env")
+    provider_record.add_argument("--header", action="append", default=[])
+    provider_record.add_argument("--timeout-sec", type=int, default=120)
+    provider_record.add_argument("--max-retries", type=int, default=3)
+    provider_record.add_argument("--capability", action="append", default=[])
+    provider_record.add_argument("--extra", action="append", default=[])
+
+    provider_test = provider_subparsers.add_parser(
+        "test", help="Run an explicit provider smoke test"
+    )
+    provider_test.add_argument("provider_id")
+    provider_test.add_argument("--model", required=True)
+    provider_test.add_argument("--prompt", default="ping")
+
     mcp_parser = subparsers.add_parser("mcp", help="Manage MCP configuration")
     mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command")
 

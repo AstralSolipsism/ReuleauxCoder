@@ -380,6 +380,7 @@ def _create_subagent_llm(parent_agent, model_profile_name: str | None):
             return build_llm_from_settings(
                 profile,
                 debug_trace=getattr(parent_agent.llm, "debug_trace", False),
+                providers=getattr(config, "providers", None),
             ), profile_name
 
     return parent_agent.llm, None

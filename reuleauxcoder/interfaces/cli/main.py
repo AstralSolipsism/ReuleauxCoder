@@ -24,7 +24,12 @@ from reuleauxcoder.extensions.mcp.artifacts import (
     run_mcp_install_node_cli,
 )
 from reuleauxcoder.extensions.mcp.manifest import run_mcp_record_cli
-from reuleauxcoder.services.config.loader import ExampleConfigError
+from reuleauxcoder.extensions.provider.manifest import (
+    run_provider_list_cli,
+    run_provider_record_cli,
+    run_provider_test_cli,
+)
+from reuleauxcoder.services.config.loader import ConfigEnvironmentError, ExampleConfigError
 
 
 def _run_once(agent, prompt: str):
@@ -39,6 +44,18 @@ def main():
         args, "env_command", None
     ) == "record":
         sys.exit(run_env_record_cli(args))
+    if getattr(args, "command", None) == "provider" and getattr(
+        args, "provider_command", None
+    ) == "list":
+        sys.exit(run_provider_list_cli(args))
+    if getattr(args, "command", None) == "provider" and getattr(
+        args, "provider_command", None
+    ) == "record":
+        sys.exit(run_provider_record_cli(args))
+    if getattr(args, "command", None) == "provider" and getattr(
+        args, "provider_command", None
+    ) == "test":
+        sys.exit(run_provider_test_cli(args))
     if getattr(args, "command", None) == "mcp" and getattr(
         args, "mcp_command", None
     ) == "record":
@@ -65,7 +82,7 @@ def main():
     try:
         runner = AppRunner(options)
         ctx = runner.initialize()
-    except ExampleConfigError as e:
+    except (ConfigEnvironmentError, ExampleConfigError) as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
 

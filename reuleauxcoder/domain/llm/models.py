@@ -19,9 +19,13 @@ class LLMResponse:
 
     content: str = ""
     reasoning_content: str | None = None
+    reasoning_signature: str | None = None
+    reasoning_details: list[dict] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    provider_response_id: str | None = None
+    provider_extra: dict = field(default_factory=dict)
     tokens: list[str] = field(
         default_factory=list
     )  # Streamed tokens for event emission
@@ -32,6 +36,10 @@ class LLMResponse:
         msg: dict = {"role": "assistant", "content": self.content or None}
         if self.reasoning_content is not None:
             msg["reasoning_content"] = self.reasoning_content
+        if self.reasoning_signature is not None:
+            msg["reasoning_signature"] = self.reasoning_signature
+        if self.reasoning_details:
+            msg["reasoning_details"] = list(self.reasoning_details)
         if self.tool_calls:
             msg["tool_calls"] = [
                 {

@@ -105,6 +105,76 @@ def test_parse_env_record(monkeypatch: pytest.MonkeyPatch) -> None:
     assert args.source == "npm"
 
 
+def test_parse_provider_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "rcoder",
+            "-c",
+            "config.yaml",
+            "provider",
+            "record",
+            "anthropic-main",
+            "--type",
+            "anthropic_messages",
+            "--compat",
+            "deepseek",
+            "--api-key-env",
+            "ANTHROPIC_API_KEY",
+            "--base-url",
+            "https://api.anthropic.com",
+            "--capability",
+            "thinking=true",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.config == "config.yaml"
+    assert args.command == "provider"
+    assert args.provider_command == "record"
+    assert args.provider_id == "anthropic-main"
+    assert args.provider_type == "anthropic_messages"
+    assert args.compat == "deepseek"
+    assert args.api_key_env == "ANTHROPIC_API_KEY"
+    assert args.capability == ["thinking=true"]
+
+
+def test_parse_provider_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["rcoder", "provider", "list"])
+
+    args = parse_args()
+
+    assert args.command == "provider"
+    assert args.provider_command == "list"
+
+
+def test_parse_provider_test(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "rcoder",
+            "provider",
+            "test",
+            "openai-main",
+            "--model",
+            "gpt-demo",
+            "--prompt",
+            "hello",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.command == "provider"
+    assert args.provider_command == "test"
+    assert args.provider_id == "openai-main"
+    assert args.model == "gpt-demo"
+    assert args.prompt == "hello"
+
+
 def test_parse_mcp_record(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         sys,

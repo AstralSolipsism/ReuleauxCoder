@@ -1,0 +1,317 @@
+"""Anthropic Messages provider adapter."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from reuleauxcoder.domain.config.models import ProviderConfig
+from reuleauxcoder.domain.llm.models import ToolCall
+from reuleauxcoder.domain.providers.models import (
+    ProviderDiagnostic,
+    ProviderRequest,
+    ProviderResponse,
+)
+from reuleauxcoder.services.providers.compat import (
+    apply_anthropic_reasoning_effort,
+    deepseek_anthropic_budget_is_provider_managed,
+)
+
+
+def convert_chat_tools_to_anthropic_tools(tools: list[dict[str, Any]]) -> list[dict]:
+    converted: list[dict] = []
+    for tool in tools:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        if not isinstance(function, dict):
+            continue
+        converted.append(
+            {
+                "name": function.get("name", ""),
+                "description": function.get("description", ""),
+                "input_schema": function.get("parameters", {"type": "object"}),
+            }
+        )
+    return converted
+
+
+def convert_messages_to_anthropic(
+    messages: list[dict[str, Any]]
+) -> tuple[str | None, list[dict[str, Any]]]:
+    system_parts: list[str] = []
+    converted: list[dict[str, Any]] = []
+    for message in messages:
+        role = message.get("role")
+        if role == "system":
+            content = str(message.get("content") or "")
+            if content:
+                system_parts.append(content)
+            continue
+        if role == "tool":
+            converted.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": message.get("tool_call_id", ""),
+                            "content": str(message.get("content") or ""),
+                        }
+                    ],
+                }
+            )
+            continue
+        if role == "assistant":
+            blocks: list[dict[str, Any]] = []
+            reasoning = message.get("reasoning_content")
+            if reasoning:
+                block: dict[str, Any] = {"type": "thinking", "thinking": str(reasoning)}
+                signature = message.get("reasoning_signature")
+                if signature:
+                    block["signature"] = str(signature)
+                blocks.append(block)
+            content = message.get("content")
+            if content:
+                blocks.append({"type": "text", "text": str(content)})
+            for tool_call in message.get("tool_calls") or []:
+                function = tool_call.get("function") or {}
+                try:
+                    arguments = json.loads(function.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    arguments = {}
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": tool_call.get("id", ""),
+                        "name": function.get("name", ""),
+                        "input": arguments,
+                    }
+                )
+            if blocks:
+                converted.append({"role": "assistant", "content": blocks})
+            continue
+        if role == "user":
+            converted.append(
+                {"role": "user", "content": str(message.get("content") or "")}
+            )
+    return ("\n\n".join(system_parts) if system_parts else None), converted
+
+
+class AnthropicMessagesProvider:
+    """Provider adapter for Anthropic Messages API."""
+
+    provider_type = "anthropic_messages"
+
+    def __init__(self, config: ProviderConfig):
+        self.config = config
+        self.provider_id = config.id
+        try:
+            from anthropic import Anthropic
+        except ImportError as exc:  # pragma: no cover - dependency smoke
+            raise RuntimeError(
+                "anthropic provider requires the 'anthropic' package"
+            ) from exc
+        client_kwargs: dict[str, Any] = {
+            "api_key": config.api_key,
+            "timeout": config.timeout_sec,
+        }
+        if config.base_url:
+            client_kwargs["base_url"] = config.base_url
+        if config.headers:
+            client_kwargs["default_headers"] = config.headers
+        self.client = Anthropic(**client_kwargs)
+
+    def build_request_params(self, request: ProviderRequest) -> dict:
+        diagnostics: list[ProviderDiagnostic] = []
+        system, messages = convert_messages_to_anthropic(request.messages)
+        provider_manages_budget = deepseek_anthropic_budget_is_provider_managed(
+            self.config
+        )
+        params: dict[str, Any] = {
+            "model": request.model,
+            "messages": messages,
+            "stream": True,
+            "max_tokens": request.max_tokens,
+        }
+        if system:
+            params["system"] = system
+        if request.tools:
+            if not self.config.capabilities.tools:
+                raise RuntimeError(
+                    f"Provider '{self.provider_id}' does not support tools"
+                )
+            params["tools"] = convert_chat_tools_to_anthropic_tools(request.tools)
+        if request.tool_choice:
+            if request.tool_choice == "required":
+                if self.config.capabilities.tool_choice_required:
+                    params["tool_choice"] = {"type": "any"}
+                else:
+                    params["tool_choice"] = {"type": "auto"}
+                    diagnostics.append(
+                        ProviderDiagnostic(
+                            code="tool_choice_required_downgraded",
+                            message=(
+                                f"Provider '{self.provider_id}' does not declare required tool_choice support; "
+                                "tool_choice was downgraded to auto."
+                            ),
+                        )
+                    )
+            elif request.tool_choice == "auto":
+                params["tool_choice"] = {"type": "auto"}
+        apply_anthropic_reasoning_effort(self.config, request, params, diagnostics)
+        if request.thinking_enabled is not None:
+            if self.config.capabilities.thinking:
+                if request.thinking_enabled:
+                    budget = int(self.config.extra.get("thinking_budget_tokens", 1024))
+                    if not provider_manages_budget and request.max_tokens <= 1024:
+                        params["max_tokens"] = 1025
+                        budget = 1024
+                        diagnostics.append(
+                            ProviderDiagnostic(
+                                code="thinking_budget_adjusted",
+                                message=(
+                                    f"Provider '{self.provider_id}' requires thinking budget "
+                                    "to be at least 1024 and lower than max_tokens; "
+                                    "max_tokens was raised to 1025."
+                                ),
+                            )
+                        )
+                    params["thinking"] = {
+                        "type": "enabled",
+                        "budget_tokens": (
+                            budget
+                            if provider_manages_budget
+                            else min(max(1024, budget), int(params["max_tokens"]) - 1)
+                        ),
+                    }
+                    if not provider_manages_budget and request.temperature != 1.0:
+                        diagnostics.append(
+                            ProviderDiagnostic(
+                                code="temperature_omitted_for_thinking",
+                                message=(
+                                    f"Provider '{self.provider_id}' does not allow custom "
+                                    "temperature when Anthropic thinking is enabled; "
+                                    "temperature was omitted."
+                                ),
+                            )
+                        )
+                else:
+                    params["thinking"] = {"type": "disabled"}
+            else:
+                diagnostics.append(
+                    ProviderDiagnostic(
+                        code="thinking_unsupported",
+                        message=(
+                            f"Provider '{self.provider_id}' does not declare thinking support; "
+                            "the option was ignored."
+                        ),
+                    )
+                )
+        if params.get("thinking", {}).get("type") != "enabled":
+            params["temperature"] = request.temperature
+        if diagnostics:
+            request.metadata.setdefault("provider_diagnostics", []).extend(
+                diagnostics
+            )
+        return params
+
+    def chat(self, request: ProviderRequest) -> ProviderResponse:
+        params = request.request_params or self.build_request_params(request)
+        diagnostics = [
+            item
+            for item in request.metadata.get("provider_diagnostics", [])
+            if isinstance(item, ProviderDiagnostic)
+        ]
+        stream = self.client.messages.create(**params)
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tokens: list[str] = []
+        debug_events: list[dict[str, Any]] = []
+        tool_blocks: dict[int, dict[str, Any]] = {}
+        prompt_tokens = 0
+        completion_tokens = 0
+        reasoning_signature: str | None = None
+
+        for event in stream:
+            event_type = str(getattr(event, "type", "") or "")
+            debug_events.append({"type": event_type})
+            if event_type == "content_block_start":
+                index = int(getattr(event, "index", len(tool_blocks)) or 0)
+                block = getattr(event, "content_block", None)
+                if getattr(block, "type", None) == "tool_use":
+                    tool_blocks[index] = {
+                        "id": str(getattr(block, "id", "") or ""),
+                        "name": str(getattr(block, "name", "") or ""),
+                        "args": "",
+                    }
+                continue
+            if event_type == "content_block_delta":
+                index = int(getattr(event, "index", 0) or 0)
+                delta = getattr(event, "delta", None)
+                delta_type = str(getattr(delta, "type", "") or "")
+                if delta_type == "text_delta":
+                    text = str(getattr(delta, "text", "") or "")
+                    if text:
+                        content_parts.append(text)
+                        tokens.append(text)
+                        if request.on_token is not None:
+                            request.on_token(text)
+                elif delta_type == "thinking_delta":
+                    thinking = str(getattr(delta, "thinking", "") or "")
+                    if thinking:
+                        reasoning_parts.append(thinking)
+                elif delta_type == "signature_delta":
+                    reasoning_signature = str(getattr(delta, "signature", "") or "")
+                elif delta_type == "input_json_delta":
+                    tool_blocks.setdefault(
+                        index,
+                        {"id": f"tool_call_{index}", "name": "", "args": ""},
+                    )["args"] += str(getattr(delta, "partial_json", "") or "")
+                continue
+            if event_type == "message_delta":
+                usage = getattr(event, "usage", None)
+                if usage is not None:
+                    completion_tokens = getattr(usage, "output_tokens", 0) or 0
+                continue
+            if event_type == "message_start":
+                message = getattr(event, "message", None)
+                usage = getattr(message, "usage", None)
+                if usage is not None:
+                    prompt_tokens = getattr(usage, "input_tokens", 0) or 0
+                continue
+
+        parsed: list[ToolCall] = []
+        for raw in tool_blocks.values():
+            try:
+                arguments = json.loads(raw.get("args") or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            parsed.append(
+                ToolCall(
+                    id=raw.get("id") or f"tool_call_{len(parsed)}",
+                    name=raw.get("name") or "",
+                    arguments=arguments,
+                )
+            )
+        return ProviderResponse(
+            content="".join(content_parts),
+            reasoning_content="".join(reasoning_parts) if reasoning_parts else None,
+            reasoning_signature=reasoning_signature,
+            tool_calls=parsed,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            tokens=tokens,
+            diagnostics=diagnostics,
+            provider_extra={
+                "request_params": dict(params),
+                "debug_stream_events": debug_events,
+            },
+        )
+
+    def test(self, *, model: str, prompt: str = "ping") -> ProviderResponse:
+        return self.chat(
+            ProviderRequest(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=32,
+            )
+        )

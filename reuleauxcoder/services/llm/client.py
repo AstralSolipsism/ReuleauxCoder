@@ -1,4 +1,6 @@
-"""LLM client - wraps OpenAI-compatible APIs."""
+"""LLM facade backed by provider adapters."""
+
+from __future__ import annotations
 
 import json
 import time
@@ -6,15 +8,17 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Optional
 
-from openai import OpenAI, APIConnectionError, APITimeoutError, RateLimitError
+from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
 
+from reuleauxcoder.domain.config.models import ProviderConfig, infer_provider_compat
 from reuleauxcoder.domain.hooks.registry import HookRegistry
 from reuleauxcoder.domain.hooks.types import (
     AfterLLMResponseContext,
     BeforeLLMRequestContext,
     HookPoint,
 )
-from reuleauxcoder.domain.llm.models import ToolCall, LLMResponse
+from reuleauxcoder.domain.llm.models import LLMResponse
+from reuleauxcoder.domain.providers.models import ProviderRequest
 from reuleauxcoder.infrastructure.fs.paths import get_diagnostics_dir
 from reuleauxcoder.interfaces.events import UIEventBus, UIEventKind
 from reuleauxcoder.services.llm.diagnostics import (
@@ -25,6 +29,8 @@ from reuleauxcoder.services.llm.sanitizer import (
     DEFAULT_REASONING_REPLAY_PLACEHOLDER,
     sanitize_messages_for_llm,
 )
+from reuleauxcoder.services.providers.adapters.openai_chat import OpenAIChatProvider
+from reuleauxcoder.services.providers.manager import ProviderManager
 
 
 MAX_DEBUG_CONTENT_CHARS = 400
@@ -44,53 +50,6 @@ def _trim_text(value: Any, limit: int = MAX_DEBUG_CONTENT_CHARS) -> str:
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
-def _extract_stream_event(chunk: Any) -> list[dict[str, Any]]:
-    """Extract readable, ordered stream events from a chunk."""
-    events: list[dict[str, Any]] = []
-    choices = getattr(chunk, "choices", None) or []
-    delta = choices[0].delta if choices else None
-    if delta is not None:
-        content = getattr(delta, "content", None)
-        if content:
-            events.append({"type": "content", "text": str(content)})
-        reasoning = getattr(delta, "reasoning_content", None)
-        if reasoning:
-            events.append({"type": "reasoning", "text": str(reasoning)})
-        tool_calls = getattr(delta, "tool_calls", None) or []
-        for tool_call in tool_calls:
-            function = getattr(tool_call, "function", None)
-            name = getattr(function, "name", None) if function is not None else None
-            arguments = (
-                getattr(function, "arguments", None) if function is not None else None
-            )
-            if name:
-                events.append(
-                    {
-                        "type": "tool_name",
-                        "text": str(name),
-                        "index": getattr(tool_call, "index", None),
-                    }
-                )
-            if arguments:
-                events.append(
-                    {
-                        "type": "tool_arguments",
-                        "text": str(arguments),
-                        "index": getattr(tool_call, "index", None),
-                    }
-                )
-    usage = getattr(chunk, "usage", None)
-    if usage is not None:
-        events.append(
-            {
-                "type": "usage",
-                "prompt_tokens": getattr(usage, "prompt_tokens", None),
-                "completion_tokens": getattr(usage, "completion_tokens", None),
-            }
-        )
-    return events
-
-
 def _persist_debug_trace(
     payload: dict[str, Any], *, session_id: str | None, trace_id: str | None
 ) -> Path:
@@ -103,8 +62,27 @@ def _persist_debug_trace(
     return path
 
 
+def _legacy_provider_config(
+    *,
+    provider_id: str | None,
+    api_key: str,
+    base_url: str | None,
+    timeout_sec: int = 120,
+    max_retries: int = 3,
+) -> ProviderConfig:
+    return ProviderConfig(
+        id=provider_id or "legacy-openai-chat",
+        type="openai_chat",
+        compat=infer_provider_compat(base_url),
+        api_key=api_key,
+        base_url=base_url,
+        timeout_sec=timeout_sec,
+        max_retries=max_retries,
+    )
+
+
 class LLM:
-    """LLM client that wraps OpenAI-compatible APIs."""
+    """LLM facade that keeps the legacy public API stable."""
 
     def __init__(
         self,
@@ -121,11 +99,11 @@ class LLM:
         reasoning_replay_placeholder: str = DEFAULT_REASONING_REPLAY_PLACEHOLDER,
         debug_trace: bool = False,
         ui_bus: UIEventBus | None = None,
+        provider: str | None = None,
+        provider_config: ProviderConfig | None = None,
     ):
+        self._provider_manager = ProviderManager()
         self.model = model
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
-        self.api_key = api_key
-        self.base_url = base_url
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.preserve_reasoning_content = preserve_reasoning_content
@@ -138,6 +116,26 @@ class LLM:
         self.reasoning_replay_placeholder = reasoning_replay_placeholder
         self.debug_trace = debug_trace
         self.ui_bus = ui_bus
+        self.provider_config = provider_config or _legacy_provider_config(
+            provider_id=provider,
+            api_key=api_key,
+            base_url=base_url,
+        )
+        self.provider_id = self.provider_config.id
+        self.provider_type = self.provider_config.type
+        self.api_key = self.provider_config.api_key or api_key
+        self.base_url = self.provider_config.base_url if provider_config else base_url
+        self.client: Any = None
+        self._provider = None
+        self._rebuild_provider()
+
+    def _rebuild_provider(self) -> None:
+        self.provider_id = self.provider_config.id
+        self.provider_type = self.provider_config.type
+        self.api_key = self.provider_config.api_key
+        self.base_url = self.provider_config.base_url
+        self._provider = self._provider_manager.create(self.provider_config)
+        self.client = getattr(self._provider, "client", None)
 
     def reconfigure(
         self,
@@ -154,12 +152,11 @@ class LLM:
         reasoning_replay_mode: str | None = None,
         reasoning_replay_placeholder: str | None = None,
         debug_trace: bool | None = None,
+        provider: str | None = None,
+        provider_config: ProviderConfig | None = None,
     ) -> None:
         """Hot-swap runtime model/client settings."""
         self.model = model
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
-        self.api_key = api_key
-        self.base_url = base_url
         self.temperature = temperature
         self.max_tokens = max_tokens
         if preserve_reasoning_content is not None:
@@ -178,11 +175,23 @@ class LLM:
             self.reasoning_replay_placeholder = reasoning_replay_placeholder
         if debug_trace is not None:
             self.debug_trace = debug_trace
+        self.provider_config = provider_config or _legacy_provider_config(
+            provider_id=provider,
+            api_key=api_key,
+            base_url=base_url,
+        )
+        self._rebuild_provider()
 
     def _emit_debug(self, message: str, **data: Any) -> None:
-        """Emit a debug UI event when a bus is attached."""
         if self.ui_bus is not None:
             self.ui_bus.debug(message, kind=UIEventKind.AGENT, **data)
+
+    def _prepare_provider(self):
+        if self._provider is None:
+            self._rebuild_provider()
+        if isinstance(self._provider, OpenAIChatProvider):
+            self._provider.call_with_retry = self._call_with_retry
+        return self._provider
 
     def chat(
         self,
@@ -196,7 +205,7 @@ class LLM:
     ) -> LLMResponse:
         """Send messages, stream back response, handle tool calls."""
         raw_messages = [dict(msg) for msg in messages]
-        messages = sanitize_messages_for_llm(
+        sanitized_messages = sanitize_messages_for_llm(
             messages,
             preserve_reasoning_content=self.preserve_reasoning_content,
             backfill_reasoning_content_for_tool_calls=self.backfill_reasoning_content_for_tool_calls,
@@ -204,176 +213,100 @@ class LLM:
             reasoning_replay_placeholder=self.reasoning_replay_placeholder,
             thinking_enabled=bool(self.thinking_enabled),
         )
-        params: dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "stream": True,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-        }
-        if self.reasoning_effort:
-            params["reasoning_effort"] = self.reasoning_effort
-        if self.thinking_enabled is not None:
-            params["extra_body"] = {
-                "thinking": {
-                    "type": "enabled" if self.thinking_enabled else "disabled"
-                }
-            }
-
-        if tools:
-            params["tools"] = tools
-
-        before_context = BeforeLLMRequestContext(
-            hook_point=HookPoint.BEFORE_LLM_REQUEST,
-            request_params=dict(params),
-            messages=list(messages),
-            tools=list(tools) if tools else [],
+        provider = self._prepare_provider()
+        request = ProviderRequest(
             model=self.model,
-            session_id=session_id,
-            trace_id=trace_id,
+            messages=sanitized_messages,
+            tools=list(tools) if tools else [],
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            reasoning_effort=self.reasoning_effort,
+            thinking_enabled=self.thinking_enabled,
+            on_token=on_token,
             metadata=dict(metadata or {}),
         )
-
-        if hook_registry is not None:
-            guard_decisions = hook_registry.run_guards(
-                HookPoint.BEFORE_LLM_REQUEST, before_context
-            )
-            denied = next((d for d in guard_decisions if not d.allowed), None)
-            if denied is not None:
-                raise RuntimeError(denied.reason or "LLM request blocked by guard hook")
-            before_context = hook_registry.run_transforms(
-                HookPoint.BEFORE_LLM_REQUEST, before_context
-            )
-            hook_registry.run_observers(HookPoint.BEFORE_LLM_REQUEST, before_context)
-
-        params = dict(before_context.request_params)
-
-        debug_stream_events: list[dict[str, Any]] = []
-        debug_stream_options_enabled = False
+        params: dict[str, Any] = {}
 
         try:
-            # stream_options is an OpenAI extension
-            try:
-                params["stream_options"] = {"include_usage": True}
-                stream = self._call_with_retry(params)
-                debug_stream_options_enabled = True
-            except Exception:
-                params.pop("stream_options", None)
-                stream = self._call_with_retry(params)
-
-            # Accumulate response
-            content_parts: list[str] = []
-            reasoning_parts: list[str] = []
-            tokens: list[str] = []  # Collect streamed tokens
-            tc_map: dict[int, dict] = {}  # index -> {id, name, arguments_str}
-            prompt_tok = 0
-            completion_tok = 0
-
-            for chunk in stream:
-                if (
-                    self.debug_trace
-                    and len(debug_stream_events) < MAX_DEBUG_STREAM_EVENTS
-                ):
-                    debug_stream_events.extend(_extract_stream_event(chunk))
-                    if len(debug_stream_events) > MAX_DEBUG_STREAM_EVENTS:
-                        debug_stream_events = debug_stream_events[
-                            :MAX_DEBUG_STREAM_EVENTS
-                        ]
-
-                # Usage info comes in the final chunk
-                if chunk.usage:
-                    prompt_tok = chunk.usage.prompt_tokens
-                    completion_tok = chunk.usage.completion_tokens
-
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
-
-                # Accumulate text
-                if delta.content:
-                    content_parts.append(delta.content)
-                    tokens.append(delta.content)
-                    if on_token is not None:
-                        on_token(delta.content)
-
-                if self.preserve_reasoning_content and getattr(
-                    delta, "reasoning_content", None
-                ):
-                    reasoning_parts.append(delta.reasoning_content)
-
-                # Accumulate tool calls across chunks
-                if delta.tool_calls:
-                    for tc_delta in delta.tool_calls:
-                        idx = tc_delta.index
-                        if idx not in tc_map:
-                            tc_map[idx] = {"id": "", "name": "", "args": ""}
-                        if tc_delta.id:
-                            tc_map[idx]["id"] = tc_delta.id
-                        if tc_delta.function:
-                            if tc_delta.function.name:
-                                tc_map[idx]["name"] = tc_delta.function.name
-                            if tc_delta.function.arguments:
-                                tc_map[idx]["args"] += tc_delta.function.arguments
-
-            # Parse accumulated tool calls
-            parsed: list[ToolCall] = []
-            for idx in sorted(tc_map):
-                raw = tc_map[idx]
-                tool_call_id = raw.get("id") or f"tool_call_{idx}"
-                try:
-                    args = json.loads(raw["args"])
-                except (json.JSONDecodeError, KeyError):
-                    args = {}
-                parsed.append(
-                    ToolCall(id=tool_call_id, name=raw["name"], arguments=args)
-                )
-
-            response = LLMResponse(
-                content="".join(content_parts),
-                reasoning_content=(
-                    "".join(reasoning_parts)
-                    if self.preserve_reasoning_content
-                    else None
-                ),
-                tool_calls=parsed,
-                prompt_tokens=prompt_tok,
-                completion_tokens=completion_tok,
-                tokens=tokens,
+            params = provider.build_request_params(request)
+            before_context = BeforeLLMRequestContext(
+                hook_point=HookPoint.BEFORE_LLM_REQUEST,
+                request_params=dict(params),
+                messages=list(sanitized_messages),
+                tools=list(tools) if tools else [],
+                model=self.model,
+                session_id=session_id,
+                trace_id=trace_id,
+                metadata=dict(request.metadata),
             )
 
+            if hook_registry is not None:
+                guard_decisions = hook_registry.run_guards(
+                    HookPoint.BEFORE_LLM_REQUEST, before_context
+                )
+                denied = next((d for d in guard_decisions if not d.allowed), None)
+                if denied is not None:
+                    raise RuntimeError(
+                        denied.reason or "LLM request blocked by guard hook"
+                    )
+                before_context = hook_registry.run_transforms(
+                    HookPoint.BEFORE_LLM_REQUEST, before_context
+                )
+                hook_registry.run_observers(
+                    HookPoint.BEFORE_LLM_REQUEST, before_context
+                )
+
+            request.request_params = dict(before_context.request_params)
+            request.metadata = dict(before_context.metadata)
+            provider_response = provider.chat(request)
+            response = provider_response.to_llm_response()
+            params = dict(response.provider_extra.get("request_params") or params)
+
             if self.debug_trace:
+                debug_events = list(
+                    (response.provider_extra or {}).get("debug_stream_events") or []
+                )[:MAX_DEBUG_STREAM_EVENTS]
                 trace_payload = {
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "session_id": session_id,
                     "trace_id": trace_id,
+                    "provider": {
+                        "id": self.provider_id,
+                        "type": self.provider_type,
+                    },
                     "model": self.model,
                     "base_url": self.base_url,
                     "api_key_hint": _mask_api_key(self.api_key),
                     "request": {
                         "temperature": params.get("temperature"),
-                        "max_tokens": params.get("max_tokens"),
+                        "max_tokens": params.get("max_tokens")
+                        or params.get("max_output_tokens"),
                         "stream": params.get("stream"),
                         "stream_options": params.get("stream_options"),
-                        "stream_options_enabled": debug_stream_options_enabled,
+                        "stream_options_enabled": bool(
+                            response.provider_extra.get("stream_options_enabled")
+                        ),
                         "tool_count": len(params.get("tools") or []),
-                        "reasoning_effort": params.get("reasoning_effort"),
+                        "reasoning_effort": params.get("reasoning_effort")
+                        or (params.get("reasoning") or {}).get("effort"),
                         "reasoning_replay_mode": self.reasoning_replay_mode or "none",
                         "thinking_enabled": self.thinking_enabled,
                         "thinking_type": (
                             ((params.get("extra_body") or {}).get("thinking") or {}).get(
                                 "type"
                             )
+                            or (params.get("thinking") or {}).get("type")
                         ),
                     },
                     "messages": {
                         "raw_count": len(raw_messages),
-                        "sanitized_count": len(messages),
+                        "sanitized_count": len(sanitized_messages),
                         "raw_tail": snapshot_messages(raw_messages),
-                        "sanitized_tail": snapshot_messages(messages),
+                        "sanitized_tail": snapshot_messages(sanitized_messages),
                     },
                     "stream": {
-                        "event_count": len(debug_stream_events),
-                        "events": debug_stream_events,
+                        "event_count": len(debug_events),
+                        "events": debug_events,
                     },
                     "response": {
                         "content": _trim_text(response.content or "", 1000),
@@ -425,24 +358,22 @@ class LLM:
                 session_id=session_id,
                 request_params=params,
                 raw_messages=raw_messages,
-                sanitized_messages=messages,
+                sanitized_messages=sanitized_messages,
                 error=e,
-                metadata=dict(before_context.metadata),
+                metadata=dict(metadata or {}),
             )
             setattr(e, "llm_diagnostic_path", str(diagnostic_path))
-            if session_id:
-                before_context.metadata["llm_error_diagnostic_path"] = str(
-                    diagnostic_path
-                )
             raise
 
-    def _call_with_retry(self, params: dict, max_retries: int = 3):
-        """Retry on transient errors with exponential backoff."""
-        for attempt in range(max_retries):
+    def _call_with_retry(self, params: dict, max_retries: int | None = None):
+        """Retry OpenAI-compatible Chat Completions transient errors."""
+        retries = self.provider_config.max_retries if max_retries is None else max_retries
+        if self.client is None:
+            self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        for attempt in range(retries + 1):
             try:
                 return self.client.chat.completions.create(**params)
-            except (RateLimitError, APITimeoutError, APIConnectionError) as e:
-                if attempt == max_retries - 1:
+            except (RateLimitError, APITimeoutError, APIConnectionError):
+                if attempt >= retries:
                     raise
-                wait = 2**attempt
-                time.sleep(wait)
+                time.sleep(2**attempt)

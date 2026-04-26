@@ -1,6 +1,8 @@
 """Configuration loader - loads config.yaml with global + workspace merge."""
 
+import os
 from pathlib import Path
+import re
 from typing import Optional
 import yaml
 
@@ -16,6 +18,8 @@ from reuleauxcoder.domain.config.models import (
     ModeConfig,
     ModelProfileConfig,
     PromptConfig,
+    ProviderConfig,
+    ProvidersConfig,
     RemoteExecConfig,
     SkillsConfig,
 )
@@ -29,6 +33,10 @@ from reuleauxcoder.infrastructure.yaml.loader import save_yaml_config, load_yaml
 
 class ExampleConfigError(Exception):
     """Raised when the config is still the example template and needs user editing."""
+
+
+class ConfigEnvironmentError(Exception):
+    """Raised when config references a missing environment variable."""
 
 
 class ConfigLoader:
@@ -62,15 +70,75 @@ class ConfigLoader:
     def __init__(self, config_path: Optional[Path] = None):
         self.config_path = config_path
 
-    def _resolve_llm_params(self, active_profile, app_config: dict) -> dict:
+    _ENV_REF_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+
+    def _expand_env_value(self, value, field_path: str):
+        if not isinstance(value, str):
+            return value
+        match = self._ENV_REF_RE.match(value.strip())
+        if match is None:
+            return value
+        env_name = match.group(1)
+        if env_name not in os.environ:
+            raise ConfigEnvironmentError(
+                f"Config field '{field_path}' references missing environment variable '{env_name}'"
+            )
+        return os.environ[env_name]
+
+    def _expand_env_refs(self, data: dict) -> dict:
+        """Expand supported ${ENV_NAME} references in provider/model runtime fields."""
+        expanded = dict(data)
+        providers = expanded.get("providers", {})
+        if isinstance(providers, dict):
+            items = providers.get("items", {})
+            if isinstance(items, dict):
+                for provider_id, provider_data in items.items():
+                    if not isinstance(provider_data, dict):
+                        continue
+                    for field in ("api_key", "base_url"):
+                        if field in provider_data:
+                            provider_data[field] = self._expand_env_value(
+                                provider_data[field],
+                                f"providers.items.{provider_id}.{field}",
+                            )
+
+        models = expanded.get("models", {})
+        if isinstance(models, dict):
+            profiles = models.get("profiles", {})
+            if isinstance(profiles, dict):
+                for profile_id, profile_data in profiles.items():
+                    if not isinstance(profile_data, dict):
+                        continue
+                    for field in ("api_key", "base_url"):
+                        if field in profile_data:
+                            profile_data[field] = self._expand_env_value(
+                                profile_data[field],
+                                f"models.profiles.{profile_id}.{field}",
+                            )
+        return expanded
+
+    def _resolve_llm_params(
+        self, active_profile, app_config: dict, providers: ProvidersConfig | None = None
+    ) -> dict:
         """Resolve LLM params with active_profile > app_config > default priority."""
         params: dict = {}
+        provider_config = None
+        if (
+            active_profile is not None
+            and getattr(active_profile, "provider", None)
+            and providers is not None
+        ):
+            provider_config = providers.items.get(active_profile.provider)
         for field in self._LLM_PARAM_FIELDS:
             profile_val = (
                 getattr(active_profile, field, None) if active_profile is not None else None
             )
+            if field == "api_key" and profile_val == "":
+                profile_val = None
             if profile_val is not None:
                 params[field] = profile_val
+            elif field in {"api_key", "base_url"} and provider_config is not None:
+                params[field] = getattr(provider_config, field)
             elif field in app_config:
                 params[field] = app_config[field]
             elif field in DEFAULTS:
@@ -99,12 +167,12 @@ class ConfigLoader:
         result = dict(base)
 
         for key, value in override.items():
-            if key in {"mcp", "models", "modes"} and isinstance(value, dict):
+            if key in {"mcp", "models", "modes", "providers"} and isinstance(value, dict):
                 result_section = result.get(key, {})
 
                 # Merge scalar fields with override priority.
                 for section_key, section_value in value.items():
-                    if section_key not in {"servers", "profiles"}:
+                    if section_key not in {"servers", "profiles", "items"}:
                         result_section[section_key] = section_value
 
                 # Merge profile maps by name/key, override wins for same key
@@ -126,6 +194,21 @@ class ConfigLoader:
                         else:
                             merged_profiles[profile_name] = profile_value
                     result_section["profiles"] = merged_profiles
+                if "items" in value and isinstance(value.get("items"), dict):
+                    base_items = result_section.get("items", {})
+                    override_items = value["items"]
+                    merged_items = dict(base_items)
+                    for item_name, item_value in override_items.items():
+                        if isinstance(item_value, dict) and isinstance(
+                            base_items.get(item_name), dict
+                        ):
+                            merged_items[item_name] = self._merge_dicts(
+                                base_items[item_name],
+                                item_value,
+                            )
+                        else:
+                            merged_items[item_name] = item_value
+                    result_section["items"] = merged_items
 
                 result[key] = result_section
             elif (
@@ -190,6 +273,7 @@ class ConfigLoader:
 
         migrated_data, _ = migrate_legacy_config(config_data)
         migrated_data, _ = migrate_bash_to_shell(migrated_data)
+        migrated_data = self._expand_env_refs(migrated_data)
         self._bootstrap_workspace_snapshot(migrated_data, workspace_data)
 
         config = self._parse_config(migrated_data)
@@ -205,6 +289,7 @@ class ConfigLoader:
         cli_config = data.get("cli", {})
         mcp_config = data.get("mcp", {})
         models_config = data.get("models", {})
+        providers_config = data.get("providers", {})
         modes_config = data.get("modes", {})
         skills_config = data.get("skills", {})
         prompt_config = data.get("prompt", {})
@@ -213,6 +298,19 @@ class ConfigLoader:
         environment_config = data.get("environment", {})
         if not isinstance(environment_config, dict):
             environment_config = {}
+
+        providers = ProvidersConfig()
+        provider_items_data = {}
+        if isinstance(providers_config, dict):
+            raw_items = providers_config.get("items", {})
+            if isinstance(raw_items, dict):
+                provider_items_data = raw_items
+        for provider_id, provider_data in provider_items_data.items():
+            if not isinstance(provider_data, dict):
+                continue
+            providers.items[str(provider_id)] = ProviderConfig.from_dict(
+                str(provider_id), provider_data
+            )
 
         # Parse MCP servers
         mcp_servers = []
@@ -295,7 +393,7 @@ class ConfigLoader:
                     str(name), tool_data
                 )
 
-        llm_params = self._resolve_llm_params(active_profile, app_config)
+        llm_params = self._resolve_llm_params(active_profile, app_config, providers)
 
         return Config(
             **llm_params,
@@ -304,6 +402,7 @@ class ConfigLoader:
                 mcp_config.get("artifact_root", ".rcoder/mcp-artifacts")
             ),
             model_profiles=model_profiles,
+            providers=providers,
             active_model_profile=active_model_profile,
             active_main_model_profile=active_main_model_profile,
             active_sub_model_profile=active_sub_model_profile,

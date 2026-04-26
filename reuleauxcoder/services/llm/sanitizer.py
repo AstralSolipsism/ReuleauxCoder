@@ -47,6 +47,7 @@ def _sanitize_messages_for_llm_core(
 
         if not preserve_reasoning_content and not thinking_enabled:
             item.pop("reasoning_content", None)
+            item.pop("reasoning_details", None)
 
         raw_tool_calls = item.get("tool_calls") or []
         if not raw_tool_calls:
@@ -56,6 +57,7 @@ def _sanitize_messages_for_llm_core(
                 replay_reasoning_for_non_tool_assistant or user_turn_had_tool_calls
             ):
                 item.pop("reasoning_content", None)
+                item.pop("reasoning_details", None)
             sanitized.append(item)
             continue
 

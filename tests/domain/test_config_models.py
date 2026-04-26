@@ -8,7 +8,10 @@ from reuleauxcoder.domain.config.models import (
     MCPServerConfig,
     ModeConfig,
     ModelProfileConfig,
+    ProviderConfig,
+    ProvidersConfig,
     RemoteExecConfig,
+    infer_provider_compat,
 )
 
 
@@ -133,10 +136,51 @@ def test_model_profile_config_from_dict_uses_defaults() -> None:
     assert profile.name == "main"
     assert profile.model == "gpt-4o"
     assert profile.api_key == ""
+    assert profile.provider is None
     assert profile.max_tokens == 4096
     assert profile.temperature == 0.0
     assert profile.preserve_reasoning_content is True
     assert profile.backfill_reasoning_content_for_tool_calls is False
+
+
+def test_model_profile_config_reads_provider_reference() -> None:
+    profile = ModelProfileConfig.from_dict(
+        "main",
+        {"model": "claude", "provider": "anthropic-main", "max_tokens": 8192},
+    )
+
+    assert profile.provider == "anthropic-main"
+    assert profile.api_key == ""
+
+
+def test_provider_config_roundtrip() -> None:
+    config = ProviderConfig(
+        id="anthropic-main",
+        type="anthropic_messages",
+        api_key="sk-ant",
+        base_url="https://api.anthropic.com",
+        headers={"X-Demo": "yes"},
+        timeout_sec=90,
+        max_retries=2,
+    )
+
+    restored = ProviderConfig.from_dict("anthropic-main", config.to_dict())
+
+    assert restored == config
+
+
+def test_provider_config_reads_and_infers_compat() -> None:
+    explicit = ProviderConfig.from_dict(
+        "kimi", {"type": "openai_chat", "compat": "kimi"}
+    )
+    inferred = ProviderConfig.from_dict(
+        "deepseek",
+        {"type": "openai_chat", "base_url": "https://api.deepseek.com"},
+    )
+
+    assert explicit.compat == "kimi"
+    assert inferred.compat == "deepseek"
+    assert infer_provider_compat("https://dashscope.aliyuncs.com/compatible-mode/v1") == "qwen"
 
 
 def test_mode_config_from_dict_normalizes_invalid_fields() -> None:
@@ -207,6 +251,51 @@ def test_config_validate_collects_multiple_errors() -> None:
         "approval.rules[0].action must be one of allow, warn, require_approval, deny"
         in errors
     )
+
+
+def test_config_validate_accepts_provider_backed_profile_without_profile_api_key() -> None:
+    config = Config(
+        api_key="",
+        providers=ProvidersConfig(
+            items={
+                "anthropic-main": ProviderConfig(
+                    id="anthropic-main",
+                    type="anthropic_messages",
+                    api_key="sk-ant",
+                )
+            }
+        ),
+        model_profiles={
+            "main": ModelProfileConfig(
+                name="main",
+                model="claude",
+                api_key="",
+                provider="anthropic-main",
+            )
+        },
+        active_main_model_profile="main",
+    )
+
+    assert config.validate() == []
+
+
+def test_config_validate_rejects_missing_profile_provider_reference() -> None:
+    config = Config(
+        api_key="",
+        providers=ProvidersConfig(),
+        model_profiles={
+            "main": ModelProfileConfig(
+                name="main",
+                model="claude",
+                api_key="",
+                provider="missing",
+            )
+        },
+    )
+
+    errors = config.validate()
+
+    assert "model_profiles[main].provider must exist in providers.items" in errors
 
 
 def test_config_is_valid_for_minimal_valid_configuration() -> None:

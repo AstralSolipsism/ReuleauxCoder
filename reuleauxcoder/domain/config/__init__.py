@@ -9,6 +9,11 @@ from reuleauxcoder.domain.config.models import (
     MCPServerConfig,
     ModeConfig,
     ModelProfileConfig,
+    ProviderCapabilities,
+    ProviderCompat,
+    ProviderConfig,
+    ProviderType,
+    ProvidersConfig,
 )
 
 __all__ = [
@@ -20,4 +25,9 @@ __all__ = [
     "MCPServerConfig",
     "ModelProfileConfig",
     "ModeConfig",
+    "ProviderCapabilities",
+    "ProviderCompat",
+    "ProviderConfig",
+    "ProviderType",
+    "ProvidersConfig",
 ]
