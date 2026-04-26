@@ -55,14 +55,17 @@ def _free_port() -> int:
 
 
 def _json_request(
-    method: str, url: str, payload: dict | None = None
+    method: str,
+    url: str,
+    payload: dict | None = None,
+    headers: dict[str, str] | None = None,
 ) -> tuple[int, dict]:
     data = None
-    headers = {}
+    request_headers = dict(headers or {})
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    req = request.Request(url, data=data, headers=headers, method=method)
+        request_headers["Content-Type"] = "application/json"
+    req = request.Request(url, data=data, headers=request_headers, method=method)
     with _URLOPEN(req, timeout=5) as resp:
         body = resp.read().decode("utf-8")
         return resp.status, json.loads(body) if body else {}
@@ -101,6 +104,185 @@ def _cleanup_provider_build_dir(provider: object) -> None:
 
 
 class TestRemoteRelayHTTPService:
+    def test_admin_provider_and_model_endpoints_require_secret_and_mask_keys(
+        self, tmp_path: Path
+    ) -> None:
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        reloads: list[str] = []
+        config_path = tmp_path / "config.yaml"
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            admin_access_secret="admin-secret",
+            admin_config_path=config_path,
+            admin_config_reload_handler=lambda: reloads.append("reload"),
+            admin_provider_test_handler=lambda provider, model, prompt: {
+                "ok": True,
+                "provider_id": provider.id,
+                "model": model,
+                "prompt": prompt,
+            },
+        )
+        service.start()
+        try:
+            try:
+                _json_request(
+                    "POST", f"{service.base_url}/remote/admin/providers/list", {}
+                )
+                raise AssertionError("admin endpoint should require a secret")
+            except HTTPError as exc:
+                assert exc.code == 403
+
+            admin_headers = {"X-RC-Admin-Secret": "admin-secret"}
+            status, record = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/providers/record",
+                {
+                    "provider_id": "deepseek",
+                    "type": "openai_chat",
+                    "compat": "deepseek",
+                    "api_key": "sk-secret-value",
+                    "base_url": "https://api.deepseek.com",
+                },
+                headers=admin_headers,
+            )
+            assert status == 200
+            assert record["ok"] is True
+            assert record["provider"]["api_key_hint"] == "sk-s...alue"
+            assert "api_key" not in record["provider"]
+
+            _, update = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/providers/record",
+                {
+                    "provider_id": "deepseek",
+                    "type": "openai_chat",
+                    "compat": "deepseek",
+                    "base_url": "https://api.deepseek.com/v1",
+                },
+                headers=admin_headers,
+            )
+            assert update["created"] is False
+
+            _, providers = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/providers/list",
+                {},
+                headers=admin_headers,
+            )
+            assert providers["providers"][0]["api_key_hint"] == "sk-s...alue"
+            assert "api_key" not in providers["providers"][0]
+
+            _, test_result = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/providers/test",
+                {"provider_id": "deepseek", "model": "deepseek-chat", "prompt": "ping"},
+                headers=admin_headers,
+            )
+            assert test_result == {
+                "ok": True,
+                "provider_id": "deepseek",
+                "model": "deepseek-chat",
+                "prompt": "ping",
+            }
+
+            _, profile = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/models/record",
+                {
+                    "profile_id": "deepseek-main",
+                    "provider": "deepseek",
+                    "model": "deepseek-chat",
+                    "max_tokens": 4096,
+                    "max_context_tokens": 128000,
+                    "temperature": 0,
+                    "thinking_enabled": True,
+                },
+                headers=admin_headers,
+            )
+            assert profile["model_profile"]["provider"] == "deepseek"
+            assert "api_key" not in profile["model_profile"]
+
+            _, active = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/models/activate",
+                {"profile_id": "deepseek-main", "target": "both"},
+                headers=admin_headers,
+            )
+            assert active["active_main"] == "deepseek-main"
+            assert active["active_sub"] == "deepseek-main"
+
+            _, models = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/models/list",
+                {},
+                headers=admin_headers,
+            )
+            assert models["active_main"] == "deepseek-main"
+            assert models["model_profiles"][0]["id"] == "deepseek-main"
+            assert len(reloads) == 4
+            raw = config_path.read_text(encoding="utf-8")
+            assert "sk-secret-value" in raw
+            assert "active_main: deepseek-main" in raw
+        finally:
+            service.stop()
+            relay.stop()
+
+    def test_admin_write_rolls_back_when_reload_fails(
+        self, tmp_path: Path
+    ) -> None:
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "providers:\n"
+            "  items:\n"
+            "    existing:\n"
+            "      type: openai_chat\n"
+            "      api_key: sk-existing\n"
+            "      base_url: https://example.invalid/v1\n",
+            encoding="utf-8",
+        )
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            admin_access_secret="admin-secret",
+            admin_config_path=config_path,
+            admin_config_reload_handler=lambda: (_ for _ in ()).throw(
+                RuntimeError("reload failed")
+            ),
+        )
+        service.start()
+        try:
+            try:
+                _json_request(
+                    "POST",
+                    f"{service.base_url}/remote/admin/providers/record",
+                    {
+                        "provider_id": "broken",
+                        "type": "openai_chat",
+                        "api_key": "sk-broken",
+                        "base_url": "https://broken.invalid/v1",
+                    },
+                    headers={"X-RC-Admin-Secret": "admin-secret"},
+                )
+                raise AssertionError("reload failure should surface as HTTP 500")
+            except HTTPError as exc:
+                assert exc.code == 500
+                body = json.loads(exc.read().decode("utf-8"))
+                assert body["error"] == "config_reload_failed"
+            raw = config_path.read_text(encoding="utf-8")
+            assert "existing" in raw
+            assert "sk-existing" in raw
+            assert "broken" not in raw
+            assert "sk-broken" not in raw
+        finally:
+            service.stop()
+            relay.stop()
+
     def test_bootstrap_and_artifact_endpoints(self) -> None:
         relay = RelayServer()
         relay.start()

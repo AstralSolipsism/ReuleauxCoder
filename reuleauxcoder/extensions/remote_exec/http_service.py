@@ -19,6 +19,11 @@ from reuleauxcoder.extensions.remote_exec.bootstrap import (
     generate_bootstrap_script,
     generate_powershell_bootstrap_script,
 )
+from reuleauxcoder.extensions.remote_exec.admin import (
+    ConfigReloadHandler,
+    ProviderTestHandler,
+    RemoteAdminConfigManager,
+)
 from reuleauxcoder.extensions.remote_exec.errors import RegisterRejectedError
 from reuleauxcoder.extensions.remote_exec.protocol import (
     ApprovalReplyRequest,
@@ -172,10 +177,14 @@ class RemoteRelayHTTPService:
         stream_chat_handler: Callable[[str, str, _RemoteChatSession], None]
         | None = None,
         bootstrap_access_secret: str = "",
+        admin_access_secret: str = "",
         bootstrap_token_ttl_sec: int = 300,
         mcp_servers: list[Any] | None = None,
         mcp_artifact_root: str | Path = ".rcoder/mcp-artifacts",
         environment_cli_tools: dict[str, Any] | None = None,
+        admin_config_path: str | Path | None = None,
+        admin_config_reload_handler: ConfigReloadHandler | None = None,
+        admin_provider_test_handler: ProviderTestHandler | None = None,
     ) -> None:
         self.relay_server = relay_server
         self.bind = bind
@@ -184,10 +193,16 @@ class RemoteRelayHTTPService:
         self.chat_handler = chat_handler
         self.stream_chat_handler = stream_chat_handler
         self.bootstrap_access_secret = bootstrap_access_secret
+        self.admin_access_secret = admin_access_secret
         self.bootstrap_token_ttl_sec = bootstrap_token_ttl_sec
         self.mcp_servers = list(mcp_servers or [])
         self.mcp_artifact_root = Path(mcp_artifact_root)
         self.environment_cli_tools = dict(environment_cli_tools or {})
+        self.admin_manager = RemoteAdminConfigManager(
+            Path(admin_config_path) if admin_config_path is not None else None,
+            reload_handler=admin_config_reload_handler,
+            provider_test_handler=admin_provider_test_handler,
+        )
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._queues: dict[str, queue.Queue[RelayEnvelope]] = {}
@@ -359,6 +374,9 @@ class RemoteRelayHTTPService:
                 if parsed.path == "/remote/approval/reply":
                     self._handle_approval_reply()
                     return
+                if parsed.path.startswith("/remote/admin/"):
+                    self._handle_admin(parsed.path)
+                    return
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
             def _read_json(self) -> dict[str, Any]:
@@ -407,6 +425,58 @@ class RemoteRelayHTTPService:
                 if not isinstance(peer_token, str) or not peer_token:
                     return None
                 return service.relay_server.token_manager.verify_peer_token(peer_token)
+
+            def _verify_admin_secret(self) -> bool:
+                configured_secret = service.admin_access_secret
+                presented_secret = self.headers.get("X-RC-Admin-Secret", "")
+                return bool(configured_secret) and secrets.compare_digest(
+                    presented_secret, configured_secret
+                )
+
+            def _handle_admin(self, path: str) -> None:
+                if not service.admin_access_secret:
+                    self._send_json(HTTPStatus.FORBIDDEN, {"error": "admin_disabled"})
+                    return
+                if not self._verify_admin_secret():
+                    self._send_json(
+                        HTTPStatus.FORBIDDEN, {"error": "invalid_admin_secret"}
+                    )
+                    return
+                payload = self._read_json()
+                try:
+                    if path == "/remote/admin/status":
+                        result = {"ok": True, **service.admin_manager.status()}
+                        self._send_json(HTTPStatus.OK, result)
+                        return
+                    if path == "/remote/admin/providers/list":
+                        result = {"ok": True, **service.admin_manager.list_providers()}
+                        self._send_json(HTTPStatus.OK, result)
+                        return
+                    if path == "/remote/admin/providers/record":
+                        result = service.admin_manager.record_provider(payload)
+                    elif path == "/remote/admin/providers/test":
+                        result = service.admin_manager.test_provider(payload)
+                    elif path == "/remote/admin/models/list":
+                        result = {
+                            "ok": True,
+                            **service.admin_manager.list_model_profiles(),
+                        }
+                        self._send_json(HTTPStatus.OK, result)
+                        return
+                    elif path == "/remote/admin/models/record":
+                        result = service.admin_manager.record_model_profile(payload)
+                    elif path == "/remote/admin/models/activate":
+                        result = service.admin_manager.activate_model_profile(payload)
+                    else:
+                        self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                        return
+                except Exception as exc:
+                    self._send_json(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": "admin_request_failed", "message": str(exc)},
+                    )
+                    return
+                self._send_json(result.status, result.payload)
 
             def _handle_bootstrap(self, parsed, script_kind: str) -> None:
                 del parsed

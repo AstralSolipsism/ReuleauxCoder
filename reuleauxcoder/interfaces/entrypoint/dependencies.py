@@ -186,10 +186,12 @@ def _default_create_remote_http_service(
         ui_bus=ui_bus,
         artifact_provider=_default_create_remote_artifact_provider(ui_bus),
         bootstrap_access_secret=config.remote_exec.bootstrap_access_secret,
+        admin_access_secret=config.remote_exec.admin_access_secret,
         bootstrap_token_ttl_sec=config.remote_exec.bootstrap_token_ttl_sec,
         mcp_servers=config.mcp_servers,
         mcp_artifact_root=config.mcp_artifact_root,
         environment_cli_tools=config.environment.cli_tools,
+        admin_config_path=getattr(config, "_source_path", None),
     )
 
 
