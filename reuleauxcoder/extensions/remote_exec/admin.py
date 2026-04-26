@@ -20,6 +20,7 @@ from reuleauxcoder.services.providers.manager import ProviderManager
 
 
 ProviderTestHandler = Callable[[ProviderConfig, str, str], dict[str, Any]]
+ProviderModelsHandler = Callable[[ProviderConfig], dict[str, Any]]
 ConfigReloadHandler = Callable[[], None]
 
 
@@ -39,10 +40,12 @@ class RemoteAdminConfigManager:
         *,
         reload_handler: ConfigReloadHandler | None = None,
         provider_test_handler: ProviderTestHandler | None = None,
+        provider_models_handler: ProviderModelsHandler | None = None,
     ) -> None:
         self.config_path = config_path or ConfigLoader.GLOBAL_CONFIG_PATH
         self.reload_handler = reload_handler
         self.provider_test_handler = provider_test_handler
+        self.provider_models_handler = provider_models_handler
         self._lock = threading.Lock()
 
     def status(self) -> dict[str, Any]:
@@ -96,6 +99,7 @@ class RemoteAdminConfigManager:
                 "compat": payload.get("compat")
                 or previous.get("compat")
                 or infer_provider_compat(str(base_url or "")),
+                "enabled": _bool_field(payload, "enabled", previous.get("enabled", True)),
                 "api_key": str(api_key or ""),
                 "base_url": base_url,
                 "headers": _dict_field(payload, "headers", previous),
@@ -136,7 +140,9 @@ class RemoteAdminConfigManager:
             if self.provider_test_handler is not None:
                 result = self.provider_test_handler(provider, model, prompt)
             else:
-                response = ProviderManager().create(provider).test(model=model, prompt=prompt)
+                response = ProviderManager().create(
+                    provider, allow_disabled=True
+                ).test(model=model, prompt=prompt)
                 preview = response.content.strip().replace("\n", " ")
                 if len(preview) > 200:
                     preview = preview[:197] + "..."
@@ -149,6 +155,111 @@ class RemoteAdminConfigManager:
                 }
         except Exception as exc:
             return AdminConfigResult(False, {"error": "provider_test_failed", "message": str(exc)}, 500)
+        return AdminConfigResult(True, result)
+
+    def delete_provider(self, payload: dict[str, Any]) -> AdminConfigResult:
+        provider_id = str(payload.get("provider_id") or payload.get("id") or "").strip()
+        if not provider_id:
+            return AdminConfigResult(False, {"error": "provider_id_required"}, 400)
+
+        with self._lock:
+            previous_data = self._load_data()
+            data = deepcopy(previous_data)
+            items = self._provider_items(data)
+            if provider_id not in items:
+                return AdminConfigResult(False, {"error": "provider_not_found"}, 404)
+            blockers = self._provider_profile_blockers(data, provider_id)
+            if blockers:
+                return AdminConfigResult(
+                    False,
+                    {
+                        "error": "provider_in_use",
+                        "provider_id": provider_id,
+                        "blockers": blockers,
+                    },
+                    409,
+                )
+            del items[provider_id]
+            reload_error = self._commit_config(data, previous_data)
+            if reload_error:
+                return reload_error
+            return AdminConfigResult(True, {"ok": True, "provider_id": provider_id})
+
+    def copy_provider(self, payload: dict[str, Any]) -> AdminConfigResult:
+        provider_id = str(payload.get("provider_id") or payload.get("id") or "").strip()
+        target_id = str(payload.get("target_id") or "").strip()
+        if not provider_id:
+            return AdminConfigResult(False, {"error": "provider_id_required"}, 400)
+
+        with self._lock:
+            previous_data = self._load_data()
+            data = deepcopy(previous_data)
+            items = self._provider_items(data)
+            source = items.get(provider_id)
+            if not isinstance(source, dict):
+                return AdminConfigResult(False, {"error": "provider_not_found"}, 404)
+            if target_id and target_id in items:
+                return AdminConfigResult(False, {"error": "provider_exists"}, 409)
+            new_id = target_id or self._unique_provider_copy_id(items, provider_id)
+            copied = deepcopy(source)
+            copied["enabled"] = True
+            provider = ProviderConfig.from_dict(new_id, copied)
+            items[new_id] = provider.to_dict()
+            reload_error = self._commit_config(data, previous_data)
+            if reload_error:
+                return reload_error
+            return AdminConfigResult(
+                True,
+                {
+                    "ok": True,
+                    "provider": self._provider_view(new_id, items[new_id]),
+                    "copied_from": provider_id,
+                },
+            )
+
+    def enable_provider(self, payload: dict[str, Any]) -> AdminConfigResult:
+        provider_id = str(payload.get("provider_id") or payload.get("id") or "").strip()
+        if not provider_id:
+            return AdminConfigResult(False, {"error": "provider_id_required"}, 400)
+        enabled = _bool_field(payload, "enabled", True)
+
+        with self._lock:
+            previous_data = self._load_data()
+            data = deepcopy(previous_data)
+            items = self._provider_items(data)
+            item = items.get(provider_id)
+            if not isinstance(item, dict):
+                return AdminConfigResult(False, {"error": "provider_not_found"}, 404)
+            item["enabled"] = enabled
+            provider = ProviderConfig.from_dict(provider_id, item)
+            items[provider_id] = provider.to_dict()
+            reload_error = self._commit_config(data, previous_data)
+            if reload_error:
+                return reload_error
+            return AdminConfigResult(
+                True,
+                {
+                    "ok": True,
+                    "provider": self._provider_view(provider_id, items[provider_id]),
+                },
+            )
+
+    def list_provider_models(self, payload: dict[str, Any]) -> AdminConfigResult:
+        provider_id = str(payload.get("provider_id") or payload.get("id") or "").strip()
+        if not provider_id:
+            return AdminConfigResult(False, {"error": "provider_id_required"}, 400)
+        try:
+            provider = self._expanded_provider(provider_id)
+            if provider is None:
+                return AdminConfigResult(False, {"error": "provider_not_found"}, 404)
+            if self.provider_models_handler is not None:
+                result = self.provider_models_handler(provider)
+            else:
+                result = ProviderManager().list_models(provider)
+        except Exception as exc:
+            return AdminConfigResult(
+                False, {"error": "provider_models_failed", "message": str(exc)}, 500
+            )
         return AdminConfigResult(True, result)
 
     def list_model_profiles(self) -> dict[str, Any]:
@@ -238,6 +349,21 @@ class RemoteAdminConfigManager:
                 models["active"] = profile_id
             if target in {"sub", "both"}:
                 models["active_sub"] = profile_id
+            profile_data = profiles.get(profile_id)
+            if isinstance(profile_data, dict) and profile_data.get("provider"):
+                provider_id = str(profile_data.get("provider"))
+                provider_item = self._provider_items(data).get(provider_id)
+                if isinstance(provider_item, dict):
+                    provider = ProviderConfig.from_dict(provider_id, provider_item)
+                    if not provider.enabled:
+                        return AdminConfigResult(
+                            False,
+                            {
+                                "error": "provider_disabled",
+                                "provider_id": provider_id,
+                            },
+                            409,
+                        )
             reload_error = self._commit_config(data, previous_data)
             if reload_error:
                 return reload_error
@@ -292,6 +418,43 @@ class RemoteAdminConfigManager:
             providers["items"] = items
         return items
 
+    def _provider_profile_blockers(
+        self, data: dict[str, Any], provider_id: str
+    ) -> list[dict[str, Any]]:
+        models = data.get("models", {})
+        if not isinstance(models, dict):
+            return []
+        profiles = models.get("profiles", {})
+        if not isinstance(profiles, dict):
+            return []
+        blockers: list[dict[str, Any]] = []
+        active_main = models.get("active_main")
+        active_sub = models.get("active_sub")
+        for profile_id, profile_data in sorted(profiles.items()):
+            if not isinstance(profile_data, dict):
+                continue
+            if str(profile_data.get("provider") or "") != provider_id:
+                continue
+            blockers.append(
+                {
+                    "profile_id": str(profile_id),
+                    "active_main": profile_id == active_main,
+                    "active_sub": profile_id == active_sub,
+                }
+            )
+        return blockers
+
+    def _unique_provider_copy_id(
+        self, items: dict[str, Any], provider_id: str
+    ) -> str:
+        base = f"{provider_id}-copy"
+        if base not in items:
+            return base
+        index = 2
+        while f"{base}-{index}" in items:
+            index += 1
+        return f"{base}-{index}"
+
     def _models_data(self) -> dict[str, Any]:
         data = self._load_data()
         models = data.get("models", {})
@@ -337,6 +500,15 @@ def _field_or_env(payload: dict[str, Any], field_name: str, env_field_name: str)
 def _dict_field(payload: dict[str, Any], field_name: str, previous: dict[str, Any]) -> dict[str, Any]:
     value = payload.get(field_name, previous.get(field_name, {}))
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _bool_field(payload: dict[str, Any], field_name: str, default: Any) -> bool:
+    if field_name not in payload:
+        return bool(default)
+    value = payload.get(field_name)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
 
 
 def _mask(value: str) -> str:

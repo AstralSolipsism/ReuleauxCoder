@@ -21,6 +21,7 @@ from reuleauxcoder.extensions.remote_exec.bootstrap import (
 )
 from reuleauxcoder.extensions.remote_exec.admin import (
     ConfigReloadHandler,
+    ProviderModelsHandler,
     ProviderTestHandler,
     RemoteAdminConfigManager,
 )
@@ -186,6 +187,7 @@ class RemoteRelayHTTPService:
         admin_config_path: str | Path | None = None,
         admin_config_reload_handler: ConfigReloadHandler | None = None,
         admin_provider_test_handler: ProviderTestHandler | None = None,
+        admin_provider_models_handler: ProviderModelsHandler | None = None,
     ) -> None:
         self.relay_server = relay_server
         self.bind = bind
@@ -203,6 +205,7 @@ class RemoteRelayHTTPService:
             Path(admin_config_path) if admin_config_path is not None else None,
             reload_handler=admin_config_reload_handler,
             provider_test_handler=admin_provider_test_handler,
+            provider_models_handler=admin_provider_models_handler,
         )
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -457,6 +460,14 @@ class RemoteRelayHTTPService:
                         result = service.admin_manager.record_provider(payload)
                     elif path == "/remote/admin/providers/test":
                         result = service.admin_manager.test_provider(payload)
+                    elif path == "/remote/admin/providers/delete":
+                        result = service.admin_manager.delete_provider(payload)
+                    elif path == "/remote/admin/providers/copy":
+                        result = service.admin_manager.copy_provider(payload)
+                    elif path == "/remote/admin/providers/enable":
+                        result = service.admin_manager.enable_provider(payload)
+                    elif path == "/remote/admin/providers/models":
+                        result = service.admin_manager.list_provider_models(payload)
                     elif path == "/remote/admin/models/list":
                         result = {
                             "ok": True,
