@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from reuleauxcoder.extensions.remote_exec.errors import (
@@ -10,6 +11,8 @@ from reuleauxcoder.extensions.remote_exec.errors import (
 )
 from reuleauxcoder.extensions.remote_exec.protocol import (
     ExecToolRequest,
+    ToolPreviewRequest,
+    ToolPreviewResult,
     ToolStreamChunk,
 )
 from reuleauxcoder.extensions.remote_exec.server import RelayServer
@@ -31,6 +34,7 @@ class RemoteRelayToolBackend(ToolBackend):
         super().__init__(context or ExecutionContext(execution_target="remote"))
         self.relay_server = relay_server
         self.ui_bus = ui_bus
+        self._approved_preview_states: dict[str, dict[str, Any]] = {}
 
     def exec_tool(self, tool_name: str, args: dict[str, Any]) -> str:
         """Execute a tool on the remote peer and return the text result.
@@ -55,6 +59,9 @@ class RemoteRelayToolBackend(ToolBackend):
             args=args,
             cwd=self.context.cwd,
             timeout_sec=timeout,
+            expected_state=self._approved_preview_states.pop(
+                self._request_key(tool_name, args), {}
+            ),
         )
 
         stream_handler = self._build_stream_handler(tool_name)
@@ -77,6 +84,44 @@ class RemoteRelayToolBackend(ToolBackend):
             return result.result
         error_msg = result.error_message or "unknown remote error"
         return f"Error [{result.error_code or 'REMOTE_TOOL_ERROR'}]: {error_msg}"
+
+    def preview_tool(self, tool_name: str, args: dict[str, Any]) -> ToolPreviewResult:
+        """Request a non-mutating tool preview from the selected peer."""
+        peer_id = self.context.peer_id
+        if peer_id is None:
+            peer = self.relay_server.registry.pick_default_peer()
+            if peer is None:
+                return ToolPreviewResult(
+                    ok=False,
+                    error_code="PEER_NOT_FOUND",
+                    error_message="No online peer available for tool preview",
+                )
+            peer_id = peer.peer_id
+
+        request = ToolPreviewRequest(
+            tool_name=tool_name,
+            args=args,
+            cwd=self.context.cwd,
+            timeout_sec=30,
+        )
+        try:
+            return self.relay_server.send_preview_request(
+                peer_id=peer_id,
+                request=request,
+                timeout_sec=30,
+            )
+        except Exception as exc:
+            return ToolPreviewResult(
+                ok=False,
+                error_code="PREVIEW_FAILED",
+                error_message=str(exc),
+            )
+
+    def remember_approved_preview(
+        self, tool_name: str, args: dict[str, Any], state: dict[str, Any]
+    ) -> None:
+        if state:
+            self._approved_preview_states[self._request_key(tool_name, args)] = state
 
     def _build_stream_handler(self, tool_name: str):
         remote_stream_handler = getattr(self.context, "remote_stream_handler", None)
@@ -108,3 +153,15 @@ class RemoteRelayToolBackend(ToolBackend):
                 )
 
         return _handle
+
+    def _request_key(self, tool_name: str, args: dict[str, Any]) -> str:
+        return json.dumps(
+            {
+                "tool_name": tool_name,
+                "args": args,
+                "cwd": self.context.cwd,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+        )

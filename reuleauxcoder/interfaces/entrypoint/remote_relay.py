@@ -26,11 +26,10 @@ from reuleauxcoder.domain.approval import (
 from reuleauxcoder.domain.config.models import Config
 from reuleauxcoder.extensions.remote_exec.backend import RemoteRelayToolBackend
 from reuleauxcoder.extensions.remote_exec.mcp_tools import RemotePeerMCPTool
-from reuleauxcoder.extensions.remote_exec.protocol import ChatResponse
+from reuleauxcoder.extensions.remote_exec.protocol import ChatResponse, ToolPreviewResult
 from reuleauxcoder.extensions.remote_exec.server import RelayServer
 from reuleauxcoder.extensions.skills.service import SkillsService
 from reuleauxcoder.extensions.tools.backend import ExecutionContext
-from reuleauxcoder.interfaces.cli.approval import CLIApprovalProvider
 from reuleauxcoder.interfaces.cli.commands import handle_command
 from reuleauxcoder.interfaces.cli.registration import CLI_PROFILE
 from reuleauxcoder.interfaces.cli.render import CLIRenderer
@@ -325,7 +324,6 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
             record=True, force_terminal=True, color_system="truecolor"
         )
         renderer = CLIRenderer(console_override=ansi_console)
-        preview_builder = CLIApprovalProvider(ui_interactor=None)  # type: ignore[arg-type]
 
         def _flush_output() -> None:
             rendered = ansi_console.export_text(clear=True, styles=True)
@@ -334,41 +332,118 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                     "output", {"format": "terminal", "content": rendered}
                 )
 
+        def _remote_backend() -> RemoteRelayToolBackend | None:
+            for tool in getattr(peer_agent, "tools", []):
+                backend = getattr(tool, "backend", None)
+                if isinstance(backend, RemoteRelayToolBackend):
+                    return backend
+            return None
+
+        def _peer_supports_tool_preview() -> bool:
+            peer = relay_server.registry.get(peer_id)
+            return bool(peer and "tool_preview" in peer.capabilities)
+
+        def _args_section(request: ApprovalRequest) -> dict[str, Any] | None:
+            if not request.tool_args:
+                return None
+            return {
+                "id": "args",
+                "title": "Arguments",
+                "kind": "json",
+                "content": request.tool_args,
+            }
+
+        def _section_markdown(section: dict[str, Any]) -> str:
+            title = str(section.get("title") or "Details")
+            kind = str(section.get("kind") or "text")
+            content = section.get("content", "")
+            if kind == "diff":
+                return f"### {title}\n\n```diff\n{content}\n```"
+            if kind == "json":
+                return (
+                    f"### {title}\n\n```json\n"
+                    f"{json.dumps(content, ensure_ascii=False, indent=2)}\n```"
+                )
+            return f"### {title}\n\n{content}"
+
+        def _preview_state(preview: ToolPreviewResult) -> dict[str, Any]:
+            state: dict[str, Any] = {}
+            if preview.resolved_path is not None:
+                state["resolved_path"] = preview.resolved_path
+            if preview.old_sha256 is not None:
+                state["old_sha256"] = preview.old_sha256
+            if preview.old_exists is not None:
+                state["old_exists"] = preview.old_exists
+            if preview.old_size is not None:
+                state["old_size"] = preview.old_size
+            if preview.old_mtime_ns is not None:
+                state["old_mtime_ns"] = preview.old_mtime_ns
+            return state
+
+        def _build_remote_preview(
+            request: ApprovalRequest,
+        ) -> tuple[list[dict[str, Any]], ToolPreviewResult | None, str | None]:
+            backend = _remote_backend()
+            if (
+                backend is None
+                or request.tool_name not in {"write_file", "edit_file"}
+                or not _peer_supports_tool_preview()
+            ):
+                section = _args_section(request)
+                return ([section] if section else []), None, "preview_unavailable"
+
+            preview = backend.preview_tool(request.tool_name, dict(request.tool_args))
+            if preview.ok:
+                if preview.sections:
+                    return preview.sections, preview, None
+                if preview.diff:
+                    return (
+                        [
+                            {
+                                "id": "diff",
+                                "title": "Proposed file diff",
+                                "kind": "diff",
+                                "content": preview.diff,
+                                "path": preview.resolved_path,
+                                "resolved_path": preview.resolved_path,
+                                "original_text": preview.original_text,
+                                "modified_text": preview.modified_text,
+                            }
+                        ],
+                        preview,
+                        None,
+                    )
+
+            sections: list[dict[str, Any]] = []
+            section = _args_section(request)
+            if section is not None:
+                sections.append(section)
+            sections.append(
+                {
+                    "id": "preview",
+                    "title": "Preview unavailable",
+                    "kind": "text",
+                    "content": preview.error_message
+                    or preview.error_code
+                    or "Peer could not build a preview.",
+                }
+            )
+            return sections, preview, preview.error_message or "preview_unavailable"
+
         class _RemoteApprovalProvider(ApprovalProvider):
             def request_approval(self, request: ApprovalRequest) -> ApprovalDecision:
                 approval_id = str(uuid.uuid4())
                 remote_session.register_approval(approval_id)
-                diff_text = preview_builder._build_preview_diff(request)
-                sections: list[dict[str, Any]] = []
-                if diff_text is not None:
-                    title = (
-                        "Proposed file diff"
-                        if request.tool_name == "write_file"
-                        else "Proposed edit diff"
-                    )
-                    sections.append(
-                        {
-                            "id": "diff",
-                            "title": title,
-                            "kind": "diff",
-                            "content": diff_text,
-                        }
-                    )
-                elif request.tool_args:
-                    sections.append(
-                        {
-                            "id": "args",
-                            "title": "Arguments",
-                            "kind": "json",
-                            "content": request.tool_args,
-                        }
-                    )
+                sections, preview, preview_error = _build_remote_preview(request)
                 payload = {
                     "approval_id": approval_id,
                     "tool_name": request.tool_name,
                     "tool_source": request.tool_source,
                     "reason": request.reason,
+                    "tool_args": request.tool_args,
                     "sections": sections,
+                    "preview_unavailable": preview is None or not preview.ok,
+                    "preview_error": preview_error,
                     "format": "markdown",
                     "content": "\n\n".join(
                         part
@@ -376,12 +451,7 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                             f"## Approval required: {request.tool_name}",
                             f"Tool `{request.tool_name}` from source `{request.tool_source}` requires approval.",
                             request.reason or "",
-                            (
-                                f"```json\n{json.dumps(request.tool_args, ensure_ascii=False, indent=2)}\n```"
-                                if request.tool_args and diff_text is None
-                                else ""
-                            ),
-                            f"```diff\n{diff_text}\n```" if diff_text else "",
+                            *[_section_markdown(section) for section in sections],
                         ]
                         if part
                     ),
@@ -397,6 +467,13 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                     },
                 )
                 if decision == "allow_once":
+                    backend = _remote_backend()
+                    if backend is not None and preview is not None and preview.ok:
+                        backend.remember_approved_preview(
+                            request.tool_name,
+                            dict(request.tool_args),
+                            _preview_state(preview),
+                        )
                     return ApprovalDecision.allow_once(reason)
                 return ApprovalDecision.deny_once(reason)
 
