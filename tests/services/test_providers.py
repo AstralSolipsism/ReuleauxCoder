@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from reuleauxcoder.domain.config.models import ProviderConfig
 from reuleauxcoder.domain.providers.models import ProviderRequest
 from reuleauxcoder.services.providers.adapters.anthropic_messages import (
@@ -18,6 +20,7 @@ from reuleauxcoder.extensions.provider.manifest import (
     run_provider_list_cli,
     run_provider_record_cli,
 )
+from reuleauxcoder.services.providers.manager import ProviderManager
 
 
 def test_anthropic_message_conversion_maps_tools_and_thinking() -> None:
@@ -572,6 +575,19 @@ def test_provider_manifest_record_updates_config(tmp_path) -> None:
     assert "openai-main" in raw
     assert "zenmux" in raw
     assert "${OPENAI_API_KEY}" in raw
+
+
+def test_provider_manager_rejects_disabled_provider() -> None:
+    provider = ProviderConfig(
+        id="disabled",
+        type="openai_chat",
+        enabled=False,
+        api_key="sk-test",
+        base_url="https://example.invalid/v1",
+    )
+
+    with pytest.raises(RuntimeError, match="disabled"):
+        ProviderManager().create(provider)
 
 
 def test_provider_record_cli_writes_compat(tmp_path, capsys, monkeypatch) -> None:

@@ -179,6 +179,15 @@ class TestRemoteRelayHTTPService:
                 "model": model,
                 "prompt": prompt,
             },
+            admin_provider_models_handler=lambda provider: {
+                "ok": True,
+                "provider_id": provider.id,
+                "unsupported": False,
+                "models": [
+                    {"id": "deepseek-chat", "owned_by": "deepseek"},
+                    {"id": "deepseek-reasoner", "owned_by": "deepseek"},
+                ],
+            },
         )
         service.start()
         try:
@@ -229,6 +238,15 @@ class TestRemoteRelayHTTPService:
             )
             assert providers["providers"][0]["api_key_hint"] == "sk-s...alue"
             assert "api_key" not in providers["providers"][0]
+            assert providers["providers"][0]["enabled"] is True
+
+            _, model_list = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/providers/models",
+                {"provider_id": "deepseek"},
+                headers=admin_headers,
+            )
+            assert model_list["models"][0]["id"] == "deepseek-chat"
 
             _, test_result = _json_request(
                 "POST",
@@ -260,6 +278,20 @@ class TestRemoteRelayHTTPService:
             assert profile["model_profile"]["provider"] == "deepseek"
             assert "api_key" not in profile["model_profile"]
 
+            try:
+                _json_request(
+                    "POST",
+                    f"{service.base_url}/remote/admin/providers/delete",
+                    {"provider_id": "deepseek"},
+                    headers=admin_headers,
+                )
+                raise AssertionError("delete should be blocked while profiles reference provider")
+            except HTTPError as exc:
+                assert exc.code == 409
+                body = json.loads(exc.read().decode("utf-8"))
+                assert body["error"] == "provider_in_use"
+                assert body["blockers"][0]["profile_id"] == "deepseek-main"
+
             _, active = _json_request(
                 "POST",
                 f"{service.base_url}/remote/admin/models/activate",
@@ -269,6 +301,36 @@ class TestRemoteRelayHTTPService:
             assert active["active_main"] == "deepseek-main"
             assert active["active_sub"] == "deepseek-main"
 
+            _, disabled = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/providers/enable",
+                {"provider_id": "deepseek", "enabled": False},
+                headers=admin_headers,
+            )
+            assert disabled["provider"]["enabled"] is False
+            try:
+                _json_request(
+                    "POST",
+                    f"{service.base_url}/remote/admin/models/activate",
+                    {"profile_id": "deepseek-main", "target": "main"},
+                    headers=admin_headers,
+                )
+                raise AssertionError("disabled provider should block activation")
+            except HTTPError as exc:
+                assert exc.code == 409
+                body = json.loads(exc.read().decode("utf-8"))
+                assert body["error"] == "provider_disabled"
+
+            _, copied = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/providers/copy",
+                {"provider_id": "deepseek", "target_id": "deepseek-copy"},
+                headers=admin_headers,
+            )
+            assert copied["provider"]["id"] == "deepseek-copy"
+            assert copied["provider"]["enabled"] is True
+            assert copied["provider"]["api_key_hint"] == "sk-s...alue"
+
             _, models = _json_request(
                 "POST",
                 f"{service.base_url}/remote/admin/models/list",
@@ -277,10 +339,18 @@ class TestRemoteRelayHTTPService:
             )
             assert models["active_main"] == "deepseek-main"
             assert models["model_profiles"][0]["id"] == "deepseek-main"
-            assert len(reloads) == 4
+            _, deleted = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/providers/delete",
+                {"provider_id": "deepseek-copy"},
+                headers=admin_headers,
+            )
+            assert deleted == {"ok": True, "provider_id": "deepseek-copy"}
+            assert len(reloads) == 7
             raw = config_path.read_text(encoding="utf-8")
             assert "sk-secret-value" in raw
             assert "active_main: deepseek-main" in raw
+            assert "deepseek-copy" not in raw
         finally:
             service.stop()
             relay.stop()
