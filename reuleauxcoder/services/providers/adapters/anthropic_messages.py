@@ -96,6 +96,50 @@ def convert_messages_to_anthropic(
     return ("\n\n".join(system_parts) if system_parts else None), converted
 
 
+def _usage_int(obj: Any, name: str) -> int | None:
+    if obj is None:
+        return None
+    value = obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _usage_float(obj: Any, name: str) -> float | None:
+    if obj is None:
+        return None
+    value = obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _usage_dict(obj: Any) -> dict[str, Any]:
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return dict(obj)
+    if hasattr(obj, "model_dump"):
+        dumped = obj.model_dump()
+        return dict(dumped) if isinstance(dumped, dict) else {}
+    return {
+        key: value
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        )
+        if (value := getattr(obj, key, None)) is not None
+    }
+
+
 class AnthropicMessagesProvider:
     """Provider adapter for Anthropic Messages API."""
 
@@ -229,6 +273,10 @@ class AnthropicMessagesProvider:
         tool_blocks: dict[int, dict[str, Any]] = {}
         prompt_tokens = 0
         completion_tokens = 0
+        cache_read_tokens: int | None = None
+        cache_write_tokens: int | None = None
+        cost_usd: float | None = None
+        usage_extra: dict[str, Any] = {}
         reasoning_signature: str | None = None
 
         for event in stream:
@@ -271,12 +319,28 @@ class AnthropicMessagesProvider:
                 usage = getattr(event, "usage", None)
                 if usage is not None:
                     completion_tokens = getattr(usage, "output_tokens", 0) or 0
+                    cache_read_tokens = _usage_int(
+                        usage, "cache_read_input_tokens"
+                    )
+                    cache_write_tokens = _usage_int(
+                        usage, "cache_creation_input_tokens"
+                    )
+                    cost_usd = _usage_float(usage, "cost_usd")
+                    usage_extra = {"usage": _usage_dict(usage)}
                 continue
             if event_type == "message_start":
                 message = getattr(event, "message", None)
                 usage = getattr(message, "usage", None)
                 if usage is not None:
                     prompt_tokens = getattr(usage, "input_tokens", 0) or 0
+                    cache_read_tokens = _usage_int(
+                        usage, "cache_read_input_tokens"
+                    )
+                    cache_write_tokens = _usage_int(
+                        usage, "cache_creation_input_tokens"
+                    )
+                    cost_usd = _usage_float(usage, "cost_usd")
+                    usage_extra = {"usage": _usage_dict(usage)}
                 continue
 
         parsed: list[ToolCall] = []
@@ -299,6 +363,10 @@ class AnthropicMessagesProvider:
             tool_calls=parsed,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            cost_usd=cost_usd,
+            usage_extra=usage_extra,
             tokens=tokens,
             diagnostics=diagnostics,
             provider_extra={

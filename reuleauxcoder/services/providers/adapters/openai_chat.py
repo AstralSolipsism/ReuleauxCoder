@@ -111,6 +111,48 @@ def _extract_stream_event(chunk: Any) -> list[dict[str, Any]]:
     return events
 
 
+def _usage_attr(obj: Any, name: str) -> Any:
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _usage_int(obj: Any, name: str) -> int | None:
+    value = _usage_attr(obj, name)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _usage_float(obj: Any, name: str) -> float | None:
+    value = _usage_attr(obj, name)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_cache_usage(usage: Any) -> tuple[int | None, int | None, dict[str, Any]]:
+    details = _usage_attr(usage, "prompt_tokens_details") or _usage_attr(
+        usage, "input_tokens_details"
+    )
+    cached = _usage_int(details, "cached_tokens")
+    cache_creation = _usage_int(details, "cache_creation_tokens")
+    extra: dict[str, Any] = {}
+    if details is not None:
+        extra["prompt_tokens_details"] = (
+            dict(details) if isinstance(details, dict) else _reasoning_detail_to_dict(details)
+        )
+    return cached, cache_creation, extra
+
+
 class OpenAIChatProvider:
     """Provider adapter for OpenAI-compatible Chat Completions APIs."""
 
@@ -178,6 +220,10 @@ class OpenAIChatProvider:
             tc_map: dict[int, dict] = {}
             prompt_tok = 0
             completion_tok = 0
+            cache_read_tokens: int | None = None
+            cache_write_tokens: int | None = None
+            cost_usd: float | None = None
+            usage_extra: dict[str, Any] = {}
             reasoning_signature: str | None = None
             reasoning_details_out: list[dict[str, Any]] = []
 
@@ -192,6 +238,10 @@ class OpenAIChatProvider:
                 if usage:
                     prompt_tok = getattr(usage, "prompt_tokens", 0) or 0
                     completion_tok = getattr(usage, "completion_tokens", 0) or 0
+                    cache_read_tokens, cache_write_tokens, usage_extra = (
+                        _extract_cache_usage(usage)
+                    )
+                    cost_usd = _usage_float(usage, "cost_usd")
                 choices = getattr(chunk, "choices", None) or []
                 if not choices:
                     continue
@@ -249,6 +299,10 @@ class OpenAIChatProvider:
                 tool_calls=parsed,
                 prompt_tokens=prompt_tok,
                 completion_tokens=completion_tok,
+                cache_read_tokens=cache_read_tokens,
+                cache_write_tokens=cache_write_tokens,
+                cost_usd=cost_usd,
+                usage_extra=usage_extra,
                 tokens=tokens,
                 diagnostics=diagnostics,
                 provider_extra={

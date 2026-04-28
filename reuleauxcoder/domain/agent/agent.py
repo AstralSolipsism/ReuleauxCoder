@@ -30,6 +30,10 @@ class AgentState:
     messages: list[dict] = field(default_factory=list)
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
+    total_cache_read_tokens: int | None = None
+    total_cache_write_tokens: int | None = None
+    total_cost_usd: float | None = None
+    usage_extra: dict = field(default_factory=dict)
     current_round: int = 0
 
 
@@ -312,9 +316,10 @@ class Agent:
                 injected += 1
         return injected
 
-    def chat(self, user_input: str) -> str:
+    def chat(self, user_input: str, *, clear_stop_request: bool = True) -> str:
         """Process one user message."""
-        self.clear_stop_request()
+        if clear_stop_request:
+            self.clear_stop_request()
 
         # Inject completed background sub-agent results before each new user turn.
         self._inject_completed_subagent_jobs()
@@ -337,8 +342,12 @@ class Agent:
             self.reconcile_pending_tool_calls(
                 reason=f"Interrupted due to {type(e).__name__}."
             )
+            self._emit_usage_event("error")
             raise
 
+        self._emit_usage_event(
+            "cancelled" if self.stop_requested() else "done"
+        )
         self._emit_event(
             AgentEvent.chat_end(
                 result,
@@ -349,11 +358,34 @@ class Agent:
         )
         return result
 
+    def _emit_usage_event(self, run_status: str) -> None:
+        llm = getattr(self, "llm", None)
+        self._emit_event(
+            AgentEvent.usage_update(
+                prompt_tokens=self.state.total_prompt_tokens,
+                completion_tokens=self.state.total_completion_tokens,
+                context_tokens=self.context.get_context_tokens(self.state.messages),
+                context_window=getattr(self.context, "max_tokens", None),
+                max_output_tokens=getattr(llm, "max_tokens", None),
+                model=getattr(llm, "model", None),
+                mode=getattr(self, "active_mode", None),
+                cache_read_tokens=getattr(self.state, "total_cache_read_tokens", None),
+                cache_write_tokens=getattr(self.state, "total_cache_write_tokens", None),
+                cost_usd=getattr(self.state, "total_cost_usd", None),
+                usage_extra=getattr(self.state, "usage_extra", None),
+                run_status=run_status,
+            )
+        )
+
     def reset(self) -> None:
         """Clear conversation history."""
         self.state.messages.clear()
         self.state.total_prompt_tokens = 0
         self.state.total_completion_tokens = 0
+        self.state.total_cache_read_tokens = None
+        self.state.total_cache_write_tokens = None
+        self.state.total_cost_usd = None
+        self.state.usage_extra.clear()
         self.state.current_round = 0
 
     @property

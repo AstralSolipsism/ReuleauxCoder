@@ -72,6 +72,65 @@ def convert_messages_to_responses_input(messages: list[dict[str, Any]]) -> list[
     return converted
 
 
+def _usage_attr(obj: Any, name: str) -> Any:
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _usage_int(obj: Any, name: str) -> int | None:
+    value = _usage_attr(obj, name)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _usage_float(obj: Any, name: str) -> float | None:
+    value = _usage_attr(obj, name)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _usage_dict(obj: Any) -> dict[str, Any]:
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return dict(obj)
+    if hasattr(obj, "model_dump"):
+        dumped = obj.model_dump()
+        return dict(dumped) if isinstance(dumped, dict) else {}
+    return {
+        key: value
+        for key in (
+            "cached_tokens",
+            "cache_creation_tokens",
+            "input_tokens",
+            "output_tokens",
+        )
+        if (value := getattr(obj, key, None)) is not None
+    }
+
+
+def _extract_cache_usage(usage: Any) -> tuple[int | None, int | None, dict[str, Any]]:
+    details = _usage_attr(usage, "input_tokens_details") or _usage_attr(
+        usage, "prompt_tokens_details"
+    )
+    return (
+        _usage_int(details, "cached_tokens"),
+        _usage_int(details, "cache_creation_tokens"),
+        {"input_tokens_details": _usage_dict(details)} if details is not None else {},
+    )
+
+
 class OpenAIResponsesProvider:
     """Provider adapter for OpenAI Responses API."""
 
@@ -177,6 +236,10 @@ class OpenAIResponsesProvider:
         tool_calls: dict[str, dict[str, str]] = {}
         prompt_tokens = 0
         completion_tokens = 0
+        cache_read_tokens: int | None = None
+        cache_write_tokens: int | None = None
+        cost_usd: float | None = None
+        usage_extra: dict[str, Any] = {}
         provider_response_id: str | None = None
 
         for event in stream:
@@ -253,6 +316,10 @@ class OpenAIResponsesProvider:
                     completion_tokens = getattr(
                         usage, "output_tokens", 0
                     ) or getattr(usage, "completion_tokens", 0) or 0
+                    cache_read_tokens, cache_write_tokens, usage_extra = (
+                        _extract_cache_usage(usage)
+                    )
+                    cost_usd = _usage_float(usage, "cost_usd")
                 continue
             if event_type == "error":
                 error = getattr(event, "error", None)
@@ -277,6 +344,10 @@ class OpenAIResponsesProvider:
             tool_calls=parsed,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            cost_usd=cost_usd,
+            usage_extra=usage_extra,
             tokens=tokens,
             provider_response_id=provider_response_id,
             diagnostics=diagnostics,

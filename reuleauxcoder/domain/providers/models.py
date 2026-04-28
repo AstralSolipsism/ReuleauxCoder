@@ -49,6 +49,10 @@ class ProviderResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    cost_usd: float | None = None
+    usage_extra: dict[str, Any] = field(default_factory=dict)
     tokens: list[str] = field(default_factory=list)
     provider_response_id: str | None = None
     provider_extra: dict[str, Any] = field(default_factory=dict)
@@ -66,6 +70,10 @@ class ProviderResponse:
             tool_calls=list(self.tool_calls),
             prompt_tokens=self.prompt_tokens,
             completion_tokens=self.completion_tokens,
+            cache_read_tokens=self.cache_read_tokens,
+            cache_write_tokens=self.cache_write_tokens,
+            cost_usd=self.cost_usd,
+            usage_extra=dict(self.usage_extra),
             provider_response_id=self.provider_response_id,
             provider_extra=extra,
             tokens=list(self.tokens),

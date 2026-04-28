@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from reuleauxcoder.domain.agent.agent import Agent
+    from reuleauxcoder.domain.llm.models import LLMResponse
 
 from reuleauxcoder.domain.agent.events import AgentEvent, AgentEventType
 
@@ -96,6 +97,66 @@ class AgentLoop:
         """Get tool schemas for LLM."""
         return [t.schema() for t in self.agent.get_active_tools()]
 
+    def _tool_source(self, tool_name: str) -> str | None:
+        tool = self.agent.get_tool(tool_name)
+        return getattr(tool, "tool_source", None) if tool is not None else None
+
+    @staticmethod
+    def _sum_optional(current: int | None, increment: int | None) -> int | None:
+        if increment is None:
+            return current
+        return (current or 0) + increment
+
+    @staticmethod
+    def _sum_optional_float(current: float | None, increment: float | None) -> float | None:
+        if increment is None:
+            return current
+        return (current or 0.0) + increment
+
+    def _record_response_usage(self, response: "LLMResponse") -> None:
+        self.agent.state.total_prompt_tokens += response.prompt_tokens
+        self.agent.state.total_completion_tokens += response.completion_tokens
+        self.agent.state.total_cache_read_tokens = self._sum_optional(
+            getattr(self.agent.state, "total_cache_read_tokens", None),
+            response.cache_read_tokens,
+        )
+        self.agent.state.total_cache_write_tokens = self._sum_optional(
+            getattr(self.agent.state, "total_cache_write_tokens", None),
+            response.cache_write_tokens,
+        )
+        self.agent.state.total_cost_usd = self._sum_optional_float(
+            getattr(self.agent.state, "total_cost_usd", None),
+            response.cost_usd,
+        )
+        if response.usage_extra:
+            usage_extra = getattr(self.agent.state, "usage_extra", None)
+            if isinstance(usage_extra, dict):
+                usage_extra.update(response.usage_extra)
+
+    def _emit_usage_update(self, run_status: str = "running") -> None:
+        context_tokens = self.agent.context.get_context_tokens(self.agent.state.messages)
+        llm = getattr(self.agent, "llm", None)
+        self.agent._emit_event(
+            AgentEvent.usage_update(
+                prompt_tokens=self.agent.state.total_prompt_tokens,
+                completion_tokens=self.agent.state.total_completion_tokens,
+                context_tokens=context_tokens,
+                context_window=getattr(self.agent.context, "max_tokens", None),
+                max_output_tokens=getattr(llm, "max_tokens", None),
+                model=getattr(llm, "model", None),
+                mode=getattr(self.agent, "active_mode", None),
+                cache_read_tokens=getattr(
+                    self.agent.state, "total_cache_read_tokens", None
+                ),
+                cache_write_tokens=getattr(
+                    self.agent.state, "total_cache_write_tokens", None
+                ),
+                cost_usd=getattr(self.agent.state, "total_cost_usd", None),
+                usage_extra=getattr(self.agent.state, "usage_extra", None),
+                run_status=run_status,
+            )
+        )
+
     def run(self) -> str:
         """Run the conversation loop."""
         # Compress if needed
@@ -103,6 +164,7 @@ class AgentLoop:
             self.agent.state.messages,
             self.agent.llm,
         )
+        self._emit_usage_update("running")
 
         for round_num in range(self.agent.max_rounds):
             if self.agent.stop_requested():
@@ -130,9 +192,8 @@ class AgentLoop:
                 },
             )
 
-            # Update token counts
-            self.agent.state.total_prompt_tokens += resp.prompt_tokens
-            self.agent.state.total_completion_tokens += resp.completion_tokens
+            self._record_response_usage(resp)
+            self._emit_usage_update()
 
             # No tool calls -> done
             if not resp.tool_calls:
@@ -149,7 +210,12 @@ class AgentLoop:
             if len(resp.tool_calls) == 1:
                 tc = resp.tool_calls[0]
                 self.agent._emit_event(
-                    AgentEvent.tool_call_start(tc.name, tc.arguments)
+                    AgentEvent.tool_call_start(
+                        tc.name,
+                        tc.arguments,
+                        tool_call_id=tc.id,
+                        tool_source=self._tool_source(tc.name),
+                    )
                 )
                 result = self.agent._executor.execute(tc)
                 self.agent.state.messages.append(
@@ -159,6 +225,7 @@ class AgentLoop:
                         "content": result,
                     }
                 )
+                self._emit_usage_update()
             else:
                 # If approval is interactive, run sequentially to keep terminal UX stable.
                 if self.agent.approval_provider is not None:
@@ -166,7 +233,12 @@ class AgentLoop:
                         if self.agent.stop_requested():
                             return "(stopped by cancellation request)"
                         self.agent._emit_event(
-                            AgentEvent.tool_call_start(tc.name, tc.arguments)
+                            AgentEvent.tool_call_start(
+                                tc.name,
+                                tc.arguments,
+                                tool_call_id=tc.id,
+                                tool_source=self._tool_source(tc.name),
+                            )
                         )
                         result = self.agent._executor.execute(tc)
                         self.agent.state.messages.append(
@@ -176,13 +248,19 @@ class AgentLoop:
                                 "content": result,
                             }
                         )
+                        self._emit_usage_update()
                 else:
                     # No interactive approval needed: keep parallel execution.
                     if self.agent.stop_requested():
                         return "(stopped by cancellation request)"
                     for tc in resp.tool_calls:
                         self.agent._emit_event(
-                            AgentEvent.tool_call_start(tc.name, tc.arguments)
+                            AgentEvent.tool_call_start(
+                                tc.name,
+                                tc.arguments,
+                                tool_call_id=tc.id,
+                                tool_source=self._tool_source(tc.name),
+                            )
                         )
                     results = self.agent._executor.execute_parallel(resp.tool_calls)
                     for tc, result in zip(resp.tool_calls, results):
@@ -193,12 +271,14 @@ class AgentLoop:
                                 "content": result,
                             }
                         )
+                        self._emit_usage_update()
 
             # Compress if tool outputs are big
             self.agent.context.maybe_compress(
                 self.agent.state.messages,
                 self.agent.llm,
             )
+            self._emit_usage_update()
 
         summary_prompt = (
             "Maximum tool-call rounds reached. Do not call any tools. "
@@ -227,7 +307,7 @@ class AgentLoop:
             },
         )
         self.last_response_streamed = summary_streamed
-        self.agent.state.total_prompt_tokens += summary_resp.prompt_tokens
-        self.agent.state.total_completion_tokens += summary_resp.completion_tokens
+        self._record_response_usage(summary_resp)
+        self._emit_usage_update()
         self.agent.state.messages.append(summary_resp.message)
         return summary_resp.content or "(reached maximum tool-call rounds)"

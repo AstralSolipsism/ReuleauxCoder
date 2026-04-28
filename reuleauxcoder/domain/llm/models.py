@@ -24,6 +24,10 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    cost_usd: float | None = None
+    usage_extra: dict = field(default_factory=dict)
     provider_response_id: str | None = None
     provider_extra: dict = field(default_factory=dict)
     tokens: list[str] = field(
