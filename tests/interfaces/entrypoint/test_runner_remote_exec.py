@@ -34,6 +34,11 @@ from reuleauxcoder.interfaces.entrypoint.runner import (
     AppOptions,
     AppRunner,
 )
+from reuleauxcoder.interfaces.entrypoint.remote_relay import (
+    _structured_ui_event_payload,
+    _structured_ui_event_type,
+)
+from reuleauxcoder.interfaces.events import UIEvent, UIEventKind
 
 
 def _free_port() -> int:
@@ -103,6 +108,7 @@ class FakeAgent:
         self.hook_registry = HookRegistry()
         self._event_handlers = []
         self.approval_provider = None
+        self._stop_requested = False
         self._chat_behavior = chat_behavior or (lambda _agent, prompt: f"ok:{prompt}")
 
     def register_hook(self, hook_point, hook) -> None:
@@ -119,6 +125,15 @@ class FakeAgent:
         response = self._chat_behavior(self, user_input)
         self.messages.append({"role": "assistant", "content": response})
         return response
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
+
+    def clear_stop_request(self) -> None:
+        self._stop_requested = False
+
+    def stop_requested(self) -> bool:
+        return self._stop_requested
 
 
 def _build_runner_with_fake_agent(
@@ -192,6 +207,28 @@ def _collect_stream_events(
         if stream_body["done"]:
             return events
     raise AssertionError("timed out waiting for stream events")
+
+
+def test_remote_relay_maps_all_ui_event_kinds_to_structured_events() -> None:
+    expected = {
+        UIEventKind.VIEW: "view",
+        UIEventKind.CONTEXT: "context_event",
+        UIEventKind.REMOTE: "remote_event",
+        UIEventKind.MCP: "mcp_event",
+        UIEventKind.MODEL: "model_event",
+        UIEventKind.SESSION: "session_event",
+        UIEventKind.COMMAND: "command_event",
+        UIEventKind.APPROVAL: "approval_event",
+        UIEventKind.SYSTEM: "system_event",
+        UIEventKind.AGENT: "agent_event",
+    }
+    for kind, event_type in expected.items():
+        event = UIEvent.info("hello", kind=kind, detail="value")
+        assert _structured_ui_event_type(event) == event_type
+        payload = _structured_ui_event_payload(event)
+        assert payload["message"] == "hello"
+        assert payload["kind"] == kind.value
+        assert payload["detail"] == "value"
 
 
 class TestRunnerRemoteExec:
@@ -568,6 +605,7 @@ class TestRunnerRemoteExec:
 
     def test_runner_stream_chat_uses_structured_tool_events(self) -> None:
         workspace = Path(__file__).resolve().parent
+        long_result = "file body\n" + ("x" * 700)
 
         def emit(agent: FakeAgent, event: AgentEvent) -> None:
             for handler in list(agent._event_handlers):
@@ -584,7 +622,7 @@ class TestRunnerRemoteExec:
             emit(
                 agent,
                 AgentEvent.tool_call_end(
-                    "read_file", "file body\nsecond line", success=True
+                    "read_file", long_result, success=True
                 ),
             )
             return "done"
@@ -631,7 +669,8 @@ class TestRunnerRemoteExec:
             assert any(
                 event["type"] == "tool_call_end"
                 and event["payload"].get("tool_name") == "read_file"
-                and event["payload"].get("tool_result") == "file body\nsecond line"
+                and event["payload"].get("tool_result") == long_result
+                and len(event["payload"].get("tool_result", "")) > 500
                 for event in events
             )
             assert any(
@@ -753,6 +792,89 @@ class TestRunnerRemoteExec:
         finally:
             runner.cleanup(ctx.agent)
 
+    def test_runner_chat_cancel_denies_pending_approval(self, tmp_path: Path) -> None:
+        decisions: list[tuple[bool, str | None]] = []
+
+        def chat_behavior(agent: FakeAgent, _prompt: str) -> str:
+            decision = agent.approval_provider.request_approval(
+                ApprovalRequest(
+                    tool_name="shell",
+                    tool_args={"command": "gitnexus --version"},
+                    tool_source="builtin_tool",
+                    reason="Tool 'shell' requires approval by policy",
+                )
+            )
+            decisions.append((decision.approved, decision.reason))
+            return "cancelled" if not decision.approved else "approved"
+
+        port = _free_port()
+        runner = _build_runner_with_fake_agent(
+            f"127.0.0.1:{port}", chat_behavior=chat_behavior
+        )
+        ctx = runner.initialize()
+        try:
+            _, peer_token = _register_peer(
+                runner._relay_http_service.base_url,
+                runner._relay_server.issue_bootstrap_token(ttl_sec=60),
+                str(tmp_path),
+            )
+            _, start_body = _json_request(
+                "POST",
+                f"{runner._relay_http_service.base_url}/remote/chat/start",
+                {"peer_token": peer_token, "prompt": "run shell"},
+            )
+
+            cursor = 0
+            approval_payload: dict | None = None
+            deadline = time.time() + 3
+            while time.time() < deadline and approval_payload is None:
+                _, stream_body = _json_request(
+                    "POST",
+                    f"{runner._relay_http_service.base_url}/remote/chat/stream",
+                    {
+                        "peer_token": peer_token,
+                        "chat_id": start_body["chat_id"],
+                        "cursor": cursor,
+                        "timeout_sec": 0.5,
+                    },
+                )
+                cursor = stream_body["next_cursor"]
+                for event in stream_body["events"]:
+                    if event["type"] == "approval_request":
+                        approval_payload = event["payload"]
+                        break
+            assert approval_payload is not None
+
+            _, cancelled = _json_request(
+                "POST",
+                f"{runner._relay_http_service.base_url}/remote/chat/cancel",
+                {
+                    "peer_token": peer_token,
+                    "chat_id": start_body["chat_id"],
+                    "reason": "user_cancelled",
+                },
+            )
+            assert cancelled["ok"] is True
+
+            events = _collect_stream_events(
+                runner._relay_http_service.base_url,
+                peer_token,
+                start_body["chat_id"],
+            )
+            assert decisions == [(False, "user_cancelled")]
+            assert any(event["type"] == "chat_cancel_requested" for event in events)
+            assert any(
+                event["type"] == "approval_resolved"
+                and event["payload"].get("approval_id")
+                == approval_payload["approval_id"]
+                and event["payload"].get("decision") == "deny_once"
+                and event["payload"].get("reason") == "user_cancelled"
+                for event in events
+            )
+            assert any(event["type"] == "chat_cancelled" for event in events)
+        finally:
+            runner.cleanup(ctx.agent)
+
     def test_runner_stream_chat_keeps_peer_sessions_isolated(self) -> None:
         workspace = Path(__file__).resolve().parent
         port = _free_port()
@@ -859,7 +981,7 @@ class TestRunnerRemoteExec:
         finally:
             runner.cleanup(ctx.agent)
 
-    def test_runner_stream_chat_slash_command_renders_terminal_view(self) -> None:
+    def test_runner_stream_chat_slash_command_renders_structured_view(self) -> None:
         workspace = Path(__file__).resolve().parent
         port = _free_port()
         runner = _build_runner_with_fake_agent(f"127.0.0.1:{port}")
@@ -880,6 +1002,11 @@ class TestRunnerRemoteExec:
             events = _collect_stream_events(
                 runner._relay_http_service.base_url, peer_token, start_body["chat_id"]
             )
+            view_events = [event for event in events if event["type"] == "view"]
+            view_payloads = "\n".join(
+                json.dumps(event["payload"], ensure_ascii=False)
+                for event in view_events
+            )
             terminal_outputs = [
                 event["payload"]["content"]
                 for event in events
@@ -889,7 +1016,8 @@ class TestRunnerRemoteExec:
             merged = "\n".join(terminal_outputs)
             assert any(event["type"] == "remote_peer_ready" for event in events)
             assert "REMOTE PEER READY" not in merged
-            assert "Available commands" in merged or "/help" in merged
+            assert view_events
+            assert "Available commands" in view_payloads or "/help" in view_payloads
             assert not any(
                 event["type"] == "output"
                 and event["payload"].get("format") == "plain"
