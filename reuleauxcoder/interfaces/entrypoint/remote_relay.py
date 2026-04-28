@@ -7,9 +7,7 @@ from pathlib import Path
 import uuid
 from typing import Any, Callable
 
-from rich import box
 from rich.console import Console
-from rich.panel import Panel
 
 from reuleauxcoder.app.runtime.session_state import (
     apply_session_runtime_state,
@@ -24,6 +22,7 @@ from reuleauxcoder.domain.approval import (
     ApprovalRequest,
 )
 from reuleauxcoder.domain.config.models import Config
+from reuleauxcoder.domain.session.models import Session, SessionMetadata, SessionRuntimeState
 from reuleauxcoder.extensions.remote_exec.backend import RemoteRelayToolBackend
 from reuleauxcoder.extensions.remote_exec.mcp_tools import RemotePeerMCPTool
 from reuleauxcoder.extensions.remote_exec.protocol import ChatResponse, ToolPreviewResult
@@ -132,6 +131,9 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
         runner._relay_http_service.environment_cli_tools = dict(
             next_config.environment.cli_tools
         )
+        runner._relay_http_service.environment_skills = dict(
+            next_config.environment.skills
+        )
         runner._relay_http_service.bootstrap_access_secret = (
             next_config.remote_exec.bootstrap_access_secret
         )
@@ -157,8 +159,150 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                 )
         return f"remote:{machine_key}:{workspace_root or '.'}"
 
+    def _session_snapshot_path(session_id: str) -> Path:
+        session_path = session_store._get_session_path(session_id)
+        return session_path.with_name(f"{session_path.stem}.ui.json")
+
+    def _session_metadata_payload(
+        session: Session | SessionMetadata,
+    ) -> dict[str, Any]:
+        preview = (
+            session.preview
+            if isinstance(session, SessionMetadata)
+            else session.get_preview()
+        )
+        return {
+            "id": session.id,
+            "model": session.model,
+            "saved_at": session.saved_at,
+            "preview": preview,
+            "fingerprint": session.fingerprint,
+        }
+
+    def _load_session_snapshot(session_id: str) -> tuple[dict[str, Any] | None, str | None]:
+        path = _session_snapshot_path(session_id)
+        if not path.exists():
+            return None, None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return None, str(exc)
+        if not isinstance(data, dict):
+            return None, "snapshot_not_object"
+        return data, None
+
+    def _handle_session_request(
+        action: str, peer_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        fingerprint = _peer_fingerprint(peer_id)
+        current_config = _current_config()
+        if action == "list":
+            limit = max(1, min(100, int(payload.get("limit", 20) or 20)))
+            sessions = session_store.list(limit=limit, fingerprint=fingerprint)
+            return {
+                "ok": True,
+                "fingerprint": fingerprint,
+                "sessions": [_session_metadata_payload(session) for session in sessions],
+            }
+
+        if action == "load":
+            session_id = str(payload.get("session_id") or "")
+            if not session_id:
+                return {"ok": False, "error": "missing_session_id", "_status": 400}
+            loaded = session_store.load(session_id)
+            if loaded is None:
+                return {"ok": False, "error": "session_not_found", "_status": 404}
+            if loaded.fingerprint != fingerprint:
+                return {
+                    "ok": False,
+                    "error": "session_fingerprint_mismatch",
+                    "fingerprint": loaded.fingerprint,
+                    "current_fingerprint": fingerprint,
+                    "_status": 403,
+                }
+            snapshot, snapshot_error = _load_session_snapshot(session_id)
+            return {
+                "ok": True,
+                "fingerprint": fingerprint,
+                "metadata": _session_metadata_payload(loaded),
+                "messages": list(loaded.messages),
+                "runtime_state": loaded.runtime_state.to_dict(),
+                "snapshot": snapshot,
+                "snapshot_error": snapshot_error,
+            }
+
+        if action == "new":
+            if current_config is None:
+                return {"ok": False, "error": "config_unavailable", "_status": 503}
+            session_id = session_store.generate_session_id()
+            runtime_state = SessionRuntimeState(
+                model=getattr(current_config, "model", None),
+                active_mode=getattr(current_config, "active_mode", None),
+                active_main_model_profile=getattr(
+                    current_config, "active_main_model_profile", None
+                )
+                or getattr(current_config, "active_model_profile", None),
+                active_sub_model_profile=getattr(
+                    current_config, "active_sub_model_profile", None
+                ),
+            )
+            session_store.save(
+                [],
+                getattr(current_config, "model", ""),
+                session_id,
+                active_mode=getattr(current_config, "active_mode", None),
+                runtime_state=runtime_state,
+                fingerprint=fingerprint,
+            )
+            loaded = session_store.load(session_id)
+            return {
+                "ok": True,
+                "fingerprint": fingerprint,
+                "metadata": _session_metadata_payload(loaded)
+                if loaded is not None
+                else {
+                    "id": session_id,
+                    "model": getattr(current_config, "model", ""),
+                    "saved_at": "",
+                    "preview": "",
+                    "fingerprint": fingerprint,
+                },
+                "messages": [],
+                "runtime_state": runtime_state.to_dict(),
+                "snapshot": None,
+            }
+
+        if action == "snapshot":
+            session_id = str(payload.get("session_id") or "")
+            snapshot = payload.get("snapshot")
+            if not session_id:
+                return {"ok": False, "error": "missing_session_id", "_status": 400}
+            if not isinstance(snapshot, dict):
+                return {"ok": False, "error": "invalid_snapshot", "_status": 400}
+            loaded = session_store.load(session_id)
+            if loaded is None:
+                return {"ok": False, "error": "session_not_found", "_status": 404}
+            if loaded.fingerprint != fingerprint:
+                return {
+                    "ok": False,
+                    "error": "session_fingerprint_mismatch",
+                    "_status": 403,
+                }
+            path = _session_snapshot_path(session_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            return {"ok": True, "session_id": session_id}
+
+        return {"ok": False, "error": "unknown_session_action", "_status": 404}
+
+    runner._relay_http_service.set_session_handler(_handle_session_request)
+
     def _create_peer_agent(
-        peer_id: str, remote_stream_handler: Callable[[str, Any], None] | None = None
+        peer_id: str,
+        remote_stream_handler: Callable[[str, Any], None] | None = None,
+        session_hint: str | None = None,
     ) -> Agent:
         current_config = _current_config()
         if current_config is None:
@@ -203,6 +347,20 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
         fingerprint = _peer_fingerprint(peer_id)
         setattr(peer_agent, "session_fingerprint", fingerprint)
 
+        if session_hint:
+            loaded = session_store.load(session_hint)
+            if loaded is not None:
+                if loaded.fingerprint != fingerprint:
+                    raise ValueError(
+                        f"Session '{session_hint}' belongs to fingerprint "
+                        f"'{loaded.fingerprint}', current fingerprint is '{fingerprint}'."
+                    )
+                apply_session_runtime_state(loaded, current_config, peer_agent)
+            else:
+                restore_config_runtime_defaults(current_config, peer_agent)
+            setattr(peer_agent, "current_session_id", session_hint)
+            return peer_agent
+
         latest = session_store.get_latest(fingerprint=fingerprint)
         if latest:
             loaded = session_store.load(latest.id)
@@ -242,7 +400,9 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
             return ChatResponse(response="", error=str(exc))
 
     def _stream_chat(peer_id: str, prompt: str, remote_session) -> None:
-        peer_agent = _create_peer_agent(peer_id)
+        peer_agent = _create_peer_agent(
+            peer_id, session_hint=getattr(remote_session, "session_hint", None)
+        )
 
         session_id = getattr(peer_agent, "current_session_id", "-") or "-"
         peer_info = relay_server.registry.get(peer_id)
@@ -253,29 +413,20 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
         )
         startup_key = (peer_id, str(session_id), connection_marker)
         if startup_key not in startup_announced:
-            startup_console = Console(
-                record=True, force_terminal=True, color_system="truecolor"
+            remote_session.append_event(
+                "remote_peer_ready",
+                {
+                    "peer_id": peer_id,
+                    "session_id": session_id,
+                    "fingerprint": _peer_fingerprint(peer_id),
+                    "mode": getattr(peer_agent, "active_mode", "-") or "-",
+                    "model": getattr(getattr(peer_agent, "llm", None), "model", "-")
+                    or "-",
+                    "workspace_root": getattr(peer_info, "workspace_root", None)
+                    if peer_info is not None
+                    else None,
+                },
             )
-            startup_console.print(
-                Panel(
-                    (
-                        f"[bold]Peer[/bold]: {peer_id}\n"
-                        f"[bold]Session[/bold]: {session_id}\n"
-                        f"[bold]Fingerprint[/bold]: {_peer_fingerprint(peer_id)}\n"
-                        f"[bold]Mode[/bold]: {getattr(peer_agent, 'active_mode', '-') or '-'}\n"
-                        f"[bold]Model[/bold]: {getattr(getattr(peer_agent, 'llm', None), 'model', '-') or '-'}"
-                    ),
-                    title="REMOTE PEER READY",
-                    border_style="green",
-                    box=box.ROUNDED,
-                    padding=(0, 1),
-                )
-            )
-            startup_rendered = startup_console.export_text(clear=True, styles=True)
-            if startup_rendered:
-                remote_session.append_event(
-                    "output", {"format": "terminal", "content": startup_rendered}
-                )
             startup_announced.add(startup_key)
 
         current_config = _current_config()
@@ -324,10 +475,11 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
             record=True, force_terminal=True, color_system="truecolor"
         )
         renderer = CLIRenderer(console_override=ansi_console)
+        assistant_content_emitted = {"value": False}
 
         def _flush_output() -> None:
             rendered = ansi_console.export_text(clear=True, styles=True)
-            if rendered:
+            if rendered.strip():
                 remote_session.append_event(
                     "output", {"format": "terminal", "content": rendered}
                 )
@@ -489,11 +641,30 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
             )
 
         def _on_agent_event(event: AgentEvent) -> None:
+            if event.event_type == AgentEventType.STREAM_TOKEN:
+                content = event.data.get("token", "")
+                if content:
+                    assistant_content_emitted["value"] = True
+                    remote_session.append_event(
+                        "assistant_delta",
+                        {"format": "markdown", "content": content},
+                    )
+                return
+            if event.event_type == AgentEventType.CHAT_END:
+                response = event.data.get("response", "")
+                if event.data.get("render_response", True) and response:
+                    assistant_content_emitted["value"] = True
+                    remote_session.append_event(
+                        "assistant_message",
+                        {"format": "markdown", "content": response},
+                    )
+                return
             if event.event_type == AgentEventType.TOOL_CALL_START:
                 remote_session.append_event(
                     "tool_call_start",
                     {"tool_name": event.tool_name, "tool_args": event.tool_args or {}},
                 )
+                return
             elif event.event_type == AgentEventType.TOOL_CALL_END:
                 remote_session.append_event(
                     "tool_call_end",
@@ -503,12 +674,15 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                         "tool_result": event.tool_result or "",
                     },
                 )
+                return
             elif event.event_type == AgentEventType.ERROR:
                 remote_session.append_event(
                     "error", {"message": event.error_message or "unknown error"}
                 )
-            renderer.on_event(event)
-            _flush_output()
+                return
+            elif event.event_type == AgentEventType.SUBAGENT_COMPLETED:
+                remote_session.append_event("subagent_completed", event.data)
+                return
 
         previous_approval = peer_agent.approval_provider
         peer_agent.add_event_handler(_on_agent_event)
@@ -517,7 +691,13 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
             result = peer_agent.chat(prompt)
             _flush_output()
             _save_peer_session(peer_agent, peer_id)
-            remote_session.append_event("chat_end", {"response": result})
+            remote_session.append_event(
+                "chat_end",
+                {
+                    "response": result,
+                    "response_rendered": assistant_content_emitted["value"],
+                },
+            )
         except Exception as exc:
             _flush_output()
             _save_peer_session(peer_agent, peer_id)
