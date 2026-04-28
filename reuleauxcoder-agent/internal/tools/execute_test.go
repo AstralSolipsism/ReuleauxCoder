@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -76,6 +77,21 @@ func TestBuildShellCommandFallsBackToWindowsPowerShell(t *testing.T) {
 	}
 	if got := args[len(args)-1]; got != "echo a ; echo b" {
 		t.Fatalf("normalized command = %q, want %q", got, "echo a ; echo b")
+	}
+}
+
+func TestExecuteShellReturnsRemoteCancelledWhenContextCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result := ExecuteWithContext(ctx, protocol.ExecToolRequest{
+		ToolName:   "shell",
+		Args:       map[string]any{"command": "echo should-not-run"},
+		TimeoutSec: 30,
+	}, t.TempDir(), nil)
+
+	if result.OK || result.ErrorCode != "REMOTE_CANCELLED" {
+		t.Fatalf("result = %#v, want REMOTE_CANCELLED", result)
 	}
 }
 

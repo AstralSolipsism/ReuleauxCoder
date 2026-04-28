@@ -673,6 +673,41 @@ class ChatStreamResponse:
 
 
 @dataclass
+class ChatCancelRequest:
+    peer_token: str
+    chat_id: str
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "peer_token": self.peer_token,
+            "chat_id": self.chat_id,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "ChatCancelRequest":
+        return cls(
+            peer_token=d["peer_token"],
+            chat_id=d["chat_id"],
+            reason=d.get("reason"),
+        )
+
+
+@dataclass
+class ChatCancelResponse:
+    ok: bool
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"ok": self.ok, "error": self.error}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "ChatCancelResponse":
+        return cls(ok=bool(d.get("ok", False)), error=d.get("error"))
+
+
+@dataclass
 class SessionListRequest:
     peer_token: str
     limit: int = 20
@@ -788,6 +823,7 @@ class ExecToolRequest:
     cwd: str | None = None
     timeout_sec: int = 30
     expected_state: dict[str, Any] = field(default_factory=dict)
+    tool_call_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -796,6 +832,7 @@ class ExecToolRequest:
             "cwd": self.cwd,
             "timeout_sec": self.timeout_sec,
             "expected_state": self.expected_state,
+            "tool_call_id": self.tool_call_id,
         }
 
     @classmethod
@@ -805,6 +842,7 @@ class ExecToolRequest:
             args=d.get("args", {}),
             cwd=d.get("cwd"),
             timeout_sec=d.get("timeout_sec", 30),
+            tool_call_id=d.get("tool_call_id"),
             expected_state=(
                 dict(d.get("expected_state", {}))
                 if isinstance(d.get("expected_state", {}), dict)

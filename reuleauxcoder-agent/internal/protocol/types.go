@@ -213,6 +213,7 @@ type ExecToolRequest struct {
 	CWD           *string        `json:"cwd"`
 	TimeoutSec    int            `json:"timeout_sec"`
 	ExpectedState map[string]any `json:"expected_state,omitempty"`
+	ToolCallID    string         `json:"tool_call_id,omitempty"`
 }
 
 type ExecToolResult struct {

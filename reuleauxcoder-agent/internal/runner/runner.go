@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -38,6 +39,8 @@ type Runner struct {
 	scanner  *bufio.Scanner
 	mdRender *glamour.TermRenderer
 	mcp      *mcp.Supervisor
+	activeMu sync.Mutex
+	active   map[string]context.CancelFunc
 }
 
 func New(cfg Config) *Runner {
@@ -53,6 +56,7 @@ func New(cfg Config) *Runner {
 		client:   client.New(cfg.Host),
 		scanner:  bufio.NewScanner(os.Stdin),
 		mdRender: renderer,
+		active:   map[string]context.CancelFunc{},
 	}
 }
 
@@ -226,22 +230,49 @@ func (r *Runner) runPollLoop(ctx context.Context, peerToken, cwd string, pollInt
 				}
 				continue
 			}
-			var result protocol.ExecToolResult
-			if execReq.ToolName == "mcp" {
-				if r.mcp == nil {
-					result = protocol.ExecToolResult{OK: false, ErrorCode: "REMOTE_MCP_ERROR", ErrorMessage: "MCP supervisor is not running"}
-				} else {
-					result = r.mcp.Execute(execReq.Args)
-				}
-			} else {
-				result = tools.Execute(execReq, cwd, func(chunk protocol.ToolStreamChunk) {
-					if sendErr := r.sendToolStream(ctx, peerToken, env.RequestID, chunk); sendErr != nil {
-						log.Printf("stream send failed: %v", sendErr)
+			execCtx, cancelExec := context.WithCancel(ctx)
+			r.registerActiveRequest(env.RequestID, cancelExec)
+			go func(requestID string, execReq protocol.ExecToolRequest) {
+				defer r.unregisterActiveRequest(requestID)
+				var result protocol.ExecToolResult
+				if execReq.ToolName == "mcp" {
+					if r.mcp == nil {
+						result = protocol.ExecToolResult{OK: false, ErrorCode: "REMOTE_MCP_ERROR", ErrorMessage: "MCP supervisor is not running"}
+					} else {
+						result = r.mcp.Execute(execReq.Args)
 					}
-				})
+				} else {
+					result = tools.ExecuteWithContext(execCtx, execReq, cwd, func(chunk protocol.ToolStreamChunk) {
+						if chunk.Meta == nil {
+							chunk.Meta = map[string]any{}
+						}
+						if execReq.ToolCallID != "" {
+							chunk.Meta["tool_call_id"] = execReq.ToolCallID
+						}
+						if sendErr := r.sendToolStream(context.Background(), peerToken, requestID, chunk); sendErr != nil {
+							log.Printf("stream send failed: %v", sendErr)
+						}
+					})
+				}
+				if result.Meta == nil {
+					result.Meta = map[string]any{}
+				}
+				if execReq.ToolCallID != "" {
+					result.Meta["tool_call_id"] = execReq.ToolCallID
+				}
+				if sendErr := r.sendToolResult(context.Background(), peerToken, requestID, result); sendErr != nil {
+					log.Printf("tool result send failed: %v", sendErr)
+				}
+			}(env.RequestID, execReq)
+		case "cancel_tool":
+			requestID := env.RequestID
+			if requestID == "" {
+				if payloadRequestID, _ := env.Payload["request_id"].(string); payloadRequestID != "" {
+					requestID = payloadRequestID
+				}
 			}
-			if sendErr := r.sendToolResult(ctx, peerToken, env.RequestID, result); sendErr != nil {
-				return sendErr
+			if requestID != "" {
+				r.cancelActiveRequest(requestID)
 			}
 		case "preview_tool":
 			previewReq, err := protocol.DecodeToolPreviewRequest(env.Payload)
@@ -268,6 +299,33 @@ func (r *Runner) runPollLoop(ctx context.Context, peerToken, cwd string, pollInt
 			log.Printf("ignoring unsupported envelope type=%s", env.Type)
 			time.Sleep(pollInterval)
 		}
+	}
+}
+
+func (r *Runner) registerActiveRequest(requestID string, cancel context.CancelFunc) {
+	if requestID == "" {
+		return
+	}
+	r.activeMu.Lock()
+	r.active[requestID] = cancel
+	r.activeMu.Unlock()
+}
+
+func (r *Runner) unregisterActiveRequest(requestID string) {
+	if requestID == "" {
+		return
+	}
+	r.activeMu.Lock()
+	delete(r.active, requestID)
+	r.activeMu.Unlock()
+}
+
+func (r *Runner) cancelActiveRequest(requestID string) {
+	r.activeMu.Lock()
+	cancel := r.active[requestID]
+	r.activeMu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 

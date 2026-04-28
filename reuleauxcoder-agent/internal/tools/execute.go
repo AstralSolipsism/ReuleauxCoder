@@ -37,11 +37,20 @@ func Execute(
 	currentCWD string,
 	onStream func(protocol.ToolStreamChunk),
 ) protocol.ExecToolResult {
+	return ExecuteWithContext(context.Background(), req, currentCWD, onStream)
+}
+
+func ExecuteWithContext(
+	ctx context.Context,
+	req protocol.ExecToolRequest,
+	currentCWD string,
+	onStream func(protocol.ToolStreamChunk),
+) protocol.ExecToolResult {
 	cwd, staleWarning := resolveRequestedCWD(currentCWD, req.CWD)
 
 	switch req.ToolName {
 	case "shell":
-		return prependWarning(runShell(req.Args, cwd, req.TimeoutSec, onStream), staleWarning)
+		return prependWarning(runShell(ctx, req.Args, cwd, req.TimeoutSec, onStream), staleWarning)
 	case "read_file":
 		return prependWarning(readFile(req.Args, cwd), staleWarning)
 	case "write_file":
@@ -133,6 +142,7 @@ func prependWarning(r protocol.ExecToolResult, warning string) protocol.ExecTool
 }
 
 func runShell(
+	parentCtx context.Context,
 	args map[string]any,
 	cwd string,
 	timeoutSec int,
@@ -149,7 +159,7 @@ func runShell(
 		timeoutSec = 120
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+	ctx, cancel := context.WithTimeout(parentCtx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
 	shell, shellArgs := buildShellCommand(command, runtime.GOOS, exec.LookPath)
@@ -165,7 +175,20 @@ func runShell(
 		return errorResult("REMOTE_TOOL_ERROR", err.Error())
 	}
 
+	if ctx.Err() == context.Canceled {
+		return errorResult("REMOTE_CANCELLED", "Remote execution was cancelled")
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		return errorResult("REMOTE_TIMEOUT", fmt.Sprintf("Remote execution timed out after %ds", timeoutSec))
+	}
+
 	if err := cmd.Start(); err != nil {
+		if ctx.Err() == context.Canceled {
+			return errorResult("REMOTE_CANCELLED", "Remote execution was cancelled")
+		}
+		if ctx.Err() == context.DeadlineExceeded {
+			return errorResult("REMOTE_TIMEOUT", fmt.Sprintf("Remote execution timed out after %ds", timeoutSec))
+		}
 		return errorResult("REMOTE_TOOL_ERROR", err.Error())
 	}
 
@@ -205,6 +228,9 @@ func runShell(
 
 	if ctx.Err() == context.DeadlineExceeded {
 		return errorResult("REMOTE_TIMEOUT", fmt.Sprintf("Remote execution timed out after %ds", timeoutSec))
+	}
+	if ctx.Err() == context.Canceled {
+		return errorResult("REMOTE_CANCELLED", "Remote execution was cancelled")
 	}
 
 	out := stdoutBuf.String()

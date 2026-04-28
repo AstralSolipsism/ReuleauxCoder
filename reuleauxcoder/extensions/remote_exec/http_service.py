@@ -29,6 +29,8 @@ from reuleauxcoder.extensions.remote_exec.errors import RegisterRejectedError
 from reuleauxcoder.extensions.remote_exec.protocol import (
     ApprovalReplyRequest,
     ApprovalReplyResponse,
+    ChatCancelRequest,
+    ChatCancelResponse,
     ChatRequest,
     ChatResponse,
     ChatStartRequest,
@@ -76,6 +78,9 @@ class _RemoteChatSession:
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
     cond: threading.Condition = field(default_factory=threading.Condition)
+    cancel_requested: bool = False
+    cancel_reason: str | None = None
+    cancel_callback: Callable[[str], None] | None = None
 
     def append_event(
         self, event_type: str, payload: dict[str, Any] | None = None
@@ -123,6 +128,37 @@ class _RemoteChatSession:
                 waiter["decision"] = "deny_once"
                 waiter["reason"] = "chat_closed"
             self.cond.notify_all()
+
+    def set_cancel_callback(self, callback: Callable[[str], None]) -> None:
+        call_immediately = False
+        reason = "chat_cancelled"
+        with self.cond:
+            self.cancel_callback = callback
+            if self.cancel_requested:
+                call_immediately = True
+                reason = self.cancel_reason or reason
+        if call_immediately:
+            callback(reason)
+
+    def request_cancel(self, reason: str = "chat_cancelled") -> bool:
+        callback: Callable[[str], None] | None
+        first_request = False
+        with self.cond:
+            if not self.cancel_requested:
+                first_request = True
+            self.cancel_requested = True
+            self.cancel_reason = reason
+            for waiter in self.approval_waiters.values():
+                if waiter.get("done"):
+                    continue
+                waiter["done"] = True
+                waiter["decision"] = "deny_once"
+                waiter["reason"] = reason
+            callback = self.cancel_callback
+            self.cond.notify_all()
+        if callback is not None:
+            callback(reason)
+        return first_request
 
     def register_approval(self, approval_id: str) -> None:
         with self.cond:
@@ -395,6 +431,9 @@ class RemoteRelayHTTPService:
                     return
                 if parsed.path == "/remote/chat/stream":
                     self._handle_chat_stream()
+                    return
+                if parsed.path == "/remote/chat/cancel":
+                    self._handle_chat_cancel()
                     return
                 if parsed.path == "/remote/approval/reply":
                     self._handle_approval_reply()
@@ -904,6 +943,45 @@ class RemoteRelayHTTPService:
                     ChatStreamResponse(
                         events=events, done=done, next_cursor=next_cursor
                     ).to_dict(),
+                )
+
+            def _handle_chat_cancel(self) -> None:
+                payload = self._read_json()
+                try:
+                    req = ChatCancelRequest.from_dict(payload)
+                except Exception:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "invalid_chat_cancel_request"},
+                    )
+                    return
+
+                peer_id = service.relay_server.token_manager.verify_peer_token(
+                    req.peer_token
+                )
+                if peer_id is None:
+                    self._send_json(
+                        HTTPStatus.UNAUTHORIZED, {"error": "invalid_peer_token"}
+                    )
+                    return
+                session = service._get_chat_session(req.chat_id)
+                if session is None or session.peer_id != peer_id:
+                    self._send_json(
+                        HTTPStatus.NOT_FOUND,
+                        ChatCancelResponse(
+                            ok=False, error="chat_not_found"
+                        ).to_dict(),
+                    )
+                    return
+
+                reason = req.reason or "chat_cancelled"
+                first_request = session.request_cancel(reason)
+                if first_request:
+                    session.append_event(
+                        "chat_cancel_requested", {"reason": reason}
+                    )
+                self._send_json(
+                    HTTPStatus.OK, ChatCancelResponse(ok=True).to_dict()
                 )
 
             def _handle_sessions(self, path: str) -> None:

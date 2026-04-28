@@ -340,6 +340,26 @@ class RelayServer:
         except Exception as e:
             return CleanupResult(ok=False, error_message=str(e))
 
+    def cancel_pending_requests(self, peer_id: str, reason: str = "chat_cancelled") -> int:
+        """Ask a peer to cancel all in-flight tool requests for that peer."""
+        with self._lock:
+            request_ids = [
+                req_id
+                for req_id, pending_peer_id in self._pending_peer_ids.items()
+                if pending_peer_id == peer_id
+            ]
+        for req_id in request_ids:
+            self._send(
+                peer_id,
+                RelayEnvelope(
+                    type="cancel_tool",
+                    request_id=req_id,
+                    peer_id=peer_id,
+                    payload={"request_id": req_id, "reason": reason},
+                ),
+            )
+        return len(request_ids)
+
     def update_peer_mcp_tools(
         self,
         peer_id: str,
