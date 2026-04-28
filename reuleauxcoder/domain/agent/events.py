@@ -17,6 +17,7 @@ class AgentEventType(Enum):
     SUBAGENT_COMPLETED = "subagent_completed"
     COMPRESSION_START = "compression_start"
     COMPRESSION_END = "compression_end"
+    USAGE_UPDATE = "usage_update"
     ERROR = "error"
 
 
@@ -30,6 +31,7 @@ class AgentEvent:
 
     # Tool call specific fields
     tool_name: Optional[str] = None
+    tool_call_id: Optional[str] = None
     tool_args: Optional[dict] = None
     tool_result: Optional[str] = None
     tool_success: Optional[bool] = None
@@ -54,12 +56,21 @@ class AgentEvent:
         )
 
     @classmethod
-    def tool_call_start(cls, tool_name: str, tool_args: dict) -> "AgentEvent":
+    def tool_call_start(
+        cls,
+        tool_name: str,
+        tool_args: dict,
+        *,
+        tool_call_id: str | None = None,
+        tool_source: str | None = None,
+    ) -> "AgentEvent":
         """Create a tool call start event."""
         return cls(
             event_type=AgentEventType.TOOL_CALL_START,
             tool_name=tool_name,
+            tool_call_id=tool_call_id,
             tool_args=tool_args,
+            data={"tool_source": tool_source} if tool_source else {},
         )
 
     @classmethod
@@ -69,15 +80,63 @@ class AgentEvent:
         result: str,
         *,
         success: bool = True,
+        tool_call_id: str | None = None,
+        tool_source: str | None = None,
+        meta: dict[str, Any] | None = None,
     ) -> "AgentEvent":
         """Create a tool call end event."""
         return cls(
             event_type=AgentEventType.TOOL_CALL_END,
             tool_name=tool_name,
-            tool_result=result[:500]
-            if len(result) > 500
-            else result,  # Truncate for events
+            tool_call_id=tool_call_id,
+            tool_result=result,
             tool_success=success,
+            data={
+                **({"tool_source": tool_source} if tool_source else {}),
+                **(
+                    {"tool_result_preview": result[:500]}
+                    if len(result) > 500
+                    else {}
+                ),
+                **({"meta": meta} if meta else {}),
+            },
+        )
+
+    @classmethod
+    def usage_update(
+        cls,
+        *,
+        prompt_tokens: int,
+        completion_tokens: int,
+        context_tokens: int | None = None,
+        context_window: int | None = None,
+        max_output_tokens: int | None = None,
+        model: str | None = None,
+        mode: str | None = None,
+        cache_read_tokens: int | None = None,
+        cache_write_tokens: int | None = None,
+        cost_usd: float | None = None,
+        usage_extra: dict[str, Any] | None = None,
+        run_status: str | None = None,
+    ) -> "AgentEvent":
+        """Create a token/context usage update event."""
+        return cls(
+            event_type=AgentEventType.USAGE_UPDATE,
+            data={
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "context_tokens": context_tokens,
+                "context_window": context_window,
+                "max_output_tokens": max_output_tokens,
+                "model": model,
+                "mode": mode,
+                "cache_reads": cache_read_tokens,
+                "cache_writes": cache_write_tokens,
+                "cost_usd": cost_usd,
+                "cost_status": "available" if cost_usd is not None else "unavailable",
+                "usage_extra": usage_extra or {},
+                "run_status": run_status,
+            },
         )
 
     @classmethod

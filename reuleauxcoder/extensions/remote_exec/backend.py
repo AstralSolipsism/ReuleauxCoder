@@ -59,12 +59,15 @@ class RemoteRelayToolBackend(ToolBackend):
             args=args,
             cwd=self.context.cwd,
             timeout_sec=timeout,
+            tool_call_id=self.context.current_tool_call_id,
             expected_state=self._approved_preview_states.pop(
                 self._request_key(tool_name, args), {}
             ),
         )
 
-        stream_handler = self._build_stream_handler(tool_name)
+        stream_handler = self._build_stream_handler(
+            tool_name, self.context.current_tool_call_id
+        )
 
         try:
             result = self.relay_server.send_exec_request(
@@ -123,7 +126,7 @@ class RemoteRelayToolBackend(ToolBackend):
         if state:
             self._approved_preview_states[self._request_key(tool_name, args)] = state
 
-    def _build_stream_handler(self, tool_name: str):
+    def _build_stream_handler(self, tool_name: str, tool_call_id: str | None = None):
         remote_stream_handler = getattr(self.context, "remote_stream_handler", None)
         if tool_name != "shell" and remote_stream_handler is None:
             return None
@@ -139,9 +142,12 @@ class RemoteRelayToolBackend(ToolBackend):
                 return
             if callable(remote_stream_handler):
                 try:
-                    remote_stream_handler(tool_name, chunk)
+                    remote_stream_handler(tool_name, chunk, tool_call_id)
                 except Exception:
-                    pass
+                    try:
+                        remote_stream_handler(tool_name, chunk)
+                    except Exception:
+                        pass
             if tool_name == "shell" and self.ui_bus is not None:
                 self.ui_bus.info(
                     "",

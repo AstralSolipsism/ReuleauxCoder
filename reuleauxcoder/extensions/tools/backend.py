@@ -14,6 +14,7 @@ class ExecutionContext:
     workspace_root: str | None = None
     execution_target: str = "local"
     remote_stream_handler: object | None = None
+    current_tool_call_id: str | None = None
 
 
 class ToolBackend:

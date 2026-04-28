@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 from pathlib import Path
 import uuid
 from typing import Any, Callable
@@ -301,7 +302,7 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
 
     def _create_peer_agent(
         peer_id: str,
-        remote_stream_handler: Callable[[str, Any], None] | None = None,
+        remote_stream_handler: Callable[..., None] | None = None,
         session_hint: str | None = None,
     ) -> Agent:
         current_config = _current_config()
@@ -399,10 +400,24 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
             _save_peer_session(peer_agent, peer_id)
             return ChatResponse(response="", error=str(exc))
 
+    def _agent_chat(agent_obj: Any, prompt: str, *, clear_stop_request: bool) -> str:
+        signature = inspect.signature(agent_obj.chat)
+        if "clear_stop_request" in signature.parameters:
+            return agent_obj.chat(prompt, clear_stop_request=clear_stop_request)
+        return agent_obj.chat(prompt)
+
     def _stream_chat(peer_id: str, prompt: str, remote_session) -> None:
         peer_agent = _create_peer_agent(
             peer_id, session_hint=getattr(remote_session, "session_hint", None)
         )
+        remote_session.set_cancel_callback(
+            lambda reason: (
+                peer_agent.request_stop(),
+                relay_server.cancel_pending_requests(peer_id, reason),
+            )
+        )
+        if getattr(remote_session, "cancel_requested", False):
+            peer_agent.request_stop()
 
         session_id = getattr(peer_agent, "current_session_id", "-") or "-"
         peer_info = relay_server.registry.get(peer_id)
@@ -446,17 +461,10 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
             if command_result["action"] != "chat":
                 setattr(peer_agent, "current_session_id", command_result["session_id"])
 
-                command_console = Console(
-                    record=True, force_terminal=True, color_system="truecolor"
-                )
-                command_renderer = CLIRenderer(console_override=command_console)
                 for event in getattr(command_bus, "_history", []):
-                    command_renderer.on_ui_event(event)
-                rendered = command_console.export_text(clear=True, styles=True)
-                command_renderer.close()
-                if rendered:
                     remote_session.append_event(
-                        "output", {"format": "terminal", "content": rendered}
+                        _structured_ui_event_type(event),
+                        _structured_ui_event_payload(event),
                     )
 
                 if command_result["action"] == "exit":
@@ -476,6 +484,7 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
         )
         renderer = CLIRenderer(console_override=ansi_console)
         assistant_content_emitted = {"value": False}
+        active_tool_calls_by_name: dict[str, list[str]] = {}
 
         def _flush_output() -> None:
             rendered = ansi_console.export_text(clear=True, styles=True)
@@ -585,10 +594,12 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
         class _RemoteApprovalProvider(ApprovalProvider):
             def request_approval(self, request: ApprovalRequest) -> ApprovalDecision:
                 approval_id = str(uuid.uuid4())
+                tool_call_id = str(request.metadata.get("tool_call_id") or "")
                 remote_session.register_approval(approval_id)
                 sections, preview, preview_error = _build_remote_preview(request)
                 payload = {
                     "approval_id": approval_id,
+                    "tool_call_id": tool_call_id,
                     "tool_name": request.tool_name,
                     "tool_source": request.tool_source,
                     "reason": request.reason,
@@ -614,6 +625,7 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                     "approval_resolved",
                     {
                         "approval_id": approval_id,
+                        "tool_call_id": tool_call_id,
                         "decision": decision,
                         "reason": reason,
                     },
@@ -629,14 +641,23 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                     return ApprovalDecision.allow_once(reason)
                 return ApprovalDecision.deny_once(reason)
 
-        def _on_remote_stream(tool_name: str, chunk: Any) -> None:
+        def _on_remote_stream(
+            tool_name: str, chunk: Any, tool_call_id: str | None = None
+        ) -> None:
+            resolved_tool_call_id = tool_call_id
+            if not resolved_tool_call_id:
+                candidates = active_tool_calls_by_name.get(tool_name) or []
+                if candidates:
+                    resolved_tool_call_id = candidates[-1]
             remote_session.append_event(
                 "tool_call_stream",
                 {
                     "tool_name": tool_name,
+                    "tool_call_id": resolved_tool_call_id,
                     "format": "plain",
                     "stream": getattr(chunk, "chunk_type", "stdout"),
                     "content": getattr(chunk, "data", ""),
+                    "meta": getattr(chunk, "meta", {}),
                 },
             )
 
@@ -650,6 +671,9 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                         {"format": "markdown", "content": content},
                     )
                 return
+            if event.event_type == AgentEventType.USAGE_UPDATE:
+                remote_session.append_event("usage_update", event.data)
+                return
             if event.event_type == AgentEventType.CHAT_END:
                 response = event.data.get("response", "")
                 if event.data.get("render_response", True) and response:
@@ -660,18 +684,36 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                     )
                 return
             if event.event_type == AgentEventType.TOOL_CALL_START:
+                if event.tool_name and event.tool_call_id:
+                    active_tool_calls_by_name.setdefault(event.tool_name, []).append(
+                        event.tool_call_id
+                    )
                 remote_session.append_event(
                     "tool_call_start",
-                    {"tool_name": event.tool_name, "tool_args": event.tool_args or {}},
+                    {
+                        "tool_name": event.tool_name,
+                        "tool_call_id": event.tool_call_id,
+                        "tool_args": event.tool_args or {},
+                        "tool_source": event.data.get("tool_source"),
+                        "started_at": event.timestamp,
+                    },
                 )
                 return
             elif event.event_type == AgentEventType.TOOL_CALL_END:
+                if event.tool_name and event.tool_call_id:
+                    candidates = active_tool_calls_by_name.get(event.tool_name)
+                    if candidates and event.tool_call_id in candidates:
+                        candidates.remove(event.tool_call_id)
                 remote_session.append_event(
                     "tool_call_end",
                     {
                         "tool_name": event.tool_name,
+                        "tool_call_id": event.tool_call_id,
                         "tool_success": event.tool_success,
                         "tool_result": event.tool_result or "",
+                        "tool_source": event.data.get("tool_source"),
+                        "meta": event.data.get("meta") or {},
+                        "ended_at": event.timestamp,
                     },
                 )
                 return
@@ -688,9 +730,20 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
         peer_agent.add_event_handler(_on_agent_event)
         peer_agent.approval_provider = _RemoteApprovalProvider()
         try:
-            result = peer_agent.chat(prompt)
+            result = _agent_chat(
+                peer_agent,
+                prompt,
+                clear_stop_request=not getattr(
+                    remote_session, "cancel_requested", False
+                ),
+            )
             _flush_output()
             _save_peer_session(peer_agent, peer_id)
+            if getattr(remote_session, "cancel_requested", False):
+                remote_session.append_event(
+                    "chat_cancelled",
+                    {"reason": getattr(remote_session, "cancel_reason", None)},
+                )
             remote_session.append_event(
                 "chat_end",
                 {
@@ -712,3 +765,28 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
 
     runner._relay_http_service.set_chat_handler(_chat)
     runner._relay_http_service.set_stream_chat_handler(_stream_chat)
+
+
+def _structured_ui_event_type(event) -> str:
+    return {
+        UIEventKind.VIEW: "view",
+        UIEventKind.CONTEXT: "context_event",
+        UIEventKind.REMOTE: "remote_event",
+        UIEventKind.MCP: "mcp_event",
+        UIEventKind.MODEL: "model_event",
+        UIEventKind.SESSION: "session_event",
+        UIEventKind.COMMAND: "command_event",
+        UIEventKind.APPROVAL: "approval_event",
+        UIEventKind.SYSTEM: "system_event",
+        UIEventKind.AGENT: "agent_event",
+    }.get(event.kind, "ui_event")
+
+
+def _structured_ui_event_payload(event) -> dict[str, Any]:
+    return {
+        "message": event.message,
+        "level": event.level.value,
+        "kind": event.kind.value,
+        "timestamp": event.timestamp,
+        **dict(event.data),
+    }

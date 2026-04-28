@@ -14,13 +14,14 @@ def test_agent_event_tool_call_start_contains_name_and_args() -> None:
     assert event.tool_args == {"command": "ls"}
 
 
-def test_agent_event_tool_call_end_truncates_long_result() -> None:
+def test_agent_event_tool_call_end_keeps_full_long_result_with_preview() -> None:
     result = "x" * 600
     event = AgentEvent.tool_call_end("read_file", result, success=False)
     assert event.event_type is AgentEventType.TOOL_CALL_END
     assert event.tool_name == "read_file"
     assert event.tool_success is False
-    assert event.tool_result == "x" * 500
+    assert event.tool_result == result
+    assert event.data["tool_result_preview"] == "x" * 500
 
 
 def test_agent_event_subagent_completed_contains_payload() -> None:
