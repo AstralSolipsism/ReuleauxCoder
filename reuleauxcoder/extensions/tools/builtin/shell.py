@@ -70,6 +70,15 @@ class ShellTool(Tool):
                 ShellType.POWERSHELL_CORE,
             ):
                 proc = self._run_powershell(command, cwd, timeout)
+            elif platform_info.is_windows and shell == ShellType.BASH:
+                shell_path = platform_info.get_shell_path()
+                proc = subprocess.run(
+                    [shell_path, "-c", command],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    cwd=cwd,
+                )
             else:
                 proc = subprocess.run(
                     command,

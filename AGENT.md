@@ -57,7 +57,7 @@ Pure business logic with no external dependencies. Contains core abstractions an
 Coordinates domain objects and handles external interactions.
 
 - **llm/**: LLM client and related services
-  - `client.py` — `LLM`: OpenAI-compatible API client. Constructor params: `model`, `api_key`, `base_url`, `temperature`, `max_tokens`, `preserve_reasoning_content`, `backfill_reasoning_content_for_tool_calls`, `reasoning_effort`, `thinking_enabled`, `reasoning_replay_mode`, `reasoning_replay_placeholder`, `debug_trace`, `ui_bus`. Key methods: `chat(messages, tools, on_token, hook_registry, session_id, trace_id, metadata) → LLMResponse` — the main inference method that runs `BEFORE_LLM_REQUEST` guards/transforms/observers, streams via `on_token`, accumulates `content_parts`/`reasoning_parts`/tool call deltas via `tc_map`, then runs `AFTER_LLM_RESPONSE` transforms/observers. `reconfigure(**kwargs)` hot-swaps model/client settings at runtime (for model profile switches). `_call_with_retry()` performs inline retry with exponential backoff (max 3 retries). Debug trace writes `llm_trace_{ts}_{session}_{trace}.json` to diagnostics dir. On exception calls `persist_llm_error_diagnostic()` and attaches `llm_diagnostic_path` to the exception.
+  - `client.py` — `LLM`: provider-backed facade that keeps the legacy API stable while routing calls through `services/providers` adapters. Constructor params: `model`, `api_key`, `base_url`, `temperature`, `max_tokens`, `preserve_reasoning_content`, `backfill_reasoning_content_for_tool_calls`, `reasoning_effort`, `thinking_enabled`, `reasoning_replay_mode`, `reasoning_replay_placeholder`, `debug_trace`, `ui_bus`, `provider`, `provider_config`. Key methods: `chat(messages, tools, on_token, hook_registry, session_id, trace_id, metadata) → LLMResponse` — sanitizes messages, builds a provider request, runs `BEFORE_LLM_REQUEST` guards/transforms/observers, delegates streaming/tool-call parsing to the provider adapter, then runs `AFTER_LLM_RESPONSE` transforms/observers. `reconfigure(**kwargs)` hot-swaps model/provider settings at runtime. Debug trace writes `llm_trace_{ts}_{session}_{trace}.json` to diagnostics dir. On exception calls `persist_llm_error_diagnostic()` and attaches `llm_diagnostic_path` to the exception.
   - `sanitizer.py` — `sanitize_messages_for_llm()`: message repair layer. Handles missing `tool_call_id` backfill, missing tool output injection, `reasoning_content` preservation/removal/backfill. Dispatches by `reasoning_replay_mode`: `"none"` (strip all reasoning) vs `"tool_calls"` (inject placeholders for tool-call assistant messages). Controlled by profile flags: `preserve_reasoning_content`, `backfill_reasoning_content_for_tool_calls`, `thinking_enabled`. Uses `DEFAULT_REASONING_REPLAY_PLACEHOLDER = "[PLACE_HOLDER]"`.
   - `factory.py` — `build_llm_from_settings(settings, *, debug_trace) → LLM`: creates LLM from config/profile objects. `reconfigure_llm_from_settings(llm, settings, *, debug_trace)`: reconfigures existing LLM. `llm_runtime_kwargs()` extracts 12 canonical `_LLM_RUNTIME_FIELDS` from settings.
   - `diagnostics.py` — `snapshot_messages(messages, limit=10)`: builds compact tail snapshot. `persist_llm_error_diagnostic()`: writes `llm_error_{ts}_{session}.json` with error details, message tails, tool schemas, model info.
@@ -126,6 +126,26 @@ Pluggable extension system.
 - **skills/**: Skills system — `SkillsService` discovers skills from `SKILL.md` files, builds catalog with `Skill` objects (`name`, `description`, `location`). Supports enable/disable with persistence via `SkillsConfigStore`.
 - **subagent/**: `SubagentManager` — `_VALID_SUBAGENT_MODES = frozenset({"explore", "execute", "verify"})`, `_DEFAULT_MAX_ROUNDS = 50`, `_DEFAULT_TIMEOUT_SECONDS = 300`, `_MAX_TIMEOUT_SECONDS = 3600`. `SubagentJob` dataclass tracks `job_id`, `status` (PENDING/RUNNING/COMPLETED/FAILED), `start_time`/`end_time`, `result`/`error`. `DelegatingSubagentApprovalProvider` uses parent LLM as secondary judge for sub-agent tool calls. Manager takes `default_timeout_seconds` and `max_timeout_seconds` as injectable params.
 - **remote_exec/**: `RemoteExecService` — HTTP relay server with `POST /remote/chat/start`, `POST /remote/chat/stream` (long-poll event stream), `POST /remote/approval/reply`. Stream events: `chat_start`, `output`, `approval_request`, `approval_resolved`, `chat_end`, `error`. Bootstrap via `sh -c 'curl -fsSL ... | sh'` with one-time token.
+
+### Application Layer (`app/`)
+Use-case orchestration and shared runtime utilities.
+
+#### `app/commands/` — Cross-Interface Command System
+UI-agnostic command infrastructure shared by CLI, TUI, and other interfaces.
+
+- `specs.py` — `ActionSpec` central action definition with `action_id`, `feature_id`, `description`, `triggers`, `parser`, and `handler`. `TriggerSpec` supports slash, palette, button, menu, and shortcut triggers gated by UI capabilities.
+- `registry.py` — `ActionRegistry`: explicit registry for registering actions, parsing user input by UI profile, and dispatching parsed actions.
+- `models.py` — `CommandContext` carries runtime dependencies for handlers; `CommandResult` returns action flow (`continue`, `chat`, `exit`), notifications, and view requests.
+- `loader.py` / `module_registry.py` — import builtin command modules and collect `register_actions(registry)` functions for lazy discovery.
+- `matchers.py` / `help.py` — command matching and help text generation for completion and UI rendering.
+
+#### `app/runtime/` — Runtime State & Approval Views
+
+- `session_state.py` snapshots live runtime into `SessionRuntimeState`, restores config defaults for fresh sessions, reapplies persisted session-scoped overrides, and merges approval overrides.
+- `approval.py` builds approval view payloads and markdown, refreshes live approval runtime hooks, and resolves `/approval set` targets.
+
+#### `app/usecases/`
+Placeholder for future use-case orchestration.
 
 ## Current Runtime Architecture (Phase 1)
 

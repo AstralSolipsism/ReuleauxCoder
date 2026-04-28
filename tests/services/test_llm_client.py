@@ -317,9 +317,24 @@ class _FakeChoice:
 
 
 class _FakeChunk:
-    def __init__(self, *, content: str = "", usage=None):
+    def __init__(
+        self,
+        *,
+        content: str = "",
+        reasoning_content: str | None = None,
+        tool_calls=None,
+        usage=None,
+    ):
         self.usage = usage
-        self.choices = [_FakeChoice(_FakeDelta(content=content))]
+        self.choices = [
+            _FakeChoice(
+                _FakeDelta(
+                    content=content,
+                    reasoning_content=reasoning_content,
+                    tool_calls=tool_calls,
+                )
+            )
+        ]
 
 
 def test_llm_chat_sends_explicit_thinking_enabled_state() -> None:
@@ -417,6 +432,7 @@ def test_llm_debug_trace_persists_trace_and_emits_ui_event(
         return iter(
             [
                 _FakeChunk(content="Hello"),
+                _FakeChunk(reasoning_content="thinking"),
                 _FakeChunk(usage=_FakeUsage(prompt_tokens=12, completion_tokens=3)),
             ]
         )
@@ -441,8 +457,60 @@ def test_llm_debug_trace_persists_trace_and_emits_ui_event(
     assert payload["request"]["reasoning_replay_mode"] == "none"
     assert payload["request"]["thinking_enabled"] is None
     assert payload["request"]["thinking_type"] is None
+    assert payload["request"]["preserve_reasoning_content"] is True
     assert payload["stream"]["event_count"] >= 2
+    assert payload["stream"]["reasoning_chunks"] == 1
     assert payload["stream"]["events"][0]["type"] == "content"
     assert payload["stream"]["events"][0]["text"] == "Hello"
+    assert payload["response"]["reasoning_received"] is True
+    assert payload["response"]["reasoning_chars"] == len("thinking")
     assert payload["response"]["usage"]["prompt_tokens"] == 12
     assert payload["response"]["usage"]["completion_tokens"] == 3
+
+
+def test_llm_chat_emits_reasoning_diagnostics_for_placeholder_and_missing_stream() -> None:
+    ui_bus = UIEventBus()
+    seen = []
+    ui_bus.subscribe(seen.append, replay_history=False)
+    llm = LLM(
+        model="demo-model",
+        api_key="sk-test-12345678",
+        thinking_enabled=True,
+        preserve_reasoning_content=True,
+        backfill_reasoning_content_for_tool_calls=True,
+        ui_bus=ui_bus,
+    )
+
+    def _fake_call_with_retry(params):
+        return iter(
+            [
+                _FakeChunk(content="Hello"),
+                _FakeChunk(usage=_FakeUsage(prompt_tokens=1, completion_tokens=1)),
+            ]
+        )
+
+    llm._call_with_retry = _fake_call_with_retry  # type: ignore[method-assign]
+    response = llm.chat(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "tool_1",
+                        "type": "function",
+                        "function": {"name": "glob", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tool_1", "content": "ok"},
+            {"role": "user", "content": "continue"},
+        ]
+    )
+
+    assert response.content == "Hello"
+    debug_messages = [
+        event.message for event in seen if event.level == UIEventLevel.DEBUG
+    ]
+    assert any("sanitizer backfilled placeholder" in msg for msg in debug_messages)
+    assert any("thinking enabled but no reasoning_content" in msg for msg in debug_messages)

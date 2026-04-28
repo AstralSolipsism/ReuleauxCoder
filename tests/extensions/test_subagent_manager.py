@@ -1,7 +1,13 @@
+import threading
+import time
 from types import SimpleNamespace
 
 from reuleauxcoder.domain.config.models import Config, ModelProfileConfig
-from reuleauxcoder.extensions.subagent.manager import _create_subagent_llm
+from reuleauxcoder.extensions.subagent.manager import (
+    SubagentJob,
+    SubagentManager,
+    _create_subagent_llm,
+)
 
 
 class _FakeParentLLM:
@@ -52,3 +58,95 @@ def test_create_subagent_llm_uses_full_profile_runtime_settings() -> None:
     assert llm.reasoning_replay_mode == "tool_calls"
     assert llm.reasoning_replay_placeholder == "[PLACE_HOLDER]"
     assert llm.debug_trace is True
+
+
+def test_drain_with_parent_state_lock_skips_concurrently_injected_job() -> None:
+    manager = SubagentManager()
+    job = SubagentJob(
+        id="sj_race",
+        mode="explore",
+        task="test task",
+        status="completed",
+        created_at=time.time(),
+        result="done",
+        injected_to_parent=False,
+    )
+    manager._jobs["sj_race"] = job
+
+    parent_lock = threading.Lock()
+    parent_lock.acquire()
+    drained_result: list[list[SubagentJob]] = []
+
+    def _drain() -> None:
+        drained_result.append(
+            manager.drain_completed_for_parent(parent_state_lock=parent_lock)
+        )
+
+    thread = threading.Thread(target=_drain)
+    thread.start()
+    time.sleep(0.15)
+    job.injected_to_parent = True
+
+    parent_lock.release()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert drained_result == [[]]
+
+
+def test_drain_completed_for_parent_works_without_parent_lock() -> None:
+    manager = SubagentManager()
+    job = SubagentJob(
+        id="sj_no_lock",
+        mode="explore",
+        task="test task",
+        status="completed",
+        created_at=time.time(),
+        result="done",
+        injected_to_parent=False,
+    )
+    manager._jobs["sj_no_lock"] = job
+
+    result = manager.drain_completed_for_parent()
+
+    assert len(result) == 1
+    assert result[0].id == "sj_no_lock"
+    assert job.injected_to_parent is True
+
+
+def test_drain_with_parent_state_lock_drains_job_not_injected() -> None:
+    manager = SubagentManager()
+    job = SubagentJob(
+        id="sj_safe",
+        mode="explore",
+        task="test task",
+        status="completed",
+        created_at=time.time(),
+        result="done",
+        injected_to_parent=False,
+    )
+    manager._jobs["sj_safe"] = job
+
+    result = manager.drain_completed_for_parent(parent_state_lock=threading.Lock())
+
+    assert len(result) == 1
+    assert result[0].id == "sj_safe"
+    assert job.injected_to_parent is True
+
+
+def test_drain_without_lock_skips_already_injected_job() -> None:
+    manager = SubagentManager()
+    job = SubagentJob(
+        id="sj_done",
+        mode="explore",
+        task="test task",
+        status="completed",
+        created_at=time.time(),
+        result="done",
+        injected_to_parent=True,
+    )
+    manager._jobs["sj_done"] = job
+
+    result = manager.drain_completed_for_parent()
+
+    assert result == []

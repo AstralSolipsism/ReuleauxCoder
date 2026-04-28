@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import sys
@@ -52,8 +53,12 @@ class PlatformInfo:
             return self._shell
 
         if self._is_windows:
-            # Prefer PowerShell Core, then PowerShell, then CMD
-            if shutil.which("pwsh"):
+            # Prefer Git Bash because agent-generated commands are usually POSIX-like.
+            git_bash = _find_git_bash()
+            if git_bash:
+                self._shell = ShellType.BASH
+                self._shell_path = git_bash
+            elif shutil.which("pwsh"):
                 self._shell = ShellType.POWERSHELL_CORE
                 self._shell_path = shutil.which("pwsh")
             elif shutil.which("powershell"):
@@ -138,6 +143,41 @@ class PlatformInfo:
         """Format path for display (use forward slashes for consistency)."""
         p = Path(path)
         return str(p.as_posix())
+
+
+def _is_git_bash_path(path: str) -> bool:
+    normalized = Path(path).as_posix().lower()
+    return "/git/bin/bash.exe" in normalized or "/git/usr/bin/bash.exe" in normalized
+
+
+def _find_git_bash() -> str | None:
+    for name in ("bash.exe", "bash"):
+        candidate = shutil.which(name)
+        if candidate and _is_git_bash_path(candidate):
+            return candidate
+
+    candidates: list[Path] = []
+    for key in ("ProgramFiles", "ProgramFiles(x86)"):
+        root = os.environ.get(key)
+        if root:
+            candidates.extend(
+                [
+                    Path(root) / "Git" / "bin" / "bash.exe",
+                    Path(root) / "Git" / "usr" / "bin" / "bash.exe",
+                ]
+            )
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        candidates.extend(
+            [
+                Path(local_app_data) / "Programs" / "Git" / "bin" / "bash.exe",
+                Path(local_app_data) / "Programs" / "Git" / "usr" / "bin" / "bash.exe",
+            ]
+        )
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 # Global platform info singleton

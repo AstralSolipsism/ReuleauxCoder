@@ -518,6 +518,8 @@ func (r *Runner) sendCleanupResult(ctx context.Context, peerToken, requestID str
 	})
 }
 
+// mapFromStruct converts a small control-plane struct to map[string]any via JSON roundtrip.
+// This keeps field tags and omitempty behavior consistent with the wire protocol.
 func mapFromStruct(v any) map[string]any {
 	buf, err := json.Marshal(v)
 	if err != nil {

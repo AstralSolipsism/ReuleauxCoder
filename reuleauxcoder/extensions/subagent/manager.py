@@ -311,8 +311,14 @@ class SubagentManager:
             pass
         return self.get_job(job_id)
 
-    def drain_completed_for_parent(self) -> list[SubagentJob]:
-        """Return completed/failed jobs not yet injected into parent context."""
+    def drain_completed_for_parent(
+        self, *, parent_state_lock: threading.Lock | None = None
+    ) -> list[SubagentJob]:
+        """Return completed/failed jobs not yet injected into parent context.
+
+        When a parent state lock is provided, re-check injection state while
+        holding it to avoid racing the background completion callback.
+        """
         drained: list[SubagentJob] = []
         with self._lock:
             for job in self._jobs.values():
@@ -320,23 +326,31 @@ class SubagentManager:
                     continue
                 if job.status not in {"completed", "failed"}:
                     continue
-                job.injected_to_parent = True
-                drained.append(
-                    SubagentJob(
-                        id=job.id,
-                        mode=job.mode,
-                        task=job.task,
-                        status=job.status,
-                        created_at=job.created_at,
-                        started_at=job.started_at,
-                        finished_at=job.finished_at,
-                        timeout_seconds=job.timeout_seconds,
-                        result=job.result,
-                        error=job.error,
-                        detached_due_to_timeout=job.detached_due_to_timeout,
-                        injected_to_parent=False,
+                if parent_state_lock is not None:
+                    parent_state_lock.acquire()
+                try:
+                    if job.injected_to_parent:
+                        continue
+                    job.injected_to_parent = True
+                    drained.append(
+                        SubagentJob(
+                            id=job.id,
+                            mode=job.mode,
+                            task=job.task,
+                            status=job.status,
+                            created_at=job.created_at,
+                            started_at=job.started_at,
+                            finished_at=job.finished_at,
+                            timeout_seconds=job.timeout_seconds,
+                            result=job.result,
+                            error=job.error,
+                            detached_due_to_timeout=job.detached_due_to_timeout,
+                            injected_to_parent=False,
+                        )
                     )
-                )
+                finally:
+                    if parent_state_lock is not None:
+                        parent_state_lock.release()
         return sorted(drained, key=lambda item: item.finished_at or item.created_at)
 
 

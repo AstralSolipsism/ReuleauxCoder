@@ -213,6 +213,24 @@ class LLM:
             reasoning_replay_placeholder=self.reasoning_replay_placeholder,
             thinking_enabled=bool(self.thinking_enabled),
         )
+        if self.thinking_enabled and self.preserve_reasoning_content:
+            placeholder = self.reasoning_replay_placeholder
+            backfilled_indices: list[int] = []
+            for idx, msg in enumerate(sanitized_messages):
+                if msg.get("role") != "assistant":
+                    continue
+                if not msg.get("tool_calls"):
+                    continue
+                if msg.get("reasoning_content") == placeholder:
+                    backfilled_indices.append(idx)
+            if backfilled_indices:
+                self._emit_debug(
+                    "[reasoning] sanitizer backfilled placeholder "
+                    "reasoning_content for tool-call assistant messages",
+                    placeholder=placeholder,
+                    message_indices=backfilled_indices,
+                    count=len(backfilled_indices),
+                )
         provider = self._prepare_provider()
         request = ProviderRequest(
             model=self.model,
@@ -262,10 +280,29 @@ class LLM:
             response = provider_response.to_llm_response()
             params = dict(response.provider_extra.get("request_params") or params)
 
+            if (
+                self.thinking_enabled
+                and self.preserve_reasoning_content
+                and not response.reasoning_content
+            ):
+                self._emit_debug(
+                    "[reasoning] thinking enabled but no reasoning_content "
+                    "received in stream",
+                    model=self.model,
+                    has_tool_calls=bool(response.tool_calls),
+                    content_chars=len(response.content or ""),
+                )
+
             if self.debug_trace:
                 debug_events = list(
                     (response.provider_extra or {}).get("debug_stream_events") or []
                 )[:MAX_DEBUG_STREAM_EVENTS]
+                reasoning_received = bool(response.reasoning_content)
+                reasoning_stream_chunks = sum(
+                    1
+                    for ev in debug_events
+                    if ev.get("type") in {"reasoning", "reasoning_detail"}
+                )
                 trace_payload = {
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "session_id": session_id,
@@ -297,6 +334,7 @@ class LLM:
                             )
                             or (params.get("thinking") or {}).get("type")
                         ),
+                        "preserve_reasoning_content": self.preserve_reasoning_content,
                     },
                     "messages": {
                         "raw_count": len(raw_messages),
@@ -306,6 +344,7 @@ class LLM:
                     },
                     "stream": {
                         "event_count": len(debug_events),
+                        "reasoning_chunks": reasoning_stream_chunks,
                         "events": debug_events,
                     },
                     "response": {
@@ -313,6 +352,8 @@ class LLM:
                         "reasoning_content": _trim_text(
                             response.reasoning_content or "", 1000
                         ),
+                        "reasoning_received": reasoning_received,
+                        "reasoning_chars": len(response.reasoning_content or ""),
                         "tool_calls": [
                             {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
                             for tc in response.tool_calls

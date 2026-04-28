@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -35,34 +37,28 @@ func Execute(
 	currentCWD string,
 	onStream func(protocol.ToolStreamChunk),
 ) protocol.ExecToolResult {
-	cwd := currentCWD
-	if req.CWD != nil && *req.CWD != "" {
-		cwd = *req.CWD
-	}
+	cwd, staleWarning := resolveRequestedCWD(currentCWD, req.CWD)
 
 	switch req.ToolName {
 	case "shell":
-		return runShell(req.Args, cwd, req.TimeoutSec, onStream)
+		return prependWarning(runShell(req.Args, cwd, req.TimeoutSec, onStream), staleWarning)
 	case "read_file":
-		return readFile(req.Args, cwd)
+		return prependWarning(readFile(req.Args, cwd), staleWarning)
 	case "write_file":
-		return writeFile(req.Args, cwd, req.ExpectedState)
+		return prependWarning(writeFile(req.Args, cwd, req.ExpectedState), staleWarning)
 	case "edit_file":
-		return editFile(req.Args, cwd, req.ExpectedState)
+		return prependWarning(editFile(req.Args, cwd, req.ExpectedState), staleWarning)
 	case "glob":
-		return globFiles(req.Args, cwd)
+		return prependWarning(globFiles(req.Args, cwd), staleWarning)
 	case "grep":
-		return grepFiles(req.Args, cwd)
+		return prependWarning(grepFiles(req.Args, cwd), staleWarning)
 	default:
 		return errorResult("REMOTE_TOOL_ERROR", fmt.Sprintf("unsupported tool %q", req.ToolName))
 	}
 }
 
 func Preview(req protocol.ToolPreviewRequest, currentCWD string) protocol.ToolPreviewResult {
-	cwd := currentCWD
-	if req.CWD != nil && *req.CWD != "" {
-		cwd = *req.CWD
-	}
+	cwd, staleWarning := resolveRequestedCWD(currentCWD, req.CWD)
 	if req.ToolName != "write_file" && req.ToolName != "edit_file" {
 		return protocol.ToolPreviewResult{
 			OK:           false,
@@ -94,7 +90,7 @@ func Preview(req protocol.ToolPreviewRequest, currentCWD string) protocol.ToolPr
 		section["original_text"] = originalText
 		section["modified_text"] = modifiedText
 	}
-	return protocol.ToolPreviewResult{
+	result := protocol.ToolPreviewResult{
 		OK:           true,
 		Sections:     []map[string]any{section},
 		ResolvedPath: mutation.resolvedPath,
@@ -106,6 +102,34 @@ func Preview(req protocol.ToolPreviewRequest, currentCWD string) protocol.ToolPr
 		OriginalText: originalText,
 		ModifiedText: modifiedText,
 	}
+	if staleWarning != "" {
+		result.Meta = map[string]any{"warning": strings.TrimSpace(staleWarning)}
+	}
+	return result
+}
+
+func resolveRequestedCWD(currentCWD string, requested *string) (string, string) {
+	cwd := currentCWD
+	if requested == nil || *requested == "" {
+		return cwd, ""
+	}
+	cwd = *requested
+	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
+		return currentCWD, fmt.Sprintf(
+			"Warning: working directory no longer exists (%s). Reset to %s.\n",
+			cwd,
+			currentCWD,
+		)
+	}
+	return cwd, ""
+}
+
+func prependWarning(r protocol.ExecToolResult, warning string) protocol.ExecToolResult {
+	if warning == "" || !r.OK {
+		return r
+	}
+	r.Result = warning + r.Result
+	return r
 }
 
 func runShell(
@@ -205,6 +229,7 @@ func runShell(
 	if strings.TrimSpace(out) == "" {
 		out = "(no output)"
 	}
+	out = truncateOutput(out)
 	return protocol.ExecToolResult{OK: true, Result: out, Meta: map[string]any{"exit_code": exitCode}}
 }
 
@@ -217,11 +242,15 @@ func buildShellCommand(
 		return "sh", []string{"-lc", command}
 	}
 
+	if shell, ok := findGitBash(lookPath); ok {
+		return shell, []string{"-c", command}
+	}
+
 	shell := "powershell.exe"
-	if _, err := lookPath("pwsh"); err == nil {
-		shell = "pwsh"
-	} else if _, err := lookPath("powershell.exe"); err == nil {
-		shell = "powershell.exe"
+	if resolved, err := lookPath("pwsh"); err == nil {
+		shell = resolved
+	} else if resolved, err := lookPath("powershell.exe"); err == nil {
+		shell = resolved
 	}
 	normalized := strings.ReplaceAll(command, "&&", ";")
 	return shell, []string{
@@ -232,6 +261,62 @@ func buildShellCommand(
 		"-Command",
 		normalized,
 	}
+}
+
+func findGitBash(lookPath func(string) (string, error)) (string, bool) {
+	for _, name := range []string{"bash.exe", "bash"} {
+		if resolved, err := lookPath(name); err == nil && isGitBashPath(resolved) {
+			return resolved, true
+		}
+	}
+	for _, candidate := range commonGitBashPaths() {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func isGitBashPath(candidate string) bool {
+	normalized := strings.ToLower(filepath.ToSlash(candidate))
+	return strings.Contains(normalized, "/git/bin/bash.exe") ||
+		strings.Contains(normalized, "/git/usr/bin/bash.exe")
+}
+
+func commonGitBashPaths() []string {
+	var paths []string
+	if programFiles := os.Getenv("ProgramFiles"); programFiles != "" {
+		paths = append(paths,
+			filepath.Join(programFiles, "Git", "bin", "bash.exe"),
+			filepath.Join(programFiles, "Git", "usr", "bin", "bash.exe"),
+		)
+	}
+	if programFilesX86 := os.Getenv("ProgramFiles(x86)"); programFilesX86 != "" {
+		paths = append(paths,
+			filepath.Join(programFilesX86, "Git", "bin", "bash.exe"),
+			filepath.Join(programFilesX86, "Git", "usr", "bin", "bash.exe"),
+		)
+	}
+	if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+		paths = append(paths,
+			filepath.Join(localAppData, "Programs", "Git", "bin", "bash.exe"),
+			filepath.Join(localAppData, "Programs", "Git", "usr", "bin", "bash.exe"),
+		)
+	}
+	return paths
+}
+
+const maxOutputChars = 15_000
+const keepHeadChars = 6_000
+const keepTailChars = 3_000
+
+func truncateOutput(out string) string {
+	if len(out) <= maxOutputChars {
+		return out
+	}
+	return out[:keepHeadChars] +
+		fmt.Sprintf("\n\n... truncated (%d chars total) ...\n\n", len(out)) +
+		out[len(out)-keepTailChars:]
 }
 
 func readFile(args map[string]any, cwd string) protocol.ExecToolResult {
@@ -253,32 +338,43 @@ func readFile(args map[string]any, cwd string) protocol.ExecToolResult {
 	if err != nil {
 		return errorResult("REMOTE_TOOL_ERROR", err.Error())
 	}
-	data, err := os.ReadFile(resolved)
+	f, err := os.Open(resolved)
 	if err != nil {
 		return errorResult("REMOTE_TOOL_ERROR", err.Error())
 	}
-	text := strings.ReplaceAll(string(data), "\r\n", "\n")
-	lines := strings.Split(text, "\n")
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var lines []string
+	lineNo := 0
+	start := offset - 1
+	end := start + limit
+	for scanner.Scan() {
+		lineNo++
+		if override {
+			lines = append(lines, scanner.Text())
+			continue
+		}
+		if lineNo > start && lineNo <= end {
+			lines = append(lines, scanner.Text())
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return errorResult("REMOTE_TOOL_ERROR", err.Error())
 	}
 	if override {
 		return protocol.ExecToolResult{OK: true, Result: joinNumbered(lines, 0)}
 	}
-	start := offset - 1
-	if start >= len(lines) {
+	if start >= lineNo {
 		return protocol.ExecToolResult{OK: true, Result: "(empty file)"}
 	}
-	end := start + limit
-	if end > len(lines) {
-		end = len(lines)
-	}
-	result := joinNumbered(lines[start:end], start)
+	result := joinNumbered(lines, start)
 	if result == "" {
 		result = "(empty file)"
 	}
-	if end < len(lines) {
-		result += fmt.Sprintf("\n... (%d lines total, showing %d-%d; use override=true to read full file)", len(lines), start+1, end)
+	if end < lineNo {
+		result += fmt.Sprintf("\n... (%d lines total, showing %d-%d; use override=true to read full file)", lineNo, start+1, min(end, lineNo))
 	}
 	return protocol.ExecToolResult{OK: true, Result: result}
 }
@@ -311,7 +407,11 @@ func editFile(args map[string]any, cwd string, expectedState map[string]any) pro
 	if err := os.WriteFile(mutation.resolvedPath, []byte(mutation.newContent), 0o644); err != nil {
 		return errorResult("REMOTE_TOOL_ERROR", err.Error())
 	}
-	return protocol.ExecToolResult{OK: true, Result: fmt.Sprintf("Edited %s", mutation.filePath)}
+	result := fmt.Sprintf("Edited %s", mutation.filePath)
+	if mutation.diff != "" {
+		result += "\n" + mutation.diff
+	}
+	return protocol.ExecToolResult{OK: true, Result: result}
 }
 
 type fileState struct {
@@ -512,6 +612,14 @@ func globFiles(args map[string]any, cwd string) protocol.ExecToolResult {
 	if err != nil {
 		return errorResult("REMOTE_TOOL_ERROR", err.Error())
 	}
+	hasGlobstar := strings.Contains(pattern, "**")
+	var re *regexp.Regexp
+	if hasGlobstar {
+		re, err = compileGlobRegex(pattern)
+		if err != nil {
+			return errorResult("REMOTE_TOOL_ERROR", fmt.Sprintf("invalid glob pattern: %v", err))
+		}
+	}
 	var matches []string
 	walkErr := filepath.WalkDir(base, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -527,14 +635,14 @@ func globFiles(args map[string]any, cwd string) protocol.ExecToolResult {
 		if err != nil {
 			return nil
 		}
-		matched, err := filepath.Match(pattern, rel)
-		if err == nil && matched {
-			matches = append(matches, path)
-		}
-		if strings.Contains(pattern, "**") {
-			alt := strings.ReplaceAll(pattern, "**/", "")
-			matchedAlt, err := filepath.Match(alt, filepath.Base(path))
-			if err == nil && matchedAlt {
+		relNorm := filepath.ToSlash(rel)
+		if hasGlobstar {
+			if re.MatchString(relNorm) {
+				matches = append(matches, path)
+			}
+		} else {
+			matched, err := pathpkg.Match(pattern, relNorm)
+			if err == nil && matched {
 				matches = append(matches, path)
 			}
 		}
@@ -543,7 +651,7 @@ func globFiles(args map[string]any, cwd string) protocol.ExecToolResult {
 	if walkErr != nil {
 		return errorResult("REMOTE_TOOL_ERROR", walkErr.Error())
 	}
-	sort.Strings(matches)
+	sortByMtime(matches)
 	if len(matches) == 0 {
 		return protocol.ExecToolResult{OK: true, Result: "No files matched."}
 	}
@@ -551,6 +659,55 @@ func globFiles(args map[string]any, cwd string) protocol.ExecToolResult {
 		matches = append(matches[:100], fmt.Sprintf("... (%d matches, showing first 100)", len(matches)))
 	}
 	return protocol.ExecToolResult{OK: true, Result: strings.Join(dedupe(matches), "\n")}
+}
+
+func sortByMtime(paths []string) {
+	type entry struct {
+		path  string
+		mtime int64
+	}
+	entries := make([]entry, len(paths))
+	for i, p := range paths {
+		entries[i].path = p
+		if info, err := os.Stat(p); err == nil {
+			entries[i].mtime = info.ModTime().UnixNano()
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].mtime > entries[j].mtime
+	})
+	for i, e := range entries {
+		paths[i] = e.path
+	}
+}
+
+func compileGlobRegex(pattern string) (*regexp.Regexp, error) {
+	var buf strings.Builder
+	buf.WriteString("^")
+	for i := 0; i < len(pattern); i++ {
+		c := pattern[i]
+		switch {
+		case c == '*' && i+1 < len(pattern) && pattern[i+1] == '*':
+			if i+2 < len(pattern) && pattern[i+2] == '/' {
+				buf.WriteString("(?:.*/)?")
+				i += 2
+			} else {
+				buf.WriteString(".*")
+				i++
+			}
+		case c == '*':
+			buf.WriteString("[^/]*")
+		case c == '?':
+			buf.WriteString("[^/]")
+		case strings.ContainsRune(`.+()|^${}\`, rune(c)):
+			buf.WriteByte('\\')
+			buf.WriteByte(c)
+		default:
+			buf.WriteByte(c)
+		}
+	}
+	buf.WriteString("$")
+	return regexp.Compile(buf.String())
 }
 
 func grepFiles(args map[string]any, cwd string) protocol.ExecToolResult {
