@@ -368,6 +368,40 @@ def test_parse_config_reads_environment_cli_tools() -> None:
     assert tool.description == "Repository graph CLI"
 
 
+def test_parse_config_reads_environment_skills() -> None:
+    loader = ConfigLoader()
+    config = loader._parse_config(
+        {
+            "models": {
+                "profiles": {"main": {"model": "gpt-main", "api_key": "key"}}
+            },
+            "modes": {"profiles": {"coder": {}}},
+            "environment": {
+                "skills": {
+                    "collaborating-with-claude": {
+                        "scope": "user",
+                        "check": "Test-Path ~/.agents/skills/collaborating-with-claude/SKILL.md",
+                        "install": "python install-skill.py",
+                        "version": "1.0.0",
+                        "source": "github",
+                        "description": "Claude bridge skill",
+                        "path_hint": "~/.agents/skills/collaborating-with-claude/SKILL.md",
+                    }
+                }
+            },
+        }
+    )
+
+    skill = config.environment.skills["collaborating-with-claude"]
+    assert skill.scope == "user"
+    assert skill.check == "Test-Path ~/.agents/skills/collaborating-with-claude/SKILL.md"
+    assert skill.install == "python install-skill.py"
+    assert skill.version == "1.0.0"
+    assert skill.source == "github"
+    assert skill.description == "Claude bridge skill"
+    assert skill.path_hint == "~/.agents/skills/collaborating-with-claude/SKILL.md"
+
+
 def test_parse_config_falls_back_when_active_profile_missing() -> None:
     loader = ConfigLoader()
     config = loader._parse_config(

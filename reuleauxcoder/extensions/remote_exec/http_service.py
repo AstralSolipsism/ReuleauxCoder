@@ -41,6 +41,7 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     EnvironmentMCPServerManifest,
     EnvironmentManifestRequest,
     EnvironmentManifestResponse,
+    EnvironmentSkillManifest,
     ExecToolResult,
     Heartbeat,
     MCPArtifactManifest,
@@ -52,6 +53,10 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     RegisterRejected,
     RegisterRequest,
     RelayEnvelope,
+    SessionListRequest,
+    SessionLoadRequest,
+    SessionNewRequest,
+    SessionSnapshotRequest,
     ToolPreviewResult,
 )
 from reuleauxcoder.extensions.remote_exec.server import RelayServer
@@ -62,6 +67,7 @@ from reuleauxcoder.interfaces.events import UIEventBus, UIEventKind
 class _RemoteChatSession:
     chat_id: str
     peer_id: str
+    session_hint: str | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
     done: bool = False
     running: bool = False
@@ -178,12 +184,15 @@ class RemoteRelayHTTPService:
         chat_handler: Callable[[str, str], ChatResponse] | None = None,
         stream_chat_handler: Callable[[str, str, _RemoteChatSession], None]
         | None = None,
+        session_handler: Callable[[str, str, dict[str, Any]], dict[str, Any]]
+        | None = None,
         bootstrap_access_secret: str = "",
         admin_access_secret: str = "",
         bootstrap_token_ttl_sec: int = 300,
         mcp_servers: list[Any] | None = None,
         mcp_artifact_root: str | Path = ".rcoder/mcp-artifacts",
         environment_cli_tools: dict[str, Any] | None = None,
+        environment_skills: dict[str, Any] | None = None,
         admin_config_path: str | Path | None = None,
         admin_config_reload_handler: ConfigReloadHandler | None = None,
         admin_provider_test_handler: ProviderTestHandler | None = None,
@@ -195,12 +204,14 @@ class RemoteRelayHTTPService:
         self.artifact_provider = artifact_provider
         self.chat_handler = chat_handler
         self.stream_chat_handler = stream_chat_handler
+        self.session_handler = session_handler
         self.bootstrap_access_secret = bootstrap_access_secret
         self.admin_access_secret = admin_access_secret
         self.bootstrap_token_ttl_sec = bootstrap_token_ttl_sec
         self.mcp_servers = list(mcp_servers or [])
         self.mcp_artifact_root = Path(mcp_artifact_root)
         self.environment_cli_tools = dict(environment_cli_tools or {})
+        self.environment_skills = dict(environment_skills or {})
         self.admin_manager = RemoteAdminConfigManager(
             Path(admin_config_path) if admin_config_path is not None else None,
             reload_handler=admin_config_reload_handler,
@@ -263,9 +274,19 @@ class RemoteRelayHTTPService:
     ) -> None:
         self.stream_chat_handler = handler
 
-    def _create_chat_session(self, peer_id: str) -> _RemoteChatSession:
+    def set_session_handler(
+        self,
+        handler: Callable[[str, str, dict[str, Any]], dict[str, Any]] | None,
+    ) -> None:
+        self.session_handler = handler
+
+    def _create_chat_session(
+        self, peer_id: str, session_hint: str | None = None
+    ) -> _RemoteChatSession:
         self._gc_chat_sessions()
-        session = _RemoteChatSession(chat_id=str(uuid.uuid4()), peer_id=peer_id)
+        session = _RemoteChatSession(
+            chat_id=str(uuid.uuid4()), peer_id=peer_id, session_hint=session_hint
+        )
         with self._chat_sessions_lock:
             self._chat_sessions[session.chat_id] = session
         return session
@@ -377,6 +398,9 @@ class RemoteRelayHTTPService:
                     return
                 if parsed.path == "/remote/approval/reply":
                     self._handle_approval_reply()
+                    return
+                if parsed.path.startswith("/remote/sessions/"):
+                    self._handle_sessions(parsed.path)
                     return
                 if parsed.path.startswith("/remote/admin/"):
                     self._handle_admin(parsed.path)
@@ -831,7 +855,7 @@ class RemoteRelayHTTPService:
                     )
                     return
 
-                session = service._create_chat_session(peer_id)
+                session = service._create_chat_session(peer_id, req.session_hint)
                 session.append_event("chat_start", {"prompt": req.prompt})
                 session.mark_running()
 
@@ -881,6 +905,57 @@ class RemoteRelayHTTPService:
                         events=events, done=done, next_cursor=next_cursor
                     ).to_dict(),
                 )
+
+            def _handle_sessions(self, path: str) -> None:
+                payload = self._read_json()
+                action = path.rsplit("/", 1)[-1]
+                try:
+                    if action == "list":
+                        req = SessionListRequest.from_dict(payload)
+                        peer_token = req.peer_token
+                    elif action == "load":
+                        req = SessionLoadRequest.from_dict(payload)
+                        peer_token = req.peer_token
+                    elif action == "new":
+                        req = SessionNewRequest.from_dict(payload)
+                        peer_token = req.peer_token
+                    elif action == "snapshot":
+                        req = SessionSnapshotRequest.from_dict(payload)
+                        peer_token = req.peer_token
+                    else:
+                        self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                        return
+                except Exception:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST, {"error": "invalid_session_request"}
+                    )
+                    return
+
+                peer_id = service.relay_server.token_manager.verify_peer_token(
+                    peer_token
+                )
+                if peer_id is None:
+                    self._send_json(
+                        HTTPStatus.UNAUTHORIZED, {"error": "invalid_peer_token"}
+                    )
+                    return
+                if service.session_handler is None:
+                    self._send_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"ok": False, "error": "sessions_unavailable"},
+                    )
+                    return
+
+                try:
+                    result = dict(service.session_handler(action, peer_id, payload))
+                    status = int(result.pop("_status", HTTPStatus.OK))
+                except Exception as exc:
+                    self._send_json(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"ok": False, "error": str(exc)},
+                    )
+                    return
+                self._send_json(status, result)
 
             def _handle_approval_reply(self) -> None:
                 payload = self._read_json()
@@ -1130,24 +1205,52 @@ class RemoteRelayHTTPService:
                     description=str(getattr(server, "description", "") or ""),
                 )
             )
+        skills: list[EnvironmentSkillManifest] = []
+        for name, skill in sorted(self.environment_skills.items()):
+            skill_name = str(_env_tool_value(skill, "name", name) or name)
+            check = str(_env_tool_value(skill, "check", "") or "")
+            if not skill_name or not check:
+                continue
+            version = _env_tool_value(skill, "version", None)
+            skills.append(
+                EnvironmentSkillManifest(
+                    name=skill_name,
+                    scope=str(_env_tool_value(skill, "scope", "project") or "project"),
+                    check=check,
+                    install=str(_env_tool_value(skill, "install", "") or ""),
+                    version=str(version) if version is not None else None,
+                    source=str(_env_tool_value(skill, "source", "") or ""),
+                    description=str(_env_tool_value(skill, "description", "") or ""),
+                    path_hint=(
+                        str(_env_tool_value(skill, "path_hint"))
+                        if _env_tool_value(skill, "path_hint", None) is not None
+                        else None
+                    ),
+                )
+            )
         return EnvironmentManifestResponse(
             cli_tools=tools,
             mcp_servers=mcp_servers,
-            prompt=self._build_environment_sync_prompt(tools, mcp_servers, workspace),
+            skills=skills,
+            prompt=self._build_environment_sync_prompt(
+                tools, mcp_servers, skills, workspace
+            ),
         )
 
     @staticmethod
     def _build_environment_sync_prompt(
         tools: list[EnvironmentCLIToolManifest],
         mcp_servers: list[EnvironmentMCPServerManifest],
+        skills: list[EnvironmentSkillManifest],
         workspace: str,
     ) -> str:
-        if not tools and not mcp_servers:
+        if not tools and not mcp_servers and not skills:
             return ""
         manifest = json.dumps(
             {
                 "cli_tools": [tool.to_dict() for tool in tools],
                 "mcp_servers": [server.to_dict() for server in mcp_servers],
+                "skills": [skill.to_dict() for skill in skills],
             },
             ensure_ascii=False,
             indent=2,
@@ -1155,14 +1258,14 @@ class RemoteRelayHTTPService:
         workspace_line = workspace or "(peer working directory)"
         return (
             "You are the EZCode lightweight environment sync agent.\n"
-            "The server is the authority for the CLI manifest below. Work only from "
+            "The server is the authority for the environment manifest below. Work only from "
             "this manifest; do not scan PATH broadly, discover unrelated tools, or "
             "build a persistent inventory database.\n\n"
             f"Peer workspace: {workspace_line}\n\n"
             "Environment manifest:\n"
             f"```json\n{manifest}\n```\n\n"
             "Procedure:\n"
-            "1. For each CLI and MCP entry with a `check` command, use the shell "
+            "1. For each CLI, MCP, and skill entry with a `check` command, use the shell "
             "tool to run exactly that command from the peer workspace.\n"
             "2. Treat successful checks as available. For failures, explain the "
             "missing or mismatched tool and quote the configured `install` command "

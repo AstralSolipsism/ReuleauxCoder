@@ -14,6 +14,7 @@ from reuleauxcoder.domain.config.models import (
     ContextConfig,
     EnvironmentCLIToolConfig,
     EnvironmentConfig,
+    EnvironmentSkillConfig,
     MCPServerConfig,
     ModeConfig,
     ModelProfileConfig,
@@ -393,6 +394,16 @@ class ConfigLoader:
                     str(name), tool_data
                 )
 
+        skills: dict[str, EnvironmentSkillConfig] = {}
+        skills_data = environment_config.get("skills", {})
+        if isinstance(skills_data, dict):
+            for name, skill_data in skills_data.items():
+                if not isinstance(skill_data, dict):
+                    continue
+                skills[str(name)] = EnvironmentSkillConfig.from_dict(
+                    str(name), skill_data
+                )
+
         llm_params = self._resolve_llm_params(active_profile, app_config, providers)
 
         return Config(
@@ -484,7 +495,7 @@ class ConfigLoader:
                 ),
                 shell_timeout_sec=int(remote_exec_config.get("shell_timeout_sec", 120)),
             ),
-            environment=EnvironmentConfig(cli_tools=cli_tools),
+            environment=EnvironmentConfig(cli_tools=cli_tools, skills=skills),
             session_auto_save=session_config.get(
                 "auto_save", DEFAULTS["session_auto_save"]
             ),

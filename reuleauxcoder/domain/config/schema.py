@@ -122,6 +122,30 @@ CONFIG_SCHEMA = {
         "default_tool_timeout_sec": "int (default: 30)",
         "shell_timeout_sec": "int (default: 120)",
     },
+    "environment": {
+        "cli_tools": {
+            "tool_name": {
+                "command": "string (required)",
+                "capabilities": ["capability-name", "..."],
+                "check": "string (required)",
+                "install": "string (optional)",
+                "version": "string (optional)",
+                "source": "string (optional)",
+                "description": "string (optional)",
+            }
+        },
+        "skills": {
+            "skill_name": {
+                "scope": "string (optional, default: project)",
+                "check": "string (required)",
+                "install": "string (optional)",
+                "version": "string (optional)",
+                "source": "string (optional)",
+                "description": "string (optional)",
+                "path_hint": "string (optional)",
+            }
+        },
+    },
 }
 
 # Default values for configuration

@@ -568,10 +568,54 @@ class EnvironmentCLIToolConfig:
 
 
 @dataclass
+class EnvironmentSkillConfig:
+    """Declarative skill entry used by lightweight environment sync."""
+
+    name: str
+    scope: str = "project"
+    check: str = ""
+    install: str = ""
+    version: Optional[str] = None
+    source: str = ""
+    description: str = ""
+    path_hint: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "scope": self.scope,
+            "check": self.check,
+            "install": self.install,
+            "source": self.source,
+            "description": self.description,
+        }
+        if self.version is not None:
+            data["version"] = self.version
+        if self.path_hint is not None:
+            data["path_hint"] = self.path_hint
+        return data
+
+    @classmethod
+    def from_dict(cls, name: str, d: dict[str, Any]) -> "EnvironmentSkillConfig":
+        return cls(
+            name=name,
+            scope=str(d.get("scope", "project") or "project"),
+            check=str(d.get("check", "")),
+            install=str(d.get("install", "")),
+            version=str(d["version"]) if d.get("version") is not None else None,
+            source=str(d.get("source", "")),
+            description=str(d.get("description", "")),
+            path_hint=(
+                str(d["path_hint"]) if d.get("path_hint") is not None else None
+            ),
+        )
+
+
+@dataclass
 class EnvironmentConfig:
     """Server-authoritative lightweight CLI environment manifest."""
 
     cli_tools: dict[str, EnvironmentCLIToolConfig] = field(default_factory=dict)
+    skills: dict[str, EnvironmentSkillConfig] = field(default_factory=dict)
 
 
 @dataclass

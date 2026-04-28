@@ -10,6 +10,7 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     DisconnectNotice,
     EnvironmentCLIToolManifest,
     EnvironmentMCPServerManifest,
+    EnvironmentSkillManifest,
     EnvironmentManifestRequest,
     EnvironmentManifestResponse,
     ErrorMessage,
@@ -184,6 +185,18 @@ class TestEnvironmentManifest:
                     requirements={"node": ">=20", "npm": "required"},
                 )
             ],
+            skills=[
+                EnvironmentSkillManifest(
+                    name="collaborating-with-claude",
+                    scope="user",
+                    check="Test-Path ~/.agents/skills/collaborating-with-claude/SKILL.md",
+                    install="python install-skill.py",
+                    version="1.0.0",
+                    source="github",
+                    description="Claude bridge skill",
+                    path_hint="~/.agents/skills/collaborating-with-claude/SKILL.md",
+                )
+            ],
             prompt="check gitnexus",
         )
 
@@ -197,6 +210,9 @@ class TestEnvironmentManifest:
         assert restored.mcp_servers[0].args == ["mcp"]
         assert restored.mcp_servers[0].distribution == "command"
         assert restored.mcp_servers[0].requirements["node"] == ">=20"
+        assert restored.skills[0].name == "collaborating-with-claude"
+        assert restored.skills[0].scope == "user"
+        assert restored.skills[0].path_hint == "~/.agents/skills/collaborating-with-claude/SKILL.md"
         assert restored.prompt == "check gitnexus"
 
     def test_manifest_request_roundtrip(self) -> None:

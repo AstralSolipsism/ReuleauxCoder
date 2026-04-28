@@ -122,6 +122,25 @@ skills:
   scan_user: true
   disabled: []
 
+# Optional environment manifest for remote peer environment setup.
+# environment:
+#   cli_tools:
+#     gitnexus:
+#       command: "gitnexus"
+#       capabilities: ["repo_index"]
+#       check: "gitnexus --version"
+#       install: "npm install -g gitnexus"
+#       source: "npm"
+#       description: "Repository graph CLI"
+#   skills:
+#     collaborating-with-claude:
+#       scope: "user"
+#       check: "Test-Path $env:USERPROFILE/.agents/skills/collaborating-with-claude/SKILL.md"
+#       install: "python C:/Users/you/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py --repo your/repo --path skills/collaborating-with-claude"
+#       source: "github"
+#       description: "Claude collaboration skill"
+#       path_hint: "~/.agents/skills/collaborating-with-claude/SKILL.md"
+
 # Optional MCP server examples.
 # `placement: server` runs on the machine running rcoder.
 # `placement: peer` is centrally managed by the server, downloaded by remote peers,

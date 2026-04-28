@@ -191,6 +191,7 @@ def _default_create_remote_http_service(
         mcp_servers=config.mcp_servers,
         mcp_artifact_root=config.mcp_artifact_root,
         environment_cli_tools=config.environment.cli_tools,
+        environment_skills=config.environment.skills,
         admin_config_path=getattr(config, "_source_path", None),
     )
 

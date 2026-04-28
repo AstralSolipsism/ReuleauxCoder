@@ -453,6 +453,48 @@ class EnvironmentMCPServerManifest:
 
 
 @dataclass
+class EnvironmentSkillManifest:
+    name: str
+    scope: str = "project"
+    check: str = ""
+    install: str = ""
+    version: str | None = None
+    source: str = ""
+    description: str = ""
+    path_hint: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "name": self.name,
+            "scope": self.scope,
+            "check": self.check,
+            "install": self.install,
+            "source": self.source,
+            "description": self.description,
+        }
+        if self.version is not None:
+            data["version"] = self.version
+        if self.path_hint is not None:
+            data["path_hint"] = self.path_hint
+        return data
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "EnvironmentSkillManifest":
+        return cls(
+            name=str(d.get("name", "")),
+            scope=str(d.get("scope", "project") or "project"),
+            check=str(d.get("check", "")),
+            install=str(d.get("install", "")),
+            version=str(d["version"]) if d.get("version") is not None else None,
+            source=str(d.get("source", "")),
+            description=str(d.get("description", "")),
+            path_hint=(
+                str(d["path_hint"]) if d.get("path_hint") is not None else None
+            ),
+        )
+
+
+@dataclass
 class EnvironmentManifestRequest:
     peer_token: str
     os: str
@@ -481,12 +523,14 @@ class EnvironmentManifestRequest:
 class EnvironmentManifestResponse:
     cli_tools: list[EnvironmentCLIToolManifest] = field(default_factory=list)
     mcp_servers: list[EnvironmentMCPServerManifest] = field(default_factory=list)
+    skills: list[EnvironmentSkillManifest] = field(default_factory=list)
     prompt: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "cli_tools": [tool.to_dict() for tool in self.cli_tools],
             "mcp_servers": [server.to_dict() for server in self.mcp_servers],
+            "skills": [skill.to_dict() for skill in self.skills],
             "prompt": self.prompt,
         }
 
@@ -501,6 +545,11 @@ class EnvironmentManifestResponse:
             mcp_servers=[
                 EnvironmentMCPServerManifest.from_dict(item)
                 for item in d.get("mcp_servers", [])
+                if isinstance(item, dict)
+            ],
+            skills=[
+                EnvironmentSkillManifest.from_dict(item)
+                for item in d.get("skills", [])
                 if isinstance(item, dict)
             ],
             prompt=str(d.get("prompt", "")),
@@ -620,6 +669,69 @@ class ChatStreamResponse:
             done=bool(d.get("done", False)),
             next_cursor=int(d.get("next_cursor", 0)),
             error=d.get("error"),
+        )
+
+
+@dataclass
+class SessionListRequest:
+    peer_token: str
+    limit: int = 20
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"peer_token": self.peer_token, "limit": self.limit}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "SessionListRequest":
+        return cls(peer_token=d["peer_token"], limit=int(d.get("limit", 20)))
+
+
+@dataclass
+class SessionLoadRequest:
+    peer_token: str
+    session_id: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"peer_token": self.peer_token, "session_id": self.session_id}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "SessionLoadRequest":
+        return cls(peer_token=d["peer_token"], session_id=d["session_id"])
+
+
+@dataclass
+class SessionNewRequest:
+    peer_token: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"peer_token": self.peer_token}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "SessionNewRequest":
+        return cls(peer_token=d["peer_token"])
+
+
+@dataclass
+class SessionSnapshotRequest:
+    peer_token: str
+    session_id: str
+    snapshot: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "peer_token": self.peer_token,
+            "session_id": self.session_id,
+            "snapshot": self.snapshot,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "SessionSnapshotRequest":
+        snapshot = d.get("snapshot")
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        return cls(
+            peer_token=d["peer_token"],
+            session_id=d["session_id"],
+            snapshot=snapshot,
         )
 
 

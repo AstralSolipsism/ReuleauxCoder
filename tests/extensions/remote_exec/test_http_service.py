@@ -31,8 +31,13 @@ from reuleauxcoder.domain.config.models import (
 )
 from reuleauxcoder.extensions.remote_exec.protocol import (
     ChatResponse,
+    ChatStartRequest,
     CleanupResult,
     ExecToolResult,
+    SessionListRequest,
+    SessionLoadRequest,
+    SessionNewRequest,
+    SessionSnapshotRequest,
     ToolPreviewRequest,
     ToolPreviewResult,
     RelayEnvelope,
@@ -714,6 +719,17 @@ class TestRemoteRelayHTTPService:
                     source="npm",
                 )
             },
+            environment_skills={
+                "collaborating-with-claude": {
+                    "scope": "user",
+                    "check": "Test-Path ~/.agents/skills/collaborating-with-claude/SKILL.md",
+                    "install": "python install-skill.py",
+                    "version": "1.0.0",
+                    "source": "github",
+                    "description": "Claude bridge skill",
+                    "path_hint": "~/.agents/skills/collaborating-with-claude/SKILL.md",
+                }
+            },
         )
         service.start()
         try:
@@ -751,13 +767,21 @@ class TestRemoteRelayHTTPService:
             assert status == 200
             tools = {tool["name"]: tool for tool in manifest["cli_tools"]}
             mcp_servers = {server["name"]: server for server in manifest["mcp_servers"]}
+            skills = {skill["name"]: skill for skill in manifest["skills"]}
             assert tools["gitnexus"]["check"] == "gitnexus --version"
             assert tools["beads"]["capabilities"] == ["issue_tracking"]
             assert mcp_servers["gitnexus-mcp"]["distribution"] == "command"
             assert mcp_servers["gitnexus-mcp"]["requirements"]["node"] == ">=20"
+            assert skills["collaborating-with-claude"]["scope"] == "user"
+            assert (
+                skills["collaborating-with-claude"]["path_hint"]
+                == "~/.agents/skills/collaborating-with-claude/SKILL.md"
+            )
             assert "do not scan PATH broadly" in manifest["prompt"]
             assert "npm install -g gitnexus" in manifest["prompt"]
             assert "mcp_servers" in manifest["prompt"]
+            assert "skills" in manifest["prompt"]
+            assert "CLI, MCP, and skill entry" in manifest["prompt"]
             assert "command -v <command>" in manifest["prompt"]
             assert "Get-Command <command>" in manifest["prompt"]
             assert "active PATH" in manifest["prompt"]
@@ -1377,6 +1401,101 @@ class TestRemoteRelayHTTPService:
                 assert exc.code == 404
                 body = json.loads(exc.read().decode("utf-8"))
                 assert body["error"] == "approval_not_found"
+        finally:
+            service.stop()
+            relay.stop()
+
+    def test_session_protocol_models_roundtrip(self) -> None:
+        assert ChatStartRequest.from_dict(
+            {
+                "peer_token": "peer-token",
+                "prompt": "hello",
+                "session_hint": "session-1",
+            }
+        ).to_dict() == {
+            "peer_token": "peer-token",
+            "prompt": "hello",
+            "session_hint": "session-1",
+        }
+        assert SessionListRequest.from_dict(
+            {"peer_token": "peer-token", "limit": 5}
+        ).to_dict() == {"peer_token": "peer-token", "limit": 5}
+        assert SessionLoadRequest.from_dict(
+            {"peer_token": "peer-token", "session_id": "session-1"}
+        ).to_dict() == {"peer_token": "peer-token", "session_id": "session-1"}
+        assert SessionNewRequest.from_dict(
+            {"peer_token": "peer-token"}
+        ).to_dict() == {"peer_token": "peer-token"}
+        assert SessionSnapshotRequest.from_dict(
+            {
+                "peer_token": "peer-token",
+                "session_id": "session-1",
+                "snapshot": {"version": 1},
+            }
+        ).to_dict() == {
+            "peer_token": "peer-token",
+            "session_id": "session-1",
+            "snapshot": {"version": 1},
+        }
+
+    def test_sessions_routes_verify_peer_token_and_dispatch(self) -> None:
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        calls: list[tuple[str, str, dict]] = []
+
+        def session_handler(action: str, peer_id: str, payload: dict) -> dict:
+            calls.append((action, peer_id, payload))
+            if action == "load" and payload.get("session_id") == "missing":
+                return {"ok": False, "error": "session_not_found", "_status": 404}
+            return {"ok": True, "action": action}
+
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            session_handler=session_handler,
+        )
+        service.start()
+        try:
+            _, register_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/register",
+                {
+                    "bootstrap_token": relay.issue_bootstrap_token(ttl_sec=60),
+                    "cwd": "/tmp/peer",
+                },
+            )
+            peer_token = register_body["payload"]["peer_token"]
+
+            status, list_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/sessions/list",
+                {"peer_token": peer_token},
+            )
+            assert status == 200
+            assert list_body["ok"] is True
+            assert list_body["action"] == "list"
+            assert calls[-1][0] == "list"
+
+            try:
+                _json_request(
+                    "POST",
+                    f"{service.base_url}/remote/sessions/list",
+                    {"peer_token": "bad-token"},
+                )
+                raise AssertionError("expected invalid token to fail")
+            except HTTPError as exc:
+                assert exc.code == 401
+
+            try:
+                _json_request(
+                    "POST",
+                    f"{service.base_url}/remote/sessions/load",
+                    {"peer_token": peer_token, "session_id": "missing"},
+                )
+                raise AssertionError("expected missing session to fail")
+            except HTTPError as exc:
+                assert exc.code == 404
         finally:
             service.stop()
             relay.stop()
