@@ -40,6 +40,36 @@ def test_agent_event_subagent_completed_contains_payload() -> None:
     assert event.data["result"] == "done"
 
 
+def test_agent_event_usage_update_contains_context_cache_and_cost() -> None:
+    event = AgentEvent.usage_update(
+        prompt_tokens=1200,
+        completion_tokens=300,
+        context_tokens=2200,
+        context_window=128000,
+        max_output_tokens=4096,
+        model="deepseek-v4",
+        mode="coder",
+        cache_read_tokens=800,
+        cache_write_tokens=200,
+        cost_usd=0.0123,
+        usage_extra={"prompt_tokens_details": {"cached_tokens": 800}},
+        run_status="running",
+    )
+
+    assert event.event_type is AgentEventType.USAGE_UPDATE
+    assert event.data["prompt_tokens"] == 1200
+    assert event.data["completion_tokens"] == 300
+    assert event.data["context_tokens"] == 2200
+    assert event.data["context_window"] == 128000
+    assert event.data["max_output_tokens"] == 4096
+    assert event.data["cache_reads"] == 800
+    assert event.data["cache_writes"] == 200
+    assert event.data["cost_usd"] == 0.0123
+    assert event.data["cost_status"] == "available"
+    assert event.data["usage_extra"]["prompt_tokens_details"]["cached_tokens"] == 800
+    assert event.data["run_status"] == "running"
+
+
 def test_agent_event_error_contains_message() -> None:
     event = AgentEvent.error("boom")
     assert event.event_type is AgentEventType.ERROR
