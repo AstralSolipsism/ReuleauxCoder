@@ -120,14 +120,29 @@ def _usage_dict(obj: Any) -> dict[str, Any]:
     }
 
 
+def _first_int(*values: int | None) -> int | None:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 def _extract_cache_usage(usage: Any) -> tuple[int | None, int | None, dict[str, Any]]:
     details = _usage_attr(usage, "input_tokens_details") or _usage_attr(
         usage, "prompt_tokens_details"
     )
+    prompt_cache_hit = _usage_int(usage, "prompt_cache_hit_tokens")
+    prompt_cache_miss = _usage_int(usage, "prompt_cache_miss_tokens")
+    extra = {"input_tokens_details": _usage_dict(details)} if details is not None else {}
+    if prompt_cache_hit is not None or prompt_cache_miss is not None:
+        extra["prompt_cache"] = {
+            "hit_tokens": prompt_cache_hit,
+            "miss_tokens": prompt_cache_miss,
+        }
     return (
-        _usage_int(details, "cached_tokens"),
-        _usage_int(details, "cache_creation_tokens"),
-        {"input_tokens_details": _usage_dict(details)} if details is not None else {},
+        _first_int(_usage_int(details, "cached_tokens"), prompt_cache_hit),
+        _first_int(_usage_int(details, "cache_creation_tokens"), prompt_cache_miss),
+        extra,
     )
 
 

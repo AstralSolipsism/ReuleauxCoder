@@ -153,7 +153,12 @@ def test_responses_provider_parses_streaming_text_and_function_call() -> None:
             type="response.completed",
             response=SimpleNamespace(
                 id="resp_1",
-                usage=SimpleNamespace(input_tokens=3, output_tokens=4),
+                usage=SimpleNamespace(
+                    input_tokens=3,
+                    output_tokens=4,
+                    prompt_cache_hit_tokens=2,
+                    prompt_cache_miss_tokens=1,
+                ),
             ),
         ),
     ]
@@ -185,6 +190,12 @@ def test_responses_provider_parses_streaming_text_and_function_call() -> None:
     assert response.provider_response_id == "resp_1"
     assert response.prompt_tokens == 3
     assert response.completion_tokens == 4
+    assert response.cache_read_tokens == 2
+    assert response.cache_write_tokens == 1
+    assert response.usage_extra["prompt_cache"] == {
+        "hit_tokens": 2,
+        "miss_tokens": 1,
+    }
     assert response.tool_calls[0].id == "call_1"
     assert response.tool_calls[0].arguments == {"command": "pwd"}
 
@@ -231,6 +242,40 @@ def test_chat_provider_parses_reasoning_delta_field() -> None:
 
     assert response.reasoning_content == "think"
     assert response.content == "done"
+
+
+def test_chat_provider_parses_deepseek_cache_usage_fields() -> None:
+    provider = OpenAIChatProvider(
+        ProviderConfig(id="chat", type="openai_chat", api_key="sk-test")
+    )
+    events = [
+        SimpleNamespace(
+            choices=[],
+            usage=SimpleNamespace(
+                prompt_tokens=10,
+                completion_tokens=2,
+                prompt_cache_hit_tokens=7,
+                prompt_cache_miss_tokens=3,
+            ),
+        )
+    ]
+    provider.call_with_retry = lambda _params: iter(events)
+
+    response = provider.chat(
+        ProviderRequest(
+            model="deepseek-demo",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+    )
+
+    assert response.prompt_tokens == 10
+    assert response.completion_tokens == 2
+    assert response.cache_read_tokens == 7
+    assert response.cache_write_tokens == 3
+    assert response.usage_extra["prompt_cache"] == {
+        "hit_tokens": 7,
+        "miss_tokens": 3,
+    }
 
 
 def test_chat_provider_preserves_reasoning_details_signature() -> None:
