@@ -746,6 +746,19 @@ class SessionNewRequest:
 
 
 @dataclass
+class SessionDeleteRequest:
+    peer_token: str
+    session_id: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"peer_token": self.peer_token, "session_id": self.session_id}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "SessionDeleteRequest":
+        return cls(peer_token=d["peer_token"], session_id=d["session_id"])
+
+
+@dataclass
 class SessionSnapshotRequest:
     peer_token: str
     session_id: str

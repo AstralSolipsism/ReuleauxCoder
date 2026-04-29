@@ -55,6 +55,7 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     RegisterRejected,
     RegisterRequest,
     RelayEnvelope,
+    SessionDeleteRequest,
     SessionListRequest,
     SessionLoadRequest,
     SessionNewRequest,
@@ -996,6 +997,9 @@ class RemoteRelayHTTPService:
                         peer_token = req.peer_token
                     elif action == "new":
                         req = SessionNewRequest.from_dict(payload)
+                        peer_token = req.peer_token
+                    elif action == "delete":
+                        req = SessionDeleteRequest.from_dict(payload)
                         peer_token = req.peer_token
                     elif action == "snapshot":
                         req = SessionSnapshotRequest.from_dict(payload)

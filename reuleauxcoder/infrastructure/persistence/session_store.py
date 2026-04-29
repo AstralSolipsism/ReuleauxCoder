@@ -155,6 +155,15 @@ class SessionStore:
                 )
             return session
 
+    def delete(self, session_id: str) -> bool:
+        """Delete a saved session file if it exists."""
+        with self._lock:
+            path = self._get_session_path(session_id)
+            if not path.exists():
+                return False
+            path.unlink()
+            return True
+
     def list(
         self,
         limit: int = 20,

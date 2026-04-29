@@ -273,6 +273,31 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                 "snapshot": None,
             }
 
+        if action == "delete":
+            session_id = str(payload.get("session_id") or "")
+            if not session_id:
+                return {"ok": False, "error": "missing_session_id", "_status": 400}
+            loaded = session_store.load(session_id)
+            if loaded is None:
+                return {"ok": False, "error": "session_not_found", "_status": 404}
+            if loaded.fingerprint != fingerprint:
+                return {
+                    "ok": False,
+                    "error": "session_fingerprint_mismatch",
+                    "fingerprint": loaded.fingerprint,
+                    "current_fingerprint": fingerprint,
+                    "_status": 403,
+                }
+            deleted = session_store.delete(session_id)
+            snapshot_path = _session_snapshot_path(session_id)
+            if snapshot_path.exists():
+                snapshot_path.unlink()
+            return {
+                "ok": deleted,
+                "session_id": session_id,
+                "fingerprint": fingerprint,
+            }
+
         if action == "snapshot":
             session_id = str(payload.get("session_id") or "")
             snapshot = payload.get("snapshot")
