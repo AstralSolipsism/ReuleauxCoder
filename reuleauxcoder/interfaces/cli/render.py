@@ -1,11 +1,12 @@
 """CLI rendering - event-driven UI renderer."""
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from rich import box
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape as _escape_markup
 from rich.panel import Panel
 from rich.syntax import Syntax
 
@@ -14,7 +15,63 @@ from reuleauxcoder.interfaces.cli.views.registry import create_cli_view_registry
 from reuleauxcoder.interfaces.events import UIEvent, UIEventKind, UIEventLevel
 from reuleauxcoder.interfaces.view_registry import ViewRendererRegistry
 
+if TYPE_CHECKING:
+    from markdown_it import MarkdownIt
+
 console = Console()
+
+# ------------------------------------------------------------------ markdown-it block-level token types that are self-closing
+# (no separate open/close tokens).  Code fences ("fence") are the key
+# one — treating them as atomic blocks prevents streaming code-block
+# content from being split across render calls when a double-newline
+# appears inside the fence.
+_SELF_CLOSING_BLOCKS: frozenset[str] = frozenset(
+    ("fence", "code_block", "hr", "html_block")
+)
+
+_parser: "MarkdownIt | None" = None
+
+
+def _find_committed_boundary(text: str) -> int | None:
+    """Return the character offset up to which *text* can be safely committed.
+
+    Parses *text* into block-level tokens via ``markdown-it-py`` and
+    confirms every block except the last one (which may be incomplete
+    due to streaming truncation).  Returns ``None`` when there are
+    fewer than 2 blocks (nothing confirmed yet).
+    """
+    global _parser
+    if _parser is None:
+        from markdown_it import MarkdownIt
+
+        _parser = MarkdownIt().enable("strikethrough").enable("table")
+
+    tokens = _parser.parse(text)
+
+    # Collect only top-level block boundaries by tracking nesting depth.
+    # Nested tokens (e.g. list_item_open inside bullet_list_open) are not
+    # independent blocks — otherwise lists and blockquotes get split.
+    block_maps: list[list[int]] = []
+    depth = 0
+    for t in tokens:
+        if t.nesting == 1:
+            if depth == 0 and t.map is not None:
+                block_maps.append(t.map)
+            depth += 1
+        elif t.nesting == -1:
+            depth -= 1
+        elif depth == 0 and t.type in _SELF_CLOSING_BLOCKS and t.map is not None:
+            block_maps.append(t.map)
+
+    if len(block_maps) < 2:
+        return None
+
+    # Convert end-line number of the *second-to-last* block to a char offset.
+    target_line = block_maps[-2][1]
+    offset = 0
+    for _ in range(target_line):
+        offset = text.index("\n", offset) + 1
+    return offset
 
 
 @dataclass
@@ -123,17 +180,27 @@ class CLIRenderer:
         self._flush_completed_paragraphs()
 
     def _flush_completed_paragraphs(self) -> None:
-        """Render completed paragraphs from the active content block."""
+        """Render completed blocks from the active content block.
+
+        Uses markdown-it block-token parsing to find a safe commit
+        boundary — all blocks except the last (potentially incomplete)
+        one are rendered.  This prevents orphaned code fences (empty
+        dark blocks) when a double-newline inside a fenced code block
+        would otherwise split it across two render calls.
+        """
         block = self._active_content_block
         if block is None:
             return
 
         pending = block.pending_text
-        cutoff = pending.rfind("\n\n")
-        if cutoff < 0:
+        if not pending:
             return
 
-        flush_text = pending[: cutoff + 2]
+        boundary = _find_committed_boundary(pending)
+        if boundary is None:
+            return
+
+        flush_text = pending[:boundary]
         if flush_text:
             self.render_content_markdown(flush_text)
             block.rendered_length += len(flush_text)
@@ -191,11 +258,11 @@ class CLIRenderer:
         else:
             display = self._compact_tool_output(name, result)
             if success:
-                self.console.print(f"[dim]{display}[/dim]")
+                self.console.print(f"[dim]{_escape_markup(display)}[/dim]")
             else:
                 self.console.print(
                     Panel(
-                        f"[red]{display}[/red]",
+                        f"[red]{_escape_markup(display)}[/red]",
                         title=f"TOOL ERROR · {name}",
                         border_style="red",
                         box=box.ROUNDED,
@@ -221,7 +288,45 @@ class CLIRenderer:
         )
 
     def _compact_tool_output(self, tool_name: str, result: str) -> str:
-        """Compact noisy tool output for terminal readability."""
+        """Compact noisy tool output for terminal readability.
+
+        When the result has already been truncated by
+        ``ToolOutputTruncationHook`` (detected via the ``[truncated]``
+        prefix), we preserve the header / footer lines containing the
+        real stats and archive path, and show only the first and last
+        3 lines of the wrapped content body.
+        """
+        # ── Already wrapped by ToolOutputTruncationHook ──
+        if result.startswith("[truncated]"):
+            lines = result.splitlines()
+            try:
+                begin = next(
+                    i for i, ln in enumerate(lines)
+                    if ln.startswith("--- BEGIN TRUNCATED OUTPUT ---")
+                )
+                end = next(
+                    i for i, ln in enumerate(lines)
+                    if ln.startswith("--- END TRUNCATED OUTPUT ---")
+                )
+            except StopIteration:
+                return result  # malformed — show as-is
+
+            header = lines[: begin + 1]   # stats + BEGIN marker
+            body = lines[begin + 1 : end]
+            footer = lines[end:]          # END marker
+
+            if len(body) <= 6:
+                return result              # small enough, no need to compact
+
+            return (
+                "\n".join(header) + "\n"
+                + "\n".join(body[:3]) + "\n"
+                + f"... ({len(body) - 6} more lines) ...\n"
+                + "\n".join(body[-3:]) + "\n"
+                + "\n".join(footer)
+            )
+
+        # ── Not pre-truncated — apply simple length cap ──
         text = result[:1200] + "..." if len(result) > 1200 else result
         lines = text.splitlines()
         if not lines:
@@ -234,7 +339,8 @@ class CLIRenderer:
 
         kept = "\n".join(lines[:max_lines])
         omitted = len(lines) - max_lines
-        return f"{kept}\n... ({omitted} more lines hidden)"
+        total = len(result.splitlines())
+        return f"{kept}\n... ({omitted} more lines hidden, {total} total)"
 
     def _render_diff(self, result: str) -> None:
         """Render a diff with syntax highlighting."""

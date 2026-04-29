@@ -21,6 +21,7 @@ from reuleauxcoder.domain.approval import (
     ApprovalDecision,
     ApprovalProvider,
     ApprovalRequest,
+    PendingApproval,
 )
 from reuleauxcoder.domain.config.models import Config
 from reuleauxcoder.domain.session.models import Session, SessionMetadata, SessionRuntimeState
@@ -618,6 +619,18 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
 
         class _RemoteApprovalProvider(ApprovalProvider):
             def request_approval(self, request: ApprovalRequest) -> ApprovalDecision:
+                return self._request_remote_decision(request)
+
+            @property
+            def handler(self) -> Callable[[PendingApproval], None]:
+                return self._handle_pending_approval
+
+            def _handle_pending_approval(self, pending: PendingApproval) -> None:
+                pending.resolve(self._request_remote_decision(pending.request))
+
+            def _request_remote_decision(
+                self, request: ApprovalRequest
+            ) -> ApprovalDecision:
                 approval_id = str(uuid.uuid4())
                 tool_call_id = str(request.metadata.get("tool_call_id") or "")
                 remote_session.register_approval(approval_id)
