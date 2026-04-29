@@ -34,6 +34,7 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     ChatStartRequest,
     CleanupResult,
     ExecToolResult,
+    SessionDeleteRequest,
     SessionListRequest,
     SessionLoadRequest,
     SessionNewRequest,
@@ -1426,6 +1427,9 @@ class TestRemoteRelayHTTPService:
         assert SessionNewRequest.from_dict(
             {"peer_token": "peer-token"}
         ).to_dict() == {"peer_token": "peer-token"}
+        assert SessionDeleteRequest.from_dict(
+            {"peer_token": "peer-token", "session_id": "session-1"}
+        ).to_dict() == {"peer_token": "peer-token", "session_id": "session-1"}
         assert SessionSnapshotRequest.from_dict(
             {
                 "peer_token": "peer-token",
@@ -1496,6 +1500,16 @@ class TestRemoteRelayHTTPService:
                 raise AssertionError("expected missing session to fail")
             except HTTPError as exc:
                 assert exc.code == 404
+
+            status, delete_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/sessions/delete",
+                {"peer_token": peer_token, "session_id": "session-ok"},
+            )
+            assert status == 200
+            assert delete_body["ok"] is True
+            assert delete_body["action"] == "delete"
+            assert calls[-1][0] == "delete"
         finally:
             service.stop()
             relay.stop()

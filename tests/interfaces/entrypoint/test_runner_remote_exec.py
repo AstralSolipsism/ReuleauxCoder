@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from urllib import request
+from urllib.error import HTTPError
 
 
 _URLOPEN = request.build_opener(request.ProxyHandler({})).open
@@ -600,6 +601,22 @@ class TestRunnerRemoteExec:
             )
             assert loaded["metadata"]["id"] == session_id
             assert loaded["snapshot"]["turns"][0]["userMessage"]["text"] == "hello"
+
+            _, deleted = _json_request(
+                "POST",
+                f"{runner._relay_http_service.base_url}/remote/sessions/delete",
+                {"peer_token": peer_token, "session_id": session_id},
+            )
+            assert deleted["ok"] is True
+            try:
+                _json_request(
+                    "POST",
+                    f"{runner._relay_http_service.base_url}/remote/sessions/load",
+                    {"peer_token": peer_token, "session_id": session_id},
+                )
+                raise AssertionError("expected deleted session to fail")
+            except HTTPError as exc:
+                assert exc.code == 404
         finally:
             runner.cleanup(ctx.agent)
 

@@ -160,6 +160,18 @@ def test_session_store_load_missing_returns_none(tmp_path: Path) -> None:
     assert store.load("missing") is None
 
 
+def test_session_store_delete_removes_session_file(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    session_id = store.save(
+        messages=[{"role": "user", "content": "remove me"}], model="m1"
+    )
+
+    assert store.load(session_id) is not None
+    assert store.delete(session_id) is True
+    assert store.load(session_id) is None
+    assert store.delete(session_id) is False
+
+
 def test_session_store_concurrent_save_keeps_sessions_readable(tmp_path: Path) -> None:
     store = SessionStore(tmp_path)
     session_id = store.save(
