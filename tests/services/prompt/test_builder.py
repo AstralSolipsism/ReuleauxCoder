@@ -42,3 +42,11 @@ def test_system_prompt_contains_only_static_and_semi_static_blocks() -> None:
     assert prompt.index("# User Instructions") < prompt.index("# Active Mode")
     assert "# Environment" not in prompt
     assert "- Working directory: " not in prompt
+
+
+def test_system_prompt_includes_clickable_markdown_link_guidance() -> None:
+    prompt = system_prompt([_Tool("read_file", "Read file")])
+
+    assert "# Markdown Formatting" in prompt
+    assert "`[`label`](relative/path.ext:line)`" in prompt
+    assert "Do not invent links" in prompt

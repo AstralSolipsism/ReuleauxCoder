@@ -101,6 +101,22 @@ def _rules_block() -> PromptBlock:
     )
 
 
+def _markdown_formatting_block() -> PromptBlock:
+    return PromptBlock(
+        key="markdown_formatting",
+        title="Markdown Formatting",
+        zone=PromptZone.STATIC,
+        order=40,
+        body=(
+            "When referencing files, symbols, or diagnostic locations and you know the "
+            "path, prefer clickable Markdown links like "
+            "`[`label`](relative/path.ext:line)`. Use workspace-relative paths when "
+            "possible. Include a line or column only when known. Do not invent links "
+            "for plain symbol names when the path or location is unknown."
+        ),
+    )
+
+
 def _skills_block(skills_catalog: str) -> PromptBlock:
     return PromptBlock(
         key="skills_catalog",
@@ -216,6 +232,7 @@ def system_prompt(
     assembler.add(_identity_block())
     assembler.add(_tools_block(tools))
     assembler.add(_rules_block())
+    assembler.add(_markdown_formatting_block())
     assembler.add(_skills_block(skills_catalog))
     assembler.add(_user_instructions_block(user_system_append))
 
