@@ -53,6 +53,26 @@ class TestPeerToken:
         time.sleep(0.05)
         assert tm.verify_peer_token(token) is None
 
+    def test_refresh_peer_token_extends_valid_token(self) -> None:
+        tm = TokenManager()
+        token = tm.issue_peer_token("peer-1", ttl_sec=300)
+        before = tm._peers[token].expires_at
+        time.sleep(0.01)
+        assert tm.refresh_peer_token(token, ttl_sec=300) == "peer-1"
+        assert tm._peers[token].expires_at > before
+
+    def test_refresh_expired_peer_token_fails(self) -> None:
+        tm = TokenManager()
+        token = tm.issue_peer_token("peer-1", ttl_sec=0)
+        time.sleep(0.05)
+        assert tm.refresh_peer_token(token, ttl_sec=300) is None
+
+    def test_refresh_revoked_peer_token_fails(self) -> None:
+        tm = TokenManager()
+        token = tm.issue_peer_token("peer-1", ttl_sec=300)
+        tm.revoke_peer_token(token)
+        assert tm.refresh_peer_token(token, ttl_sec=300) is None
+
     def test_revoke_peer_token(self) -> None:
         tm = TokenManager()
         token = tm.issue_peer_token("peer-1", ttl_sec=300)

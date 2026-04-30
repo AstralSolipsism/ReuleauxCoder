@@ -74,6 +74,16 @@ class TokenManager:
             return None
         return entry.peer_id
 
+    def refresh_peer_token(self, token: str, ttl_sec: int = 3600) -> str | None:
+        """Extend a valid peer token and return its peer_id."""
+        entry = self._peers.get(token)
+        if entry is None:
+            return None
+        if time.time() > entry.expires_at:
+            return None
+        entry.expires_at = time.time() + ttl_sec
+        return entry.peer_id
+
     def revoke_peer_token(self, token: str) -> None:
         """Revoke a peer token explicitly (e.g. on disconnect)."""
         self._peers.pop(token, None)

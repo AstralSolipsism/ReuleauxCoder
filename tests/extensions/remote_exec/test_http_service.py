@@ -1677,6 +1677,96 @@ class TestRemoteRelayHTTPService:
             service.stop()
             relay.stop()
 
+    def test_capabilities_report_available_backend_surfaces(self) -> None:
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+
+        def session_handler(action: str, peer_id: str, payload: dict) -> dict:
+            return {"ok": True, "action": action, "peer_id": peer_id}
+
+        def stream_handler(peer_id: str, prompt: str, session) -> None:
+            del peer_id, prompt, session
+
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            session_handler=session_handler,
+            stream_chat_handler=stream_handler,
+        )
+        service.start()
+        try:
+            status, body = _json_request(
+                "GET", f"{service.base_url}/remote/capabilities"
+            )
+            assert status == 200
+            assert body["ok"] is True
+            assert body["api_version"] == 1
+            assert isinstance(body["server_version"], str)
+            assert body["capabilities"] == {
+                "sessions": True,
+                "chat_stream": True,
+                "fresh_session_without_session_hint": True,
+                "peer_token_heartbeat_refresh": True,
+            }
+        finally:
+            service.stop()
+            relay.stop()
+
+    def test_capabilities_report_missing_optional_handlers(self) -> None:
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+        )
+        service.start()
+        try:
+            _, body = _json_request("GET", f"{service.base_url}/remote/capabilities")
+            assert body["capabilities"]["sessions"] is False
+            assert body["capabilities"]["chat_stream"] is False
+            assert body["capabilities"]["fresh_session_without_session_hint"] is False
+            assert body["capabilities"]["peer_token_heartbeat_refresh"] is True
+        finally:
+            service.stop()
+            relay.stop()
+
+    def test_http_heartbeat_refreshes_peer_token(self) -> None:
+        relay = RelayServer(peer_token_ttl_sec=300)
+        relay.start()
+        port = _free_port()
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+        )
+        service.start()
+        try:
+            _, register_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/register",
+                {
+                    "bootstrap_token": relay.issue_bootstrap_token(ttl_sec=60),
+                    "cwd": "/tmp/peer",
+                },
+            )
+            peer_token = register_body["payload"]["peer_token"]
+            before = relay.token_manager._peers[peer_token].expires_at
+            time.sleep(0.01)
+
+            status, heartbeat_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/heartbeat",
+                {"peer_token": peer_token},
+            )
+
+            assert status == 200
+            assert heartbeat_body["ok"] is True
+            assert relay.token_manager._peers[peer_token].expires_at > before
+        finally:
+            service.stop()
+            relay.stop()
+
     def test_default_artifact_provider_prefers_prebuilt_binary(
         self, tmp_path: Path
     ) -> None:

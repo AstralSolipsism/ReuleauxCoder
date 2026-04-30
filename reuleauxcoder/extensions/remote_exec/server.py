@@ -174,7 +174,9 @@ class RelayServer:
 
         elif msg_type == "heartbeat":
             hb = Heartbeat.from_dict(payload)
-            peer = self._token_manager.verify_peer_token(hb.peer_token)
+            peer = self._token_manager.refresh_peer_token(
+                hb.peer_token, ttl_sec=self._peer_token_ttl_sec
+            )
             if peer:
                 self._registry.update_heartbeat(peer)
 
@@ -506,3 +508,7 @@ class RelayServer:
     @property
     def token_manager(self) -> TokenManager:
         return self._token_manager
+
+    @property
+    def peer_token_ttl_sec(self) -> int:
+        return self._peer_token_ttl_sec

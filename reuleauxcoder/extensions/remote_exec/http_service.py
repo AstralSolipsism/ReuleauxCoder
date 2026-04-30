@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote, unquote, urlparse
@@ -384,6 +385,9 @@ class RemoteRelayHTTPService:
 
             def do_GET(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
+                if parsed.path == "/remote/capabilities":
+                    self._handle_capabilities()
+                    return
                 if parsed.path == "/remote/bootstrap.sh":
                     self._handle_bootstrap(parsed, "sh")
                     return
@@ -493,6 +497,23 @@ class RemoteRelayHTTPService:
                 if not isinstance(peer_token, str) or not peer_token:
                     return None
                 return service.relay_server.token_manager.verify_peer_token(peer_token)
+
+            def _handle_capabilities(self) -> None:
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "api_version": 1,
+                        "server_version": _package_version(),
+                        "capabilities": {
+                            "sessions": service.session_handler is not None,
+                            "chat_stream": service.stream_chat_handler is not None,
+                            "fresh_session_without_session_hint": service.stream_chat_handler
+                            is not None,
+                            "peer_token_heartbeat_refresh": True,
+                        },
+                    },
+                )
 
             def _verify_admin_secret(self) -> bool:
                 configured_secret = service.admin_access_secret
@@ -760,8 +781,8 @@ class RemoteRelayHTTPService:
             def _handle_heartbeat(self) -> None:
                 payload = self._read_json()
                 hb = Heartbeat.from_dict(payload)
-                peer_id = service.relay_server.token_manager.verify_peer_token(
-                    hb.peer_token
+                peer_id = service.relay_server.token_manager.refresh_peer_token(
+                    hb.peer_token, ttl_sec=service.relay_server.peer_token_ttl_sec
                 )
                 if peer_id is None:
                     self._send_json(
@@ -1406,6 +1427,13 @@ class RemoteRelayHTTPService:
             "8. Finish with a compact status table: tool, capability, check result, "
             "action taken, remaining blocker.\n"
         )
+
+
+def _package_version() -> str:
+    try:
+        return version("reuleauxcoder")
+    except PackageNotFoundError:
+        return "0.0.0"
 
 
 def _parse_bind(bind: str) -> tuple[str, int]:
