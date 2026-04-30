@@ -546,6 +546,67 @@ class TestRunnerRemoteExec:
         finally:
             runner.cleanup(ctx.agent)
 
+    def test_runner_stream_chat_without_session_hint_starts_fresh_session(
+        self, tmp_path: Path
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        port = _free_port()
+
+        def chat_behavior(agent: FakeAgent, prompt: str) -> str:
+            existing = [
+                message.get("content")
+                for message in agent.messages
+                if message.get("role") == "user"
+            ]
+            return f"{prompt}|history={','.join(existing)}|sid={getattr(agent, 'current_session_id', '-')}"
+
+        runner = _build_runner_with_fake_agent(
+            f"127.0.0.1:{port}",
+            chat_behavior=chat_behavior,
+            session_dir=str(tmp_path / "sessions"),
+        )
+        ctx = runner.initialize()
+        try:
+            assert runner._relay_server is not None
+            assert runner._relay_http_service is not None
+            peer_id, peer_token = _register_peer(
+                runner._relay_http_service.base_url,
+                runner._relay_server.issue_bootstrap_token(ttl_sec=60),
+                str(workspace),
+            )
+            store = SessionStore(tmp_path / "sessions")
+            fingerprint = f"remote:{peer_id}:{workspace}"
+            store.save(
+                [{"role": "user", "content": "old-context"}],
+                "fake-model",
+                "session-old",
+                fingerprint=fingerprint,
+            )
+
+            _, start_body = _json_request(
+                "POST",
+                f"{runner._relay_http_service.base_url}/remote/chat/start",
+                {
+                    "peer_token": peer_token,
+                    "prompt": "fresh",
+                },
+            )
+            events = _collect_stream_events(
+                runner._relay_http_service.base_url, peer_token, start_body["chat_id"]
+            )
+            ready = [
+                event["payload"]
+                for event in events
+                if event["type"] == "remote_peer_ready"
+            ][0]
+            end = [event for event in events if event["type"] == "chat_end"][-1]
+            assert ready["session_id"] != "session-old"
+            assert "old-context" not in end["payload"]["response"]
+            assert "fresh|history=fresh|sid=session_" in end["payload"]["response"]
+        finally:
+            runner.cleanup(ctx.agent)
+
     def test_runner_remote_session_endpoints_roundtrip(self, tmp_path: Path) -> None:
         workspace = tmp_path / "workspace"
         workspace.mkdir()

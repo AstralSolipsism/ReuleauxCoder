@@ -330,6 +330,7 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
         peer_id: str,
         remote_stream_handler: Callable[..., None] | None = None,
         session_hint: str | None = None,
+        resume_latest: bool = True,
     ) -> Agent:
         current_config = _current_config()
         if current_config is None:
@@ -388,13 +389,14 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
             setattr(peer_agent, "current_session_id", session_hint)
             return peer_agent
 
-        latest = session_store.get_latest(fingerprint=fingerprint)
-        if latest:
-            loaded = session_store.load(latest.id)
-            if loaded is not None:
-                apply_session_runtime_state(loaded, current_config, peer_agent)
-                setattr(peer_agent, "current_session_id", latest.id)
-                return peer_agent
+        if resume_latest:
+            latest = session_store.get_latest(fingerprint=fingerprint)
+            if latest:
+                loaded = session_store.load(latest.id)
+                if loaded is not None:
+                    apply_session_runtime_state(loaded, current_config, peer_agent)
+                    setattr(peer_agent, "current_session_id", latest.id)
+                    return peer_agent
 
         restore_config_runtime_defaults(current_config, peer_agent)
         setattr(peer_agent, "current_session_id", session_store.generate_session_id())
@@ -434,7 +436,9 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
 
     def _stream_chat(peer_id: str, prompt: str, remote_session) -> None:
         peer_agent = _create_peer_agent(
-            peer_id, session_hint=getattr(remote_session, "session_hint", None)
+            peer_id,
+            session_hint=getattr(remote_session, "session_hint", None),
+            resume_latest=False,
         )
         remote_session.set_cancel_callback(
             lambda reason: (
