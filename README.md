@@ -1,44 +1,86 @@
-# ReuleauxCoder
+# EZCode Backend
 
-> Reinventing the wheel, but only for those who prefer it non-circular.
+Backend relay host for the EZCode VS Code frontend.
 
-A terminal-native AI coding agent.
+Frontend project: `<EZCODE_FRONTEND_REPO_URL>`
 
-Inspired by and started as a complete rewrite of [CoreCoder](https://github.com/he-yufeng/CoreCoder).
+This branch is intended to run together with the EZCode frontend. Public release
+wheels from other repositories are not an installation path for this branch
+because they do not contain the EZCode remote-session, Webview, provider, and
+environment-manifest integration.
 
-## Install
+## Deploy
 
-### Install from GitHub Release (recommended)
+### Recommended: Docker host service
 
-Install [`pipx`](https://pipx.pypa.io/stable/installation/) first, then install the release wheel globally:
+Use Docker for a self-hosted EZCode server. Keep the source checkout and runtime
+state on persistent storage; do not rely on container-local files for config,
+sessions, MCP artifacts, or post-installed tools.
 
-```bash
-pipx install https://github.com/RC-CHN/ReuleauxCoder/releases/download/v0.2.9/reuleauxcoder-0.2.9-py3-none-any.whl
+Recommended host layout:
+
+```text
+/data/ezcode/src              # git clone of this repository, branch ezcode
+/data/ezcode/config           # host config files, if you customize compose volumes
+/data/ezcode/sessions         # persisted session state
+/data/ezcode/mcp-artifacts    # server-hosted MCP artifacts
+/data/ezcode/tools/npm-global # persistent post-installed npm CLIs
+/data/ezcode/cache/npm        # persistent npm cache
+/data/ezcode/home             # container HOME when needed
 ```
 
-After installation, you can run:
+Basic deployment:
 
 ```bash
-rcoder --version
-rcoder
+mkdir -p /data/ezcode
+git clone -b ezcode https://github.com/AstralSolipsism/ReuleauxCoder.git /data/ezcode/src
+cd /data/ezcode/src/docker
+cp .env.example .env
 ```
 
-### Run from source
+Edit `.env` and set at least:
+
+```text
+RCODER_MODEL=
+RCODER_BASE_URL=
+RCODER_API_KEY=
+RCODER_BOOTSTRAP_ACCESS_SECRET=
+RCODER_ADMIN_ACCESS_SECRET=
+```
+
+Start the host:
 
 ```bash
+docker compose up -d --build
+docker compose logs -f rcoder-host
+```
+
+The default compose file mounts `../.rcoder` into `/app/.rcoder`. In production,
+keep that host directory on persistent storage, or change the volume mapping to
+your persistent `/data/ezcode/config` path before first start.
+
+### Development from source
+
+Use this path for local backend development:
+
+```bash
+git clone -b ezcode https://github.com/AstralSolipsism/ReuleauxCoder.git
+cd ReuleauxCoder
 uv sync
+uv run rcoder --version
+uv run rcoder --server
 ```
 
-## Quick Start
+### Optional local pipx install
+
+For a local checkout without publishing a release wheel:
 
 ```bash
-# Copy the example config to the workspace config location
-mkdir -p .rcoder
-cp config.yaml.example .rcoder/config.yaml
-
-# Edit .rcoder/config.yaml with your API key and model
-uv run rcoder
+pipx install .
 ```
+
+Use this only for local development or controlled server builds. The Docker host
+service is the recommended deployment form for frontend-backed EZCode.
 
 ## Remote Bootstrap (Host/Peer)
 
@@ -90,7 +132,7 @@ MCP servers can be placed by runtime:
 - `placement: peer`: centrally managed by the server, downloaded by the remote peer from `mcp.artifact_root`, verified with `sha256`, cached under the peer workspace at `.rcoder/mcp-cache/<server>/<version>/<platform>/`, and started on the peer. Use this for filesystem, IDE, browser, localhost, and device MCP servers.
 - `placement: both`: started on the server and also made available to peers through server-hosted artifacts.
 
-Peer MCP does not fall back to public `npx` / `uvx` installs by default. The server must provide the platform artifact. Launch commands support `{{workspace}}`, `{{bundle}}`, `{{cache}}`, and `{{home}}`. Approval policy remains server-managed; when a tool requires confirmation, the approval prompt is streamed back to the active local peer terminal.
+Peer MCP does not fall back to public `npx` / `uvx` installs by default. The server must provide the platform artifact. Launch commands support `{{workspace}}`, `{{bundle}}`, `{{cache}}`, and `{{home}}`. Approval policy remains server-managed; when a tool requires confirmation, the approval prompt is returned through the active interactive client, including CLI, peer, or VS Code Webview integrations.
 
 ```yaml
 mcp:
@@ -154,6 +196,47 @@ offline npm cache, and a platform wrapper. The peer must have Node/npm in `PATH`
 the wrapper runs `npm ci --offline` from the server-provided cache before
 starting the MCP server.
 
+### Environment Manifest
+
+The host can publish an environment manifest for remote peers and frontend
+environment-setup flows. The manifest is server-authoritative and covers three
+groups:
+
+- CLI tools: command-line tools that should exist on the peer.
+- MCP servers: server/peer/both MCP entries from the MCP manifest.
+- Skills: user or project skills with explicit check/install commands.
+
+CLI tools can be recorded without starting the interactive agent:
+
+```bash
+rcoder env record gitnexus \
+  --command gitnexus \
+  --check "gitnexus --version" \
+  --install "npm install -g gitnexus" \
+  --capability repo_index \
+  --source npm \
+  --description "Repository graph CLI"
+```
+
+Skills are configured in `environment.skills`:
+
+```yaml
+environment:
+  skills:
+    collaborating-with-claude:
+      scope: user
+      check: "Test-Path $env:USERPROFILE/.agents/skills/collaborating-with-claude/SKILL.md"
+      install: "python C:/Users/you/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py --repo your/repo --path skills/collaborating-with-claude"
+      source: github
+      description: "Claude collaboration skill"
+      path_hint: "~/.agents/skills/collaborating-with-claude/SKILL.md"
+```
+
+Peers fetch the combined manifest from `/remote/environment/manifest` with a
+valid peer token. The generated prompt instructs the environment agent to check
+only listed items and to request approval before changing PATH or shell startup
+files.
+
 ## Commands
 
 ```text
@@ -177,6 +260,9 @@ starting the MCP server.
 /mcp show         Show MCP server status
 /mcp enable <s>   Enable one MCP server
 /mcp disable <s>  Disable one MCP server
+/mode <mode>      Switch active mode
+/debug on|off     Toggle LLM debug traces
+/jobs             Show sub-agent jobs
 /quit             Exit
 /exit             Exit
 ```
@@ -195,14 +281,27 @@ starting the MCP server.
 ## CLI Options
 
 ```bash
-rcoder [-c CONFIG] [-m MODEL] [-p PROMPT] [-r ID]
+rcoder [-c CONFIG] [-m MODEL] [-p PROMPT] [-r ID] [--server] {env,provider,mcp} ...
 ```
 
 - `-c, --config`: path to `config.yaml`
 - `-m, --model`: override model from config
 - `-p, --prompt`: one-shot prompt mode (non-interactive)
 - `-r, --resume`: resume a saved session by ID
+- `--server`: run as a dedicated remote relay host
 - `-v, --version`: show version
+
+Non-interactive management subcommands:
+
+```bash
+rcoder env record ...
+rcoder provider list
+rcoder provider record ...
+rcoder provider test ...
+rcoder mcp record ...
+rcoder mcp install-node ...
+rcoder mcp artifact build-node|import|list|verify ...
+```
 
 ## Provider Management
 
@@ -254,6 +353,21 @@ rcoder provider record zenmux --type openai_chat --compat zenmux --api-key-env Z
 
 Compat profiles keep provider keys and service quirks on the host. Remote peers
 never receive provider API keys, base URLs, or model credentials.
+
+## Remote Sessions and Frontend Integration
+
+The remote relay exposes server-backed session APIs for VS Code/Webview
+frontends:
+
+- `/remote/sessions/list`: list saved sessions for the current peer fingerprint.
+- `/remote/sessions/load`: load messages, runtime state, and optional UI snapshot.
+- `/remote/sessions/new`: create a clean server-side session id.
+- `/remote/sessions/snapshot`: save frontend-only UI state such as tool cards and trace layout.
+- `/remote/sessions/delete`: delete a saved session and its UI snapshot.
+
+Chat start requests should pass the selected `session_hint`. The backend
+`SessionStore` remains the authority for conversation history; UI snapshots are
+display-only state and are not injected into model context.
 
 ## License
 
