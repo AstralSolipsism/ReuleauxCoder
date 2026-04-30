@@ -55,6 +55,21 @@ class SessionStore:
 
             saved_messages = [dict(message) for message in messages]
             ensure_message_token_counts(saved_messages)
+            if not self.has_history_content(saved_messages):
+                path = self._get_session_path(session_id)
+                if path.exists():
+                    try:
+                        existing = Session.from_dict(
+                            json.loads(path.read_text(encoding="utf-8"))
+                        )
+                    except (json.JSONDecodeError, KeyError):
+                        existing = None
+                    if existing is not None and not self.has_history_content(
+                        existing.messages
+                    ):
+                        path.unlink()
+                return session_id
+
             if is_exit:
                 exit_time = time.strftime("%Y-%m-%d %H:%M:%S")
                 exit_message = {
@@ -184,6 +199,8 @@ class SessionStore:
                     session = Session.from_dict(data)
                     if fingerprint is not None and session.fingerprint != fingerprint:
                         continue
+                    if not self.has_history_content(session.messages):
+                        continue
 
                     metadata = SessionMetadata(
                         id=session.id or file_path.stem,
@@ -219,6 +236,35 @@ class SessionStore:
         """Return the most recent session metadata, if any."""
         sessions = self.list(limit=1, fingerprint=fingerprint)
         return sessions[0] if sessions else None
+
+    @staticmethod
+    def has_history_content(messages: list[dict]) -> bool:
+        """Return whether messages contain user-visible conversation content."""
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            if role not in {"user", "assistant", "tool"}:
+                continue
+            if SessionStore._has_content_value(message.get("content")):
+                return True
+            if SessionStore._has_content_value(message.get("parts")):
+                return True
+            if SessionStore._has_content_value(message.get("tool_calls")):
+                return True
+        return False
+
+    @staticmethod
+    def _has_content_value(value) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, dict):
+            return any(SessionStore._has_content_value(item) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(SessionStore._has_content_value(item) for item in value)
+        return True
 
     @staticmethod
     def get_exit_time(messages: list[dict]) -> str | None:

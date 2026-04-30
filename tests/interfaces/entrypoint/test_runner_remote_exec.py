@@ -637,6 +637,36 @@ class TestRunnerRemoteExec:
                 f"{runner._relay_http_service.base_url}/remote/sessions/list",
                 {"peer_token": peer_token},
             )
+            assert not any(item["id"] == session_id for item in listed["sessions"])
+
+            try:
+                _json_request(
+                    "POST",
+                    f"{runner._relay_http_service.base_url}/remote/sessions/load",
+                    {"peer_token": peer_token, "session_id": session_id},
+                )
+                raise AssertionError("expected empty session placeholder to be absent")
+            except HTTPError as exc:
+                assert exc.code == 404
+
+            _, start_body = _json_request(
+                "POST",
+                f"{runner._relay_http_service.base_url}/remote/chat/start",
+                {
+                    "peer_token": peer_token,
+                    "prompt": "hello",
+                    "session_hint": session_id,
+                },
+            )
+            _collect_stream_events(
+                runner._relay_http_service.base_url, peer_token, start_body["chat_id"]
+            )
+
+            _, listed = _json_request(
+                "POST",
+                f"{runner._relay_http_service.base_url}/remote/sessions/list",
+                {"peer_token": peer_token},
+            )
             assert any(item["id"] == session_id for item in listed["sessions"])
 
             snapshot = {

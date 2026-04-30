@@ -1,3 +1,4 @@
+import json
 import threading
 from pathlib import Path
 
@@ -121,6 +122,50 @@ def test_session_store_list_filters_by_fingerprint(tmp_path: Path) -> None:
     assert {item.id for item in all_sessions} == {local_id, remote_id}
     assert store.get_latest(fingerprint="local") is not None
     assert store.get_latest(fingerprint="remote:abc") is not None
+
+
+def test_session_store_does_not_persist_empty_sessions(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+
+    session_id = store.save(messages=[], model="m1", fingerprint="local")
+
+    assert not (tmp_path / f"{session_id}.json").exists()
+    assert store.load(session_id) is None
+    assert store.list(limit=10, fingerprint="local") == []
+    assert store.get_latest(fingerprint="local") is None
+
+
+def test_session_store_list_skips_legacy_empty_sessions(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    legacy_id = "session_legacy_empty"
+    (tmp_path / f"{legacy_id}.json").write_text(
+        json.dumps(
+            {
+                "id": legacy_id,
+                "model": "m1",
+                "saved_at": "2026-01-01T00:00:00.000000",
+                "fingerprint": "local",
+                "messages": [],
+                "runtime_state": {"model": "m1"},
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    content_id = store.save(
+        messages=[{"role": "user", "content": "hello"}],
+        model="m1",
+        fingerprint="local",
+    )
+
+    listed = store.list(limit=10, fingerprint="local")
+
+    assert [item.id for item in listed] == [content_id]
+    latest = store.get_latest(fingerprint="local")
+    assert latest is not None
+    assert latest.id == content_id
+    assert store.load(legacy_id) is not None
 
 
 def test_session_store_get_latest_prefers_recently_updated_session(

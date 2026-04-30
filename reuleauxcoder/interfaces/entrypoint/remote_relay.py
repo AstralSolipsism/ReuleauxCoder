@@ -248,21 +248,10 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                     current_config, "active_sub_model_profile", None
                 ),
             )
-            session_store.save(
-                [],
-                getattr(current_config, "model", ""),
-                session_id,
-                active_mode=getattr(current_config, "active_mode", None),
-                runtime_state=runtime_state,
-                fingerprint=fingerprint,
-            )
-            loaded = session_store.load(session_id)
             return {
                 "ok": True,
                 "fingerprint": fingerprint,
-                "metadata": _session_metadata_payload(loaded)
-                if loaded is not None
-                else {
+                "metadata": {
                     "id": session_id,
                     "model": getattr(current_config, "model", ""),
                     "saved_at": "",
