@@ -270,6 +270,10 @@ class MCPServerConfig:
     install: str = ""
     source: str = ""
     description: str = ""
+    docs: list[dict[str, str]] = field(default_factory=list)
+    install_prompt: str = ""
+    verify_prompt: str = ""
+    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Convert to dictionary format for serialization."""
@@ -294,6 +298,10 @@ class MCPServerConfig:
             "install": self.install,
             "source": self.source,
             "description": self.description,
+            "docs": [dict(item) for item in self.docs],
+            "install_prompt": self.install_prompt,
+            "verify_prompt": self.verify_prompt,
+            "notes": list(self.notes),
         }
 
     @classmethod
@@ -344,7 +352,7 @@ class MCPServerConfig:
                 else {}
             ),
             cwd=d.get("cwd"),
-            enabled=d.get("enabled", True),
+            enabled=_bool_config_value(d.get("enabled", True)),
             placement=placement,
             distribution=distribution,
             version=str(d["version"]) if d.get("version") is not None else None,
@@ -363,6 +371,10 @@ class MCPServerConfig:
             install=str(d.get("install", "")),
             source=str(d.get("source", "")),
             description=str(d.get("description", "")),
+            docs=_docs_config_value(d.get("docs", [])),
+            install_prompt=str(d.get("install_prompt", "")),
+            verify_prompt=str(d.get("verify_prompt", "")),
+            notes=_string_list_config_value(d.get("notes", [])),
         )
 
 
@@ -528,21 +540,31 @@ class EnvironmentCLIToolConfig:
 
     name: str
     command: str = ""
+    enabled: bool = True
     capabilities: list[str] = field(default_factory=list)
     check: str = ""
     install: str = ""
     version: Optional[str] = None
     source: str = ""
     description: str = ""
+    docs: list[dict[str, str]] = field(default_factory=list)
+    install_prompt: str = ""
+    verify_prompt: str = ""
+    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "command": self.command,
+            "enabled": self.enabled,
             "capabilities": list(self.capabilities),
             "check": self.check,
             "install": self.install,
             "source": self.source,
             "description": self.description,
+            "docs": [dict(item) for item in self.docs],
+            "install_prompt": self.install_prompt,
+            "verify_prompt": self.verify_prompt,
+            "notes": list(self.notes),
         }
         if self.version is not None:
             data["version"] = self.version
@@ -554,6 +576,7 @@ class EnvironmentCLIToolConfig:
         return cls(
             name=name,
             command=str(d.get("command", "")),
+            enabled=_bool_config_value(d.get("enabled", True)),
             capabilities=(
                 [str(item) for item in raw_capabilities]
                 if isinstance(raw_capabilities, list)
@@ -564,6 +587,10 @@ class EnvironmentCLIToolConfig:
             version=str(d["version"]) if d.get("version") is not None else None,
             source=str(d.get("source", "")),
             description=str(d.get("description", "")),
+            docs=_docs_config_value(d.get("docs", [])),
+            install_prompt=str(d.get("install_prompt", "")),
+            verify_prompt=str(d.get("verify_prompt", "")),
+            notes=_string_list_config_value(d.get("notes", [])),
         )
 
 
@@ -572,6 +599,7 @@ class EnvironmentSkillConfig:
     """Declarative skill entry used by lightweight environment sync."""
 
     name: str
+    enabled: bool = True
     scope: str = "project"
     check: str = ""
     install: str = ""
@@ -579,14 +607,23 @@ class EnvironmentSkillConfig:
     source: str = ""
     description: str = ""
     path_hint: Optional[str] = None
+    docs: list[dict[str, str]] = field(default_factory=list)
+    install_prompt: str = ""
+    verify_prompt: str = ""
+    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
+            "enabled": self.enabled,
             "scope": self.scope,
             "check": self.check,
             "install": self.install,
             "source": self.source,
             "description": self.description,
+            "docs": [dict(item) for item in self.docs],
+            "install_prompt": self.install_prompt,
+            "verify_prompt": self.verify_prompt,
+            "notes": list(self.notes),
         }
         if self.version is not None:
             data["version"] = self.version
@@ -598,6 +635,7 @@ class EnvironmentSkillConfig:
     def from_dict(cls, name: str, d: dict[str, Any]) -> "EnvironmentSkillConfig":
         return cls(
             name=name,
+            enabled=_bool_config_value(d.get("enabled", True)),
             scope=str(d.get("scope", "project") or "project"),
             check=str(d.get("check", "")),
             install=str(d.get("install", "")),
@@ -607,6 +645,10 @@ class EnvironmentSkillConfig:
             path_hint=(
                 str(d["path_hint"]) if d.get("path_hint") is not None else None
             ),
+            docs=_docs_config_value(d.get("docs", [])),
+            install_prompt=str(d.get("install_prompt", "")),
+            verify_prompt=str(d.get("verify_prompt", "")),
+            notes=_string_list_config_value(d.get("notes", [])),
         )
 
 
@@ -616,6 +658,35 @@ class EnvironmentConfig:
 
     cli_tools: dict[str, EnvironmentCLIToolConfig] = field(default_factory=dict)
     skills: dict[str, EnvironmentSkillConfig] = field(default_factory=dict)
+
+
+def _bool_config_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
+
+
+def _string_list_config_value(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if value is None or value == "":
+        return []
+    return [str(value)]
+
+
+def _docs_config_value(value: Any) -> list[dict[str, str]]:
+    docs: list[dict[str, str]] = []
+    if not isinstance(value, list):
+        return docs
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title", "")).strip()
+        url = str(item.get("url", "")).strip()
+        if not title and not url:
+            continue
+        docs.append({"title": title, "url": url})
+    return docs
 
 
 @dataclass

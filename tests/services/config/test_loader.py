@@ -316,6 +316,10 @@ def test_parse_config_reads_command_mcp_manifest_fields() -> None:
                         "source": "npm:gitnexus",
                         "description": "Repository indexing MCP server",
                         "requirements": {"node": ">=20", "npm": "required"},
+                        "docs": [{"title": "GitNexus MCP", "url": "https://example.test/mcp"}],
+                        "install_prompt": "Install through npm.",
+                        "verify_prompt": "Verify mcp startup.",
+                        "notes": ["Do not install node automatically."],
                     }
                 }
             },
@@ -332,6 +336,10 @@ def test_parse_config_reads_command_mcp_manifest_fields() -> None:
     assert server.source == "npm:gitnexus"
     assert server.description == "Repository indexing MCP server"
     assert server.requirements["node"] == ">=20"
+    assert server.docs[0]["title"] == "GitNexus MCP"
+    assert server.install_prompt == "Install through npm."
+    assert server.verify_prompt == "Verify mcp startup."
+    assert server.notes == ["Do not install node automatically."]
 
 
 def test_parse_config_reads_environment_cli_tools() -> None:
@@ -352,6 +360,10 @@ def test_parse_config_reads_environment_cli_tools() -> None:
                         "version": "latest",
                         "source": "npm",
                         "description": "Repository graph CLI",
+                        "docs": [{"title": "GitNexus", "url": "https://example.test/gitnexus"}],
+                        "install_prompt": "Use configured npm command.",
+                        "verify_prompt": "Run version check.",
+                        "notes": ["PATH changes need approval."],
                     }
                 }
             },
@@ -366,6 +378,10 @@ def test_parse_config_reads_environment_cli_tools() -> None:
     assert tool.version == "latest"
     assert tool.source == "npm"
     assert tool.description == "Repository graph CLI"
+    assert tool.docs[0]["url"] == "https://example.test/gitnexus"
+    assert tool.install_prompt == "Use configured npm command."
+    assert tool.verify_prompt == "Run version check."
+    assert tool.notes == ["PATH changes need approval."]
 
 
 def test_parse_config_reads_environment_skills() -> None:
@@ -386,6 +402,10 @@ def test_parse_config_reads_environment_skills() -> None:
                         "source": "github",
                         "description": "Claude bridge skill",
                         "path_hint": "~/.agents/skills/collaborating-with-claude/SKILL.md",
+                        "docs": [{"title": "Claude skill", "url": "https://example.test/skill"}],
+                        "install_prompt": "Install the skill files.",
+                        "verify_prompt": "Check SKILL.md exists.",
+                        "notes": ["Use user scope."],
                     }
                 }
             },
@@ -400,6 +420,10 @@ def test_parse_config_reads_environment_skills() -> None:
     assert skill.source == "github"
     assert skill.description == "Claude bridge skill"
     assert skill.path_hint == "~/.agents/skills/collaborating-with-claude/SKILL.md"
+    assert skill.docs[0]["title"] == "Claude skill"
+    assert skill.install_prompt == "Install the skill files."
+    assert skill.verify_prompt == "Check SKILL.md exists."
+    assert skill.notes == ["Use user scope."]
 
 
 def test_parse_config_falls_back_when_active_profile_missing() -> None:

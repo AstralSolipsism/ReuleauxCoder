@@ -106,6 +106,19 @@ CONFIG_SCHEMA = {
                 "args": "list of strings (optional)",
                 "env": "dict of strings (optional)",
                 "cwd": "string (optional)",
+                "enabled": "bool (optional, default: true)",
+                "placement": "string (optional, one of server, peer, both)",
+                "distribution": "string (optional, one of command, artifact)",
+                "requirements": "dict of strings (optional)",
+                "check": "string (optional)",
+                "install": "string (optional)",
+                "version": "string (optional)",
+                "source": "string (optional)",
+                "description": "string (optional)",
+                "docs": [{"title": "string", "url": "string"}],
+                "install_prompt": "string (optional)",
+                "verify_prompt": "string (optional)",
+                "notes": ["string", "..."],
             }
         }
     },
@@ -126,16 +139,22 @@ CONFIG_SCHEMA = {
         "cli_tools": {
             "tool_name": {
                 "command": "string (required)",
+                "enabled": "bool (optional, default: true)",
                 "capabilities": ["capability-name", "..."],
                 "check": "string (required)",
                 "install": "string (optional)",
                 "version": "string (optional)",
                 "source": "string (optional)",
                 "description": "string (optional)",
+                "docs": [{"title": "string", "url": "string"}],
+                "install_prompt": "string (optional)",
+                "verify_prompt": "string (optional)",
+                "notes": ["string", "..."],
             }
         },
         "skills": {
             "skill_name": {
+                "enabled": "bool (optional, default: true)",
                 "scope": "string (optional, default: project)",
                 "check": "string (required)",
                 "install": "string (optional)",
@@ -143,6 +162,10 @@ CONFIG_SCHEMA = {
                 "source": "string (optional)",
                 "description": "string (optional)",
                 "path_hint": "string (optional)",
+                "docs": [{"title": "string", "url": "string"}],
+                "install_prompt": "string (optional)",
+                "verify_prompt": "string (optional)",
+                "notes": ["string", "..."],
             }
         },
     },

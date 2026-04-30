@@ -171,6 +171,10 @@ class TestEnvironmentManifest:
                     install="npm install -g gitnexus",
                     version="latest",
                     source="npm",
+                    docs=[{"title": "GitNexus", "url": "https://example.test/gitnexus"}],
+                    install_prompt="Use npm install.",
+                    verify_prompt="Run gitnexus --version.",
+                    notes=["PATH changes need approval."],
                 )
             ],
             mcp_servers=[
@@ -183,6 +187,10 @@ class TestEnvironmentManifest:
                     check="gitnexus --version",
                     install="npm install -g gitnexus@1.6.3",
                     requirements={"node": ">=20", "npm": "required"},
+                    docs=[{"title": "GitNexus MCP", "url": "https://example.test/mcp"}],
+                    install_prompt="Use npm package.",
+                    verify_prompt="Run mcp launch check.",
+                    notes=["Do not install node automatically."],
                 )
             ],
             skills=[
@@ -195,6 +203,10 @@ class TestEnvironmentManifest:
                     source="github",
                     description="Claude bridge skill",
                     path_hint="~/.agents/skills/collaborating-with-claude/SKILL.md",
+                    docs=[{"title": "Claude skill", "url": "https://example.test/skill"}],
+                    install_prompt="Install the skill files.",
+                    verify_prompt="Check SKILL.md exists.",
+                    notes=["Use user scope."],
                 )
             ],
             prompt="check gitnexus",
@@ -206,13 +218,22 @@ class TestEnvironmentManifest:
         assert restored.cli_tools[0].capabilities == ["repo_index"]
         assert restored.cli_tools[0].check == "gitnexus --version"
         assert restored.cli_tools[0].install == "npm install -g gitnexus"
+        assert restored.cli_tools[0].docs[0]["title"] == "GitNexus"
+        assert restored.cli_tools[0].install_prompt == "Use npm install."
+        assert restored.cli_tools[0].verify_prompt == "Run gitnexus --version."
+        assert restored.cli_tools[0].notes == ["PATH changes need approval."]
         assert restored.mcp_servers[0].name == "gitnexus"
         assert restored.mcp_servers[0].args == ["mcp"]
         assert restored.mcp_servers[0].distribution == "command"
         assert restored.mcp_servers[0].requirements["node"] == ">=20"
+        assert restored.mcp_servers[0].docs[0]["url"] == "https://example.test/mcp"
+        assert restored.mcp_servers[0].install_prompt == "Use npm package."
         assert restored.skills[0].name == "collaborating-with-claude"
         assert restored.skills[0].scope == "user"
         assert restored.skills[0].path_hint == "~/.agents/skills/collaborating-with-claude/SKILL.md"
+        assert restored.skills[0].docs[0]["title"] == "Claude skill"
+        assert restored.skills[0].verify_prompt == "Check SKILL.md exists."
+        assert restored.skills[0].notes == ["Use user scope."]
         assert restored.prompt == "check gitnexus"
 
     def test_manifest_request_roundtrip(self) -> None:

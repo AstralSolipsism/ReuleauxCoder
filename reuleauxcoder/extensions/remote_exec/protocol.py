@@ -343,26 +343,65 @@ class PeerMCPToolsReport:
 # ---------------------------------------------------------------------------
 
 
+def _bool_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
+
+
+def _string_list_value(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if value is None or value == "":
+        return []
+    return [str(value)]
+
+
+def _docs_value(value: Any) -> list[dict[str, str]]:
+    docs: list[dict[str, str]] = []
+    if not isinstance(value, list):
+        return docs
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title", "")).strip()
+        url = str(item.get("url", "")).strip()
+        if not title and not url:
+            continue
+        docs.append({"title": title, "url": url})
+    return docs
+
+
 @dataclass
 class EnvironmentCLIToolManifest:
     name: str
     command: str = ""
+    enabled: bool = True
     capabilities: list[str] = field(default_factory=list)
     check: str = ""
     install: str = ""
     version: str | None = None
     source: str = ""
     description: str = ""
+    docs: list[dict[str, str]] = field(default_factory=list)
+    install_prompt: str = ""
+    verify_prompt: str = ""
+    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "name": self.name,
             "command": self.command,
+            "enabled": self.enabled,
             "capabilities": self.capabilities,
             "check": self.check,
             "install": self.install,
             "source": self.source,
             "description": self.description,
+            "docs": [dict(item) for item in self.docs],
+            "install_prompt": self.install_prompt,
+            "verify_prompt": self.verify_prompt,
+            "notes": list(self.notes),
         }
         if self.version is not None:
             data["version"] = self.version
@@ -374,6 +413,7 @@ class EnvironmentCLIToolManifest:
         return cls(
             name=str(d.get("name", "")),
             command=str(d.get("command", "")),
+            enabled=_bool_value(d.get("enabled", True)),
             capabilities=(
                 [str(item) for item in raw_capabilities]
                 if isinstance(raw_capabilities, list)
@@ -384,6 +424,10 @@ class EnvironmentCLIToolManifest:
             version=str(d["version"]) if d.get("version") is not None else None,
             source=str(d.get("source", "")),
             description=str(d.get("description", "")),
+            docs=_docs_value(d.get("docs", [])),
+            install_prompt=str(d.get("install_prompt", "")),
+            verify_prompt=str(d.get("verify_prompt", "")),
+            notes=_string_list_value(d.get("notes", [])),
         )
 
 
@@ -402,6 +446,10 @@ class EnvironmentMCPServerManifest:
     version: str | None = None
     source: str = ""
     description: str = ""
+    docs: list[dict[str, str]] = field(default_factory=list)
+    install_prompt: str = ""
+    verify_prompt: str = ""
+    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -417,6 +465,10 @@ class EnvironmentMCPServerManifest:
             "install": self.install,
             "source": self.source,
             "description": self.description,
+            "docs": [dict(item) for item in self.docs],
+            "install_prompt": self.install_prompt,
+            "verify_prompt": self.verify_prompt,
+            "notes": list(self.notes),
         }
         if self.version is not None:
             data["version"] = self.version
@@ -449,12 +501,17 @@ class EnvironmentMCPServerManifest:
             version=str(d["version"]) if d.get("version") is not None else None,
             source=str(d.get("source", "")),
             description=str(d.get("description", "")),
+            docs=_docs_value(d.get("docs", [])),
+            install_prompt=str(d.get("install_prompt", "")),
+            verify_prompt=str(d.get("verify_prompt", "")),
+            notes=_string_list_value(d.get("notes", [])),
         )
 
 
 @dataclass
 class EnvironmentSkillManifest:
     name: str
+    enabled: bool = True
     scope: str = "project"
     check: str = ""
     install: str = ""
@@ -462,15 +519,24 @@ class EnvironmentSkillManifest:
     source: str = ""
     description: str = ""
     path_hint: str | None = None
+    docs: list[dict[str, str]] = field(default_factory=list)
+    install_prompt: str = ""
+    verify_prompt: str = ""
+    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "name": self.name,
+            "enabled": self.enabled,
             "scope": self.scope,
             "check": self.check,
             "install": self.install,
             "source": self.source,
             "description": self.description,
+            "docs": [dict(item) for item in self.docs],
+            "install_prompt": self.install_prompt,
+            "verify_prompt": self.verify_prompt,
+            "notes": list(self.notes),
         }
         if self.version is not None:
             data["version"] = self.version
@@ -482,6 +548,7 @@ class EnvironmentSkillManifest:
     def from_dict(cls, d: dict[str, Any]) -> "EnvironmentSkillManifest":
         return cls(
             name=str(d.get("name", "")),
+            enabled=_bool_value(d.get("enabled", True)),
             scope=str(d.get("scope", "project") or "project"),
             check=str(d.get("check", "")),
             install=str(d.get("install", "")),
@@ -491,6 +558,10 @@ class EnvironmentSkillManifest:
             path_hint=(
                 str(d["path_hint"]) if d.get("path_hint") is not None else None
             ),
+            docs=_docs_value(d.get("docs", [])),
+            install_prompt=str(d.get("install_prompt", "")),
+            verify_prompt=str(d.get("verify_prompt", "")),
+            notes=_string_list_value(d.get("notes", [])),
         )
 
 
