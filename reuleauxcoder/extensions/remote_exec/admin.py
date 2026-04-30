@@ -67,6 +67,19 @@ class RemoteAdminConfigManager:
             "skills": self._toolchain_views(data, "skill"),
         }
 
+    def toolchain_dashboard(self) -> dict[str, Any]:
+        data = self._load_data()
+        items: list[dict[str, Any]] = []
+        for kind in ("cli", "mcp", "skill"):
+            items.extend(
+                self._toolchain_dashboard_item(kind, item)
+                for item in self._toolchain_views(data, kind)
+            )
+        return {
+            "items": items,
+            "summary": _toolchain_dashboard_summary(items),
+        }
+
     def record_toolchain(self, payload: dict[str, Any]) -> AdminConfigResult:
         kind, item_payload = _toolchain_payload(payload)
         if kind is None:
@@ -616,6 +629,62 @@ class RemoteAdminConfigManager:
         view["id"] = name
         return view
 
+    def _toolchain_dashboard_item(
+        self, kind: str, view: dict[str, Any]
+    ) -> dict[str, Any]:
+        name = str(view.get("name") or view.get("id") or "")
+        docs = list(view.get("docs") or []) if isinstance(view.get("docs"), list) else []
+        repo_url = str(view.get("repo_url") or "")
+        if not repo_url and _looks_like_url(view.get("source")):
+            repo_url = str(view.get("source"))
+        placement = str(view.get("placement") or "")
+        scope = str(view.get("scope") or "")
+        if kind == "cli":
+            placement = placement or "local"
+            scope = placement
+        elif kind == "mcp":
+            placement = placement or "server"
+            scope = placement
+        else:
+            placement = scope or "project"
+            scope = placement
+        status = "unchecked" if _bool_field(view, "enabled", True) else "stopped"
+        return {
+            "id": f"{kind}:{name}",
+            "kind": kind,
+            "name": name,
+            "alias": str(view.get("alias") or view.get("command") or view.get("path_hint") or name),
+            "source": str(view.get("source") or ""),
+            "repo_url": repo_url,
+            "docs": docs,
+            "evidence": (
+                list(view.get("evidence") or [])
+                if isinstance(view.get("evidence"), list)
+                else []
+            ),
+            "placement": placement,
+            "scope": scope,
+            "status": status,
+            "status_detail": "清单已停用" if status == "stopped" else "等待环境检查",
+            "check": str(view.get("check") or ""),
+            "install": str(view.get("install") or ""),
+            "command": str(view.get("command") or view.get("path_hint") or ""),
+            "requirements": (
+                dict(view.get("requirements") or {})
+                if isinstance(view.get("requirements"), dict)
+                else {}
+            ),
+            "credentials": (
+                [str(item) for item in view.get("credentials") or []]
+                if isinstance(view.get("credentials"), list)
+                else []
+            ),
+            "risk_level": str(view.get("risk_level") or ""),
+            "enabled": _bool_field(view, "enabled", True),
+            "last_action": str(view.get("last_action") or ""),
+            "last_updated": str(view.get("last_updated") or ""),
+        }
+
     def _provider_view(self, provider_id: str, item: dict[str, Any]) -> dict[str, Any]:
         provider = ProviderConfig.from_dict(provider_id, item)
         view = provider.to_dict()
@@ -672,6 +741,32 @@ def _toolchain_payload(payload: dict[str, Any]) -> tuple[str | None, dict[str, A
     raw_payload = payload.get("payload")
     item_payload = dict(raw_payload) if isinstance(raw_payload, dict) else dict(payload)
     return kind, item_payload
+
+
+def _looks_like_url(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return text.startswith("https://") or text.startswith("http://")
+
+
+def _toolchain_dashboard_summary(items: list[dict[str, Any]]) -> dict[str, int]:
+    summary = {
+        "total": len(items),
+        "ready": 0,
+        "missing": 0,
+        "stopped": 0,
+        "awaiting": 0,
+    }
+    for item in items:
+        status = str(item.get("status") or "")
+        if status in {"ready", "configured"}:
+            summary["ready"] += 1
+        elif status == "missing":
+            summary["missing"] += 1
+        elif status == "stopped":
+            summary["stopped"] += 1
+        elif status in {"awaiting_approval", "needs_review", "parse_failed"}:
+            summary["awaiting"] += 1
+    return summary
 
 
 def _mask(value: str) -> str:

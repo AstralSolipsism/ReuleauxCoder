@@ -571,6 +571,13 @@ class RemoteRelayHTTPService:
                         }
                         self._send_json(HTTPStatus.OK, result)
                         return
+                    elif path == "/remote/admin/toolchains/dashboard":
+                        result = {
+                            "ok": True,
+                            **service.admin_manager.toolchain_dashboard(),
+                        }
+                        self._send_json(HTTPStatus.OK, result)
+                        return
                     elif path == "/remote/admin/toolchains/record":
                         result = service.admin_manager.record_toolchain(payload)
                     elif path == "/remote/admin/toolchains/delete":
@@ -1260,6 +1267,9 @@ class RemoteRelayHTTPService:
         for name, tool in sorted(self.environment_cli_tools.items()):
             if not _env_bool_value(_env_tool_value(tool, "enabled", True)):
                 continue
+            placement = str(_env_tool_value(tool, "placement", "local") or "local")
+            if placement == "server":
+                continue
             tool_name = str(_env_tool_value(tool, "name", name) or name)
             command = str(_env_tool_value(tool, "command", "") or "")
             check = str(_env_tool_value(tool, "check", "") or "")
@@ -1268,23 +1278,38 @@ class RemoteRelayHTTPService:
             capabilities = _env_tool_value(tool, "capabilities", [])
             if not isinstance(capabilities, list):
                 capabilities = []
+            requirements = _env_tool_value(tool, "requirements", {})
+            if not isinstance(requirements, dict):
+                requirements = {}
             version = _env_tool_value(tool, "version", None)
             tools.append(
                 EnvironmentCLIToolManifest(
                     name=tool_name,
                     command=command,
+                    placement=placement,
                     capabilities=[str(item) for item in capabilities],
+                    requirements={str(k): str(v) for k, v in requirements.items()},
                     check=check,
                     install=str(_env_tool_value(tool, "install", "") or ""),
                     version=str(version) if version is not None else None,
                     source=str(_env_tool_value(tool, "source", "") or ""),
                     description=str(_env_tool_value(tool, "description", "") or ""),
+                    repo_url=str(_env_tool_value(tool, "repo_url", "") or ""),
                     docs=_env_docs_value(_env_tool_value(tool, "docs", [])),
+                    evidence=_env_string_dict_list_value(
+                        _env_tool_value(tool, "evidence", [])
+                    ),
                     install_prompt=str(
                         _env_tool_value(tool, "install_prompt", "") or ""
                     ),
                     verify_prompt=str(_env_tool_value(tool, "verify_prompt", "") or ""),
                     notes=_env_string_list_value(_env_tool_value(tool, "notes", [])),
+                    credentials=_env_string_list_value(
+                        _env_tool_value(tool, "credentials", [])
+                    ),
+                    risk_level=str(_env_tool_value(tool, "risk_level", "") or ""),
+                    last_action=str(_env_tool_value(tool, "last_action", "") or ""),
+                    last_updated=str(_env_tool_value(tool, "last_updated", "") or ""),
                 )
             )
         mcp_servers: list[EnvironmentMCPServerManifest] = []
@@ -1327,10 +1352,20 @@ class RemoteRelayHTTPService:
                     ),
                     source=str(getattr(server, "source", "") or ""),
                     description=str(getattr(server, "description", "") or ""),
+                    repo_url=str(getattr(server, "repo_url", "") or ""),
                     docs=_env_docs_value(getattr(server, "docs", [])),
+                    evidence=_env_string_dict_list_value(
+                        getattr(server, "evidence", [])
+                    ),
                     install_prompt=str(getattr(server, "install_prompt", "") or ""),
                     verify_prompt=str(getattr(server, "verify_prompt", "") or ""),
                     notes=_env_string_list_value(getattr(server, "notes", [])),
+                    credentials=_env_string_list_value(
+                        getattr(server, "credentials", [])
+                    ),
+                    risk_level=str(getattr(server, "risk_level", "") or ""),
+                    last_action=str(getattr(server, "last_action", "") or ""),
+                    last_updated=str(getattr(server, "last_updated", "") or ""),
                 )
             )
         skills: list[EnvironmentSkillManifest] = []
@@ -1342,6 +1377,9 @@ class RemoteRelayHTTPService:
             if not skill_name or not check:
                 continue
             version = _env_tool_value(skill, "version", None)
+            requirements = _env_tool_value(skill, "requirements", {})
+            if not isinstance(requirements, dict):
+                requirements = {}
             skills.append(
                 EnvironmentSkillManifest(
                     name=skill_name,
@@ -1356,12 +1394,23 @@ class RemoteRelayHTTPService:
                         if _env_tool_value(skill, "path_hint", None) is not None
                         else None
                     ),
+                    requirements={str(k): str(v) for k, v in requirements.items()},
+                    repo_url=str(_env_tool_value(skill, "repo_url", "") or ""),
                     docs=_env_docs_value(_env_tool_value(skill, "docs", [])),
+                    evidence=_env_string_dict_list_value(
+                        _env_tool_value(skill, "evidence", [])
+                    ),
                     install_prompt=str(
                         _env_tool_value(skill, "install_prompt", "") or ""
                     ),
                     verify_prompt=str(_env_tool_value(skill, "verify_prompt", "") or ""),
                     notes=_env_string_list_value(_env_tool_value(skill, "notes", [])),
+                    credentials=_env_string_list_value(
+                        _env_tool_value(skill, "credentials", [])
+                    ),
+                    risk_level=str(_env_tool_value(skill, "risk_level", "") or ""),
+                    last_action=str(_env_tool_value(skill, "last_action", "") or ""),
+                    last_updated=str(_env_tool_value(skill, "last_updated", "") or ""),
                 )
             )
         return EnvironmentManifestResponse(
@@ -1407,8 +1456,9 @@ class RemoteRelayHTTPService:
             "missing or mismatched tool and quote the configured `install` command "
             "if one is present.\n"
             "3. Before running any install command, read that entry's `install_prompt`, "
-            "`docs`, and `notes`; present a concise install plan grounded in those "
-            "fields and wait for normal user approval. Do not invent install steps "
+            "`docs`, `evidence`, `credentials`, `risk_level`, and `notes`; present a "
+            "concise install plan grounded in those fields and wait for normal user "
+            "approval. Do not invent install steps "
             "outside the manifest. Do not install Node, Python, uv, npm, "
             "pipx, or other base runtimes automatically; report them as blockers if "
             "they are missing.\n"
@@ -1476,3 +1526,20 @@ def _env_docs_value(value: Any) -> list[dict[str, str]]:
             continue
         docs.append({"title": title, "url": url})
     return docs
+
+
+def _env_string_dict_list_value(value: Any) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    if not isinstance(value, list):
+        return items
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        normalized = {
+            str(key): str(val).strip()
+            for key, val in item.items()
+            if val is not None and str(val).strip()
+        }
+        if normalized:
+            items.append(normalized)
+    return items

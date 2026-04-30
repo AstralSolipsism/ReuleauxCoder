@@ -8,6 +8,7 @@ from typing import Any, Literal, Optional
 
 MCPPlacement = Literal["server", "peer", "both"]
 MCPDistribution = Literal["command", "artifact"]
+CLIPlacement = Literal["server", "local", "both"]
 ProviderType = Literal["openai_chat", "anthropic_messages", "openai_responses"]
 ProviderCompat = Literal["generic", "deepseek", "kimi", "glm", "qwen", "zenmux"]
 
@@ -270,10 +271,16 @@ class MCPServerConfig:
     install: str = ""
     source: str = ""
     description: str = ""
+    repo_url: str = ""
     docs: list[dict[str, str]] = field(default_factory=list)
+    evidence: list[dict[str, str]] = field(default_factory=list)
     install_prompt: str = ""
     verify_prompt: str = ""
     notes: list[str] = field(default_factory=list)
+    credentials: list[str] = field(default_factory=list)
+    risk_level: str = ""
+    last_action: str = ""
+    last_updated: str = ""
 
     def to_dict(self) -> dict:
         """Convert to dictionary format for serialization."""
@@ -298,10 +305,16 @@ class MCPServerConfig:
             "install": self.install,
             "source": self.source,
             "description": self.description,
+            "repo_url": self.repo_url,
             "docs": [dict(item) for item in self.docs],
+            "evidence": [dict(item) for item in self.evidence],
             "install_prompt": self.install_prompt,
             "verify_prompt": self.verify_prompt,
             "notes": list(self.notes),
+            "credentials": list(self.credentials),
+            "risk_level": self.risk_level,
+            "last_action": self.last_action,
+            "last_updated": self.last_updated,
         }
 
     @classmethod
@@ -371,10 +384,16 @@ class MCPServerConfig:
             install=str(d.get("install", "")),
             source=str(d.get("source", "")),
             description=str(d.get("description", "")),
+            repo_url=str(d.get("repo_url", "")),
             docs=_docs_config_value(d.get("docs", [])),
+            evidence=_string_dict_list_config_value(d.get("evidence", [])),
             install_prompt=str(d.get("install_prompt", "")),
             verify_prompt=str(d.get("verify_prompt", "")),
             notes=_string_list_config_value(d.get("notes", [])),
+            credentials=_string_list_config_value(d.get("credentials", [])),
+            risk_level=str(d.get("risk_level", "")),
+            last_action=str(d.get("last_action", "")),
+            last_updated=str(d.get("last_updated", "")),
         )
 
 
@@ -541,30 +560,46 @@ class EnvironmentCLIToolConfig:
     name: str
     command: str = ""
     enabled: bool = True
+    placement: CLIPlacement = "local"
     capabilities: list[str] = field(default_factory=list)
+    requirements: dict[str, str] = field(default_factory=dict)
     check: str = ""
     install: str = ""
     version: Optional[str] = None
     source: str = ""
     description: str = ""
+    repo_url: str = ""
     docs: list[dict[str, str]] = field(default_factory=list)
+    evidence: list[dict[str, str]] = field(default_factory=list)
     install_prompt: str = ""
     verify_prompt: str = ""
     notes: list[str] = field(default_factory=list)
+    credentials: list[str] = field(default_factory=list)
+    risk_level: str = ""
+    last_action: str = ""
+    last_updated: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "command": self.command,
             "enabled": self.enabled,
+            "placement": self.placement,
             "capabilities": list(self.capabilities),
+            "requirements": dict(self.requirements),
             "check": self.check,
             "install": self.install,
             "source": self.source,
             "description": self.description,
+            "repo_url": self.repo_url,
             "docs": [dict(item) for item in self.docs],
+            "evidence": [dict(item) for item in self.evidence],
             "install_prompt": self.install_prompt,
             "verify_prompt": self.verify_prompt,
             "notes": list(self.notes),
+            "credentials": list(self.credentials),
+            "risk_level": self.risk_level,
+            "last_action": self.last_action,
+            "last_updated": self.last_updated,
         }
         if self.version is not None:
             data["version"] = self.version
@@ -573,24 +608,43 @@ class EnvironmentCLIToolConfig:
     @classmethod
     def from_dict(cls, name: str, d: dict[str, Any]) -> "EnvironmentCLIToolConfig":
         raw_capabilities = d.get("capabilities", [])
+        raw_requirements = d.get("requirements", {})
+        raw_placement = str(d.get("placement", "local")).lower()
+        placement: CLIPlacement
+        if raw_placement in {"server", "both"}:
+            placement = raw_placement  # type: ignore[assignment]
+        else:
+            placement = "local"
         return cls(
             name=name,
             command=str(d.get("command", "")),
             enabled=_bool_config_value(d.get("enabled", True)),
+            placement=placement,
             capabilities=(
                 [str(item) for item in raw_capabilities]
                 if isinstance(raw_capabilities, list)
                 else []
+            ),
+            requirements=(
+                {str(k): str(v) for k, v in raw_requirements.items()}
+                if isinstance(raw_requirements, dict)
+                else {}
             ),
             check=str(d.get("check", "")),
             install=str(d.get("install", "")),
             version=str(d["version"]) if d.get("version") is not None else None,
             source=str(d.get("source", "")),
             description=str(d.get("description", "")),
+            repo_url=str(d.get("repo_url", "")),
             docs=_docs_config_value(d.get("docs", [])),
+            evidence=_string_dict_list_config_value(d.get("evidence", [])),
             install_prompt=str(d.get("install_prompt", "")),
             verify_prompt=str(d.get("verify_prompt", "")),
             notes=_string_list_config_value(d.get("notes", [])),
+            credentials=_string_list_config_value(d.get("credentials", [])),
+            risk_level=str(d.get("risk_level", "")),
+            last_action=str(d.get("last_action", "")),
+            last_updated=str(d.get("last_updated", "")),
         )
 
 
@@ -607,10 +661,17 @@ class EnvironmentSkillConfig:
     source: str = ""
     description: str = ""
     path_hint: Optional[str] = None
+    requirements: dict[str, str] = field(default_factory=dict)
+    repo_url: str = ""
     docs: list[dict[str, str]] = field(default_factory=list)
+    evidence: list[dict[str, str]] = field(default_factory=list)
     install_prompt: str = ""
     verify_prompt: str = ""
     notes: list[str] = field(default_factory=list)
+    credentials: list[str] = field(default_factory=list)
+    risk_level: str = ""
+    last_action: str = ""
+    last_updated: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -620,10 +681,17 @@ class EnvironmentSkillConfig:
             "install": self.install,
             "source": self.source,
             "description": self.description,
+            "requirements": dict(self.requirements),
+            "repo_url": self.repo_url,
             "docs": [dict(item) for item in self.docs],
+            "evidence": [dict(item) for item in self.evidence],
             "install_prompt": self.install_prompt,
             "verify_prompt": self.verify_prompt,
             "notes": list(self.notes),
+            "credentials": list(self.credentials),
+            "risk_level": self.risk_level,
+            "last_action": self.last_action,
+            "last_updated": self.last_updated,
         }
         if self.version is not None:
             data["version"] = self.version
@@ -633,6 +701,7 @@ class EnvironmentSkillConfig:
 
     @classmethod
     def from_dict(cls, name: str, d: dict[str, Any]) -> "EnvironmentSkillConfig":
+        raw_requirements = d.get("requirements", {})
         return cls(
             name=name,
             enabled=_bool_config_value(d.get("enabled", True)),
@@ -645,10 +714,21 @@ class EnvironmentSkillConfig:
             path_hint=(
                 str(d["path_hint"]) if d.get("path_hint") is not None else None
             ),
+            requirements=(
+                {str(k): str(v) for k, v in raw_requirements.items()}
+                if isinstance(raw_requirements, dict)
+                else {}
+            ),
+            repo_url=str(d.get("repo_url", "")),
             docs=_docs_config_value(d.get("docs", [])),
+            evidence=_string_dict_list_config_value(d.get("evidence", [])),
             install_prompt=str(d.get("install_prompt", "")),
             verify_prompt=str(d.get("verify_prompt", "")),
             notes=_string_list_config_value(d.get("notes", [])),
+            credentials=_string_list_config_value(d.get("credentials", [])),
+            risk_level=str(d.get("risk_level", "")),
+            last_action=str(d.get("last_action", "")),
+            last_updated=str(d.get("last_updated", "")),
         )
 
 
@@ -687,6 +767,23 @@ def _docs_config_value(value: Any) -> list[dict[str, str]]:
             continue
         docs.append({"title": title, "url": url})
     return docs
+
+
+def _string_dict_list_config_value(value: Any) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    if not isinstance(value, list):
+        return items
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        normalized = {
+            str(key): str(val).strip()
+            for key, val in item.items()
+            if val is not None and str(val).strip()
+        }
+        if normalized:
+            items.append(normalized)
+    return items
 
 
 @dataclass

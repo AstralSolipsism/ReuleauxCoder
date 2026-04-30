@@ -388,19 +388,34 @@ class TestRemoteRelayHTTPService:
                     "payload": {
                         "name": "gitnexus",
                         "command": "gitnexus",
+                        "placement": "both",
                         "capabilities": ["repo_index"],
+                        "requirements": {"node": ">=20"},
                         "check": "gitnexus --version",
                         "install": "npm install -g gitnexus",
+                        "repo_url": "https://example.test/gitnexus/repo",
                         "docs": [{"title": "GitNexus", "url": "https://example.test/gitnexus"}],
+                        "evidence": [
+                            {
+                                "field": "install",
+                                "title": "GitNexus install",
+                                "url": "https://example.test/gitnexus",
+                                "excerpt": "Install with npm.",
+                            }
+                        ],
                         "install_prompt": "Use npm.",
                         "verify_prompt": "Run version check.",
                         "notes": ["PATH changes need approval."],
+                        "credentials": ["GITNEXUS_TOKEN"],
+                        "risk_level": "medium",
                     },
                 },
                 headers=admin_headers,
             )
             assert cli["toolchain"]["name"] == "gitnexus"
+            assert cli["toolchain"]["placement"] == "both"
             assert cli["toolchain"]["docs"][0]["title"] == "GitNexus"
+            assert cli["toolchain"]["evidence"][0]["field"] == "install"
 
             _, mcp = _json_request(
                 "POST",
@@ -450,6 +465,21 @@ class TestRemoteRelayHTTPService:
             assert listed["cli_tools"][0]["name"] == "gitnexus"
             assert listed["mcp_servers"][0]["name"] == "gitnexus-mcp"
             assert listed["skills"][0]["name"] == "collaborating-with-claude"
+
+            _, dashboard = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/toolchains/dashboard",
+                {},
+                headers=admin_headers,
+            )
+            rows = {item["id"]: item for item in dashboard["items"]}
+            assert dashboard["summary"]["total"] == 3
+            assert rows["cli:gitnexus"]["kind"] == "cli"
+            assert rows["cli:gitnexus"]["placement"] == "both"
+            assert rows["cli:gitnexus"]["repo_url"] == "https://example.test/gitnexus/repo"
+            assert rows["cli:gitnexus"]["credentials"] == ["GITNEXUS_TOKEN"]
+            assert rows["mcp:gitnexus-mcp"]["placement"] == "peer"
+            assert rows["skill:collaborating-with-claude"]["scope"] == "user"
 
             _, disabled = _json_request(
                 "POST",
