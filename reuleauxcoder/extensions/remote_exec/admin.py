@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from reuleauxcoder.domain.config.models import (
+    EnvironmentCLIToolConfig,
+    EnvironmentSkillConfig,
+    MCPServerConfig,
     ModelProfileConfig,
     ProviderCapabilities,
     ProviderConfig,
@@ -55,6 +58,97 @@ class RemoteAdminConfigManager:
             "active_main": self._models_data().get("active_main"),
             "active_sub": self._models_data().get("active_sub"),
         }
+
+    def list_toolchains(self) -> dict[str, Any]:
+        data = self._load_data()
+        return {
+            "cli_tools": self._toolchain_views(data, "cli"),
+            "mcp_servers": self._toolchain_views(data, "mcp"),
+            "skills": self._toolchain_views(data, "skill"),
+        }
+
+    def record_toolchain(self, payload: dict[str, Any]) -> AdminConfigResult:
+        kind, item_payload = _toolchain_payload(payload)
+        if kind is None:
+            return AdminConfigResult(False, {"error": "toolchain_kind_required"}, 400)
+        name = str(item_payload.get("name") or payload.get("name") or "").strip()
+        if not name:
+            return AdminConfigResult(False, {"error": "toolchain_name_required"}, 400)
+
+        with self._lock:
+            previous_data = self._load_data()
+            data = deepcopy(previous_data)
+            items = self._toolchain_items(data, kind)
+            previous = items.get(name, {}) if isinstance(items.get(name), dict) else {}
+            merged = {**previous, **item_payload}
+            merged.pop("name", None)
+            merged.pop("kind", None)
+            normalized = self._normalize_toolchain_item(kind, name, merged)
+            items[name] = normalized
+            reload_error = self._commit_config(data, previous_data)
+            if reload_error:
+                return reload_error
+            return AdminConfigResult(
+                True,
+                {
+                    "ok": True,
+                    "kind": kind,
+                    "name": name,
+                    "created": not previous,
+                    "toolchain": self._toolchain_view(kind, name, items[name]),
+                },
+            )
+
+    def delete_toolchain(self, payload: dict[str, Any]) -> AdminConfigResult:
+        kind, item_payload = _toolchain_payload(payload)
+        if kind is None:
+            return AdminConfigResult(False, {"error": "toolchain_kind_required"}, 400)
+        name = str(item_payload.get("name") or payload.get("name") or "").strip()
+        if not name:
+            return AdminConfigResult(False, {"error": "toolchain_name_required"}, 400)
+
+        with self._lock:
+            previous_data = self._load_data()
+            data = deepcopy(previous_data)
+            items = self._toolchain_items(data, kind)
+            if name not in items:
+                return AdminConfigResult(False, {"error": "toolchain_not_found"}, 404)
+            del items[name]
+            reload_error = self._commit_config(data, previous_data)
+            if reload_error:
+                return reload_error
+            return AdminConfigResult(True, {"ok": True, "kind": kind, "name": name})
+
+    def enable_toolchain(self, payload: dict[str, Any]) -> AdminConfigResult:
+        kind, item_payload = _toolchain_payload(payload)
+        if kind is None:
+            return AdminConfigResult(False, {"error": "toolchain_kind_required"}, 400)
+        name = str(item_payload.get("name") or payload.get("name") or "").strip()
+        if not name:
+            return AdminConfigResult(False, {"error": "toolchain_name_required"}, 400)
+        enabled = _bool_field(item_payload, "enabled", payload.get("enabled", True))
+
+        with self._lock:
+            previous_data = self._load_data()
+            data = deepcopy(previous_data)
+            items = self._toolchain_items(data, kind)
+            item = items.get(name)
+            if not isinstance(item, dict):
+                return AdminConfigResult(False, {"error": "toolchain_not_found"}, 404)
+            item["enabled"] = enabled
+            items[name] = self._normalize_toolchain_item(kind, name, item)
+            reload_error = self._commit_config(data, previous_data)
+            if reload_error:
+                return reload_error
+            return AdminConfigResult(
+                True,
+                {
+                    "ok": True,
+                    "kind": kind,
+                    "name": name,
+                    "toolchain": self._toolchain_view(kind, name, items[name]),
+                },
+            )
 
     def list_providers(self) -> dict[str, Any]:
         data = self._load_data()
@@ -471,6 +565,57 @@ class RemoteAdminConfigManager:
             models["profiles"] = profiles
         return profiles
 
+    def _toolchain_items(self, data: dict[str, Any], kind: str) -> dict[str, Any]:
+        if kind in {"cli", "skill"}:
+            environment = data.setdefault("environment", {})
+            if not isinstance(environment, dict):
+                environment = {}
+                data["environment"] = environment
+            key = "cli_tools" if kind == "cli" else "skills"
+            items = environment.setdefault(key, {})
+            if not isinstance(items, dict):
+                items = {}
+                environment[key] = items
+            return items
+
+        mcp = data.setdefault("mcp", {})
+        if not isinstance(mcp, dict):
+            mcp = {}
+            data["mcp"] = mcp
+        items = mcp.setdefault("servers", {})
+        if not isinstance(items, dict):
+            items = {}
+            mcp["servers"] = items
+        return items
+
+    def _toolchain_views(self, data: dict[str, Any], kind: str) -> list[dict[str, Any]]:
+        items = self._toolchain_items(data, kind)
+        views: list[dict[str, Any]] = []
+        for name in sorted(items):
+            item = items.get(name)
+            if not isinstance(item, dict):
+                continue
+            views.append(self._toolchain_view(kind, str(name), item))
+        return views
+
+    def _normalize_toolchain_item(
+        self, kind: str, name: str, item: dict[str, Any]
+    ) -> dict[str, Any]:
+        if kind == "cli":
+            return EnvironmentCLIToolConfig.from_dict(name, item).to_dict()
+        if kind == "skill":
+            return EnvironmentSkillConfig.from_dict(name, item).to_dict()
+        return MCPServerConfig.from_dict(name, item).to_dict()
+
+    def _toolchain_view(
+        self, kind: str, name: str, item: dict[str, Any]
+    ) -> dict[str, Any]:
+        view = self._normalize_toolchain_item(kind, name, item)
+        view["kind"] = kind
+        view["name"] = name
+        view["id"] = name
+        return view
+
     def _provider_view(self, provider_id: str, item: dict[str, Any]) -> dict[str, Any]:
         provider = ProviderConfig.from_dict(provider_id, item)
         view = provider.to_dict()
@@ -509,6 +654,24 @@ def _bool_field(payload: dict[str, Any], field_name: str, default: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() not in {"0", "false", "no", "off"}
     return bool(value)
+
+
+def _toolchain_payload(payload: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    raw_kind = str(payload.get("kind") or "").strip().lower()
+    kind_map = {
+        "cli": "cli",
+        "cli_tool": "cli",
+        "cli_tools": "cli",
+        "mcp": "mcp",
+        "mcp_server": "mcp",
+        "mcp_servers": "mcp",
+        "skill": "skill",
+        "skills": "skill",
+    }
+    kind = kind_map.get(raw_kind)
+    raw_payload = payload.get("payload")
+    item_payload = dict(raw_payload) if isinstance(raw_payload, dict) else dict(payload)
+    return kind, item_payload
 
 
 def _mask(value: str) -> str:

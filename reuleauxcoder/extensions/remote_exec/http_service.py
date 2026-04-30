@@ -543,6 +543,19 @@ class RemoteRelayHTTPService:
                         result = service.admin_manager.record_model_profile(payload)
                     elif path == "/remote/admin/models/activate":
                         result = service.admin_manager.activate_model_profile(payload)
+                    elif path == "/remote/admin/toolchains/list":
+                        result = {
+                            "ok": True,
+                            **service.admin_manager.list_toolchains(),
+                        }
+                        self._send_json(HTTPStatus.OK, result)
+                        return
+                    elif path == "/remote/admin/toolchains/record":
+                        result = service.admin_manager.record_toolchain(payload)
+                    elif path == "/remote/admin/toolchains/delete":
+                        result = service.admin_manager.delete_toolchain(payload)
+                    elif path == "/remote/admin/toolchains/enable":
+                        result = service.admin_manager.enable_toolchain(payload)
                     else:
                         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
                         return
@@ -1224,6 +1237,8 @@ class RemoteRelayHTTPService:
         del os_name, arch
         tools: list[EnvironmentCLIToolManifest] = []
         for name, tool in sorted(self.environment_cli_tools.items()):
+            if not _env_bool_value(_env_tool_value(tool, "enabled", True)):
+                continue
             tool_name = str(_env_tool_value(tool, "name", name) or name)
             command = str(_env_tool_value(tool, "command", "") or "")
             check = str(_env_tool_value(tool, "check", "") or "")
@@ -1243,6 +1258,12 @@ class RemoteRelayHTTPService:
                     version=str(version) if version is not None else None,
                     source=str(_env_tool_value(tool, "source", "") or ""),
                     description=str(_env_tool_value(tool, "description", "") or ""),
+                    docs=_env_docs_value(_env_tool_value(tool, "docs", [])),
+                    install_prompt=str(
+                        _env_tool_value(tool, "install_prompt", "") or ""
+                    ),
+                    verify_prompt=str(_env_tool_value(tool, "verify_prompt", "") or ""),
+                    notes=_env_string_list_value(_env_tool_value(tool, "notes", [])),
                 )
             )
         mcp_servers: list[EnvironmentMCPServerManifest] = []
@@ -1285,10 +1306,16 @@ class RemoteRelayHTTPService:
                     ),
                     source=str(getattr(server, "source", "") or ""),
                     description=str(getattr(server, "description", "") or ""),
+                    docs=_env_docs_value(getattr(server, "docs", [])),
+                    install_prompt=str(getattr(server, "install_prompt", "") or ""),
+                    verify_prompt=str(getattr(server, "verify_prompt", "") or ""),
+                    notes=_env_string_list_value(getattr(server, "notes", [])),
                 )
             )
         skills: list[EnvironmentSkillManifest] = []
         for name, skill in sorted(self.environment_skills.items()):
+            if not _env_bool_value(_env_tool_value(skill, "enabled", True)):
+                continue
             skill_name = str(_env_tool_value(skill, "name", name) or name)
             check = str(_env_tool_value(skill, "check", "") or "")
             if not skill_name or not check:
@@ -1308,6 +1335,12 @@ class RemoteRelayHTTPService:
                         if _env_tool_value(skill, "path_hint", None) is not None
                         else None
                     ),
+                    docs=_env_docs_value(_env_tool_value(skill, "docs", [])),
+                    install_prompt=str(
+                        _env_tool_value(skill, "install_prompt", "") or ""
+                    ),
+                    verify_prompt=str(_env_tool_value(skill, "verify_prompt", "") or ""),
+                    notes=_env_string_list_value(_env_tool_value(skill, "notes", [])),
                 )
             )
         return EnvironmentManifestResponse(
@@ -1352,11 +1385,14 @@ class RemoteRelayHTTPService:
             "2. Treat successful checks as available. For failures, explain the "
             "missing or mismatched tool and quote the configured `install` command "
             "if one is present.\n"
-            "3. Before running any install command, present a concise install plan "
-            "and wait for normal user approval. Do not install Node, Python, uv, npm, "
+            "3. Before running any install command, read that entry's `install_prompt`, "
+            "`docs`, and `notes`; present a concise install plan grounded in those "
+            "fields and wait for normal user approval. Do not invent install steps "
+            "outside the manifest. Do not install Node, Python, uv, npm, "
             "pipx, or other base runtimes automatically; report them as blockers if "
             "they are missing.\n"
-            "4. After any approved install command, rerun that tool's `check` command.\n"
+            "4. After any approved install command, follow that entry's `verify_prompt` "
+            "when present, then rerun that tool's `check` command.\n"
             "5. If a check still fails because the declared command is not found, run "
             "`command -v <command>` on Unix-like peers or `Get-Command <command>` "
             "on Windows peers, then report the active PATH and the directory that "
@@ -1364,7 +1400,10 @@ class RemoteRelayHTTPService:
             "6. Do not edit shell profiles, PATH, npm prefix, PowerShell profiles, "
             "or system environment variables unless the user approves that exact "
             "change.\n"
-            "7. Finish with a compact status table: tool, capability, check result, "
+            "7. Treat `docs` as reference links for troubleshooting and reporting. "
+            "If a configured guide conflicts with the install command, stop and "
+            "report the manifest inconsistency.\n"
+            "8. Finish with a compact status table: tool, capability, check result, "
             "action taken, remaining blocker.\n"
         )
 
@@ -1380,3 +1419,32 @@ def _env_tool_value(tool: Any, field_name: str, default: Any = None) -> Any:
     if isinstance(tool, dict):
         return tool.get(field_name, default)
     return getattr(tool, field_name, default)
+
+
+def _env_bool_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
+
+
+def _env_string_list_value(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if value is None or value == "":
+        return []
+    return [str(value)]
+
+
+def _env_docs_value(value: Any) -> list[dict[str, str]]:
+    docs: list[dict[str, str]] = []
+    if not isinstance(value, list):
+        return docs
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title", "")).strip()
+        url = str(item.get("url", "")).strip()
+        if not title and not url:
+            continue
+        docs.append({"title": title, "url": url})
+    return docs

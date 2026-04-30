@@ -361,6 +361,122 @@ class TestRemoteRelayHTTPService:
             service.stop()
             relay.stop()
 
+    def test_admin_toolchain_endpoints_manage_manifest(
+        self, tmp_path: Path
+    ) -> None:
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        reloads: list[str] = []
+        config_path = tmp_path / "config.yaml"
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            admin_access_secret="admin-secret",
+            admin_config_path=config_path,
+            admin_config_reload_handler=lambda: reloads.append("reload"),
+        )
+        service.start()
+        try:
+            admin_headers = {"X-RC-Admin-Secret": "admin-secret"}
+
+            _, cli = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/toolchains/record",
+                {
+                    "kind": "cli",
+                    "payload": {
+                        "name": "gitnexus",
+                        "command": "gitnexus",
+                        "capabilities": ["repo_index"],
+                        "check": "gitnexus --version",
+                        "install": "npm install -g gitnexus",
+                        "docs": [{"title": "GitNexus", "url": "https://example.test/gitnexus"}],
+                        "install_prompt": "Use npm.",
+                        "verify_prompt": "Run version check.",
+                        "notes": ["PATH changes need approval."],
+                    },
+                },
+                headers=admin_headers,
+            )
+            assert cli["toolchain"]["name"] == "gitnexus"
+            assert cli["toolchain"]["docs"][0]["title"] == "GitNexus"
+
+            _, mcp = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/toolchains/record",
+                {
+                    "kind": "mcp",
+                    "payload": {
+                        "name": "gitnexus-mcp",
+                        "command": "gitnexus",
+                        "args": ["mcp"],
+                        "placement": "peer",
+                        "distribution": "command",
+                        "requirements": {"node": ">=20"},
+                        "check": "gitnexus --version",
+                        "install_prompt": "Start MCP with args.",
+                    },
+                },
+                headers=admin_headers,
+            )
+            assert mcp["toolchain"]["args"] == ["mcp"]
+            assert mcp["toolchain"]["requirements"]["node"] == ">=20"
+
+            _, skill = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/toolchains/record",
+                {
+                    "kind": "skill",
+                    "payload": {
+                        "name": "collaborating-with-claude",
+                        "scope": "user",
+                        "check": "Test-Path ~/.agents/skills/collaborating-with-claude/SKILL.md",
+                        "install": "python install-skill.py",
+                        "path_hint": "~/.agents/skills/collaborating-with-claude/SKILL.md",
+                        "verify_prompt": "Check SKILL.md.",
+                    },
+                },
+                headers=admin_headers,
+            )
+            assert skill["toolchain"]["scope"] == "user"
+
+            _, listed = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/toolchains/list",
+                {},
+                headers=admin_headers,
+            )
+            assert listed["cli_tools"][0]["name"] == "gitnexus"
+            assert listed["mcp_servers"][0]["name"] == "gitnexus-mcp"
+            assert listed["skills"][0]["name"] == "collaborating-with-claude"
+
+            _, disabled = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/toolchains/enable",
+                {"kind": "cli", "name": "gitnexus", "enabled": False},
+                headers=admin_headers,
+            )
+            assert disabled["toolchain"]["enabled"] is False
+
+            _, deleted = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/toolchains/delete",
+                {"kind": "mcp", "name": "gitnexus-mcp"},
+                headers=admin_headers,
+            )
+            assert deleted == {"ok": True, "kind": "mcp", "name": "gitnexus-mcp"}
+
+            raw = config_path.read_text(encoding="utf-8")
+            assert "gitnexus:" in raw
+            assert "enabled: false" in raw
+            assert "collaborating-with-claude:" in raw
+            assert "gitnexus-mcp" not in raw
+            assert len(reloads) == 5
+        finally:
+            service.stop()
+            relay.stop()
+
     def test_admin_write_rolls_back_when_reload_fails(
         self, tmp_path: Path
     ) -> None:
@@ -701,6 +817,16 @@ class TestRemoteRelayHTTPService:
                     check="gitnexus --version",
                     install="npm install -g gitnexus@1.6.3",
                     requirements={"node": ">=20"},
+                    docs=[{"title": "GitNexus MCP", "url": "https://example.test/mcp"}],
+                    install_prompt="Install MCP through npm only.",
+                    verify_prompt="Verify MCP starts with the mcp argument.",
+                    notes=["Do not install node automatically."],
+                ),
+                MCPServerConfig(
+                    name="disabled-mcp",
+                    command="disabled-mcp",
+                    enabled=False,
+                    placement="peer",
                 )
             ],
             environment_cli_tools={
@@ -710,6 +836,10 @@ class TestRemoteRelayHTTPService:
                     "check": "beads --version",
                     "install": "npm install -g beads",
                     "source": "npm",
+                    "docs": [{"title": "Beads", "url": "https://example.test/beads"}],
+                    "install_prompt": "Use npm global install for beads.",
+                    "verify_prompt": "Run beads --version after install.",
+                    "notes": ["Do not install node automatically."],
                 },
                 "gitnexus": EnvironmentCLIToolConfig(
                     name="gitnexus",
@@ -718,6 +848,16 @@ class TestRemoteRelayHTTPService:
                     check="gitnexus --version",
                     install="npm install -g gitnexus",
                     source="npm",
+                    docs=[{"title": "GitNexus", "url": "https://example.test/gitnexus"}],
+                    install_prompt="Use the configured npm command.",
+                    verify_prompt="Check gitnexus version output.",
+                    notes=["PATH changes require explicit approval."],
+                ),
+                "disabled-cli": EnvironmentCLIToolConfig(
+                    name="disabled-cli",
+                    command="disabled-cli",
+                    enabled=False,
+                    check="disabled-cli --version",
                 )
             },
             environment_skills={
@@ -729,6 +869,14 @@ class TestRemoteRelayHTTPService:
                     "source": "github",
                     "description": "Claude bridge skill",
                     "path_hint": "~/.agents/skills/collaborating-with-claude/SKILL.md",
+                    "docs": [{"title": "Claude skill", "url": "https://example.test/skill"}],
+                    "install_prompt": "Install from the curated skill source.",
+                    "verify_prompt": "Verify SKILL.md exists.",
+                    "notes": ["Use user scope."],
+                },
+                "disabled-skill": {
+                    "enabled": False,
+                    "check": "Test-Path disabled",
                 }
             },
         )
@@ -769,17 +917,32 @@ class TestRemoteRelayHTTPService:
             tools = {tool["name"]: tool for tool in manifest["cli_tools"]}
             mcp_servers = {server["name"]: server for server in manifest["mcp_servers"]}
             skills = {skill["name"]: skill for skill in manifest["skills"]}
+            assert "disabled-cli" not in tools
+            assert "disabled-mcp" not in mcp_servers
+            assert "disabled-skill" not in skills
             assert tools["gitnexus"]["check"] == "gitnexus --version"
+            assert tools["gitnexus"]["docs"][0]["title"] == "GitNexus"
+            assert tools["gitnexus"]["install_prompt"] == "Use the configured npm command."
+            assert tools["gitnexus"]["verify_prompt"] == "Check gitnexus version output."
+            assert tools["gitnexus"]["notes"] == ["PATH changes require explicit approval."]
             assert tools["beads"]["capabilities"] == ["issue_tracking"]
+            assert tools["beads"]["install_prompt"] == "Use npm global install for beads."
             assert mcp_servers["gitnexus-mcp"]["distribution"] == "command"
             assert mcp_servers["gitnexus-mcp"]["requirements"]["node"] == ">=20"
+            assert mcp_servers["gitnexus-mcp"]["docs"][0]["url"] == "https://example.test/mcp"
+            assert mcp_servers["gitnexus-mcp"]["install_prompt"] == "Install MCP through npm only."
             assert skills["collaborating-with-claude"]["scope"] == "user"
             assert (
                 skills["collaborating-with-claude"]["path_hint"]
                 == "~/.agents/skills/collaborating-with-claude/SKILL.md"
             )
+            assert skills["collaborating-with-claude"]["docs"][0]["title"] == "Claude skill"
+            assert skills["collaborating-with-claude"]["verify_prompt"] == "Verify SKILL.md exists."
             assert "do not scan PATH broadly" in manifest["prompt"]
             assert "npm install -g gitnexus" in manifest["prompt"]
+            assert "Use the configured npm command." in manifest["prompt"]
+            assert "Verify SKILL.md exists." in manifest["prompt"]
+            assert "Do not install node automatically." in manifest["prompt"]
             assert "mcp_servers" in manifest["prompt"]
             assert "skills" in manifest["prompt"]
             assert "CLI, MCP, and skill entry" in manifest["prompt"]
