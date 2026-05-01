@@ -8,6 +8,11 @@ import threading
 import time
 import uuid
 
+from reuleauxcoder.app.runtime.agent_runtime import (
+    AgentRuntimeCancelled,
+    get_agent_runtime_limiter,
+)
+from reuleauxcoder.domain.agent.events import AgentEvent
 from reuleauxcoder.interfaces.events import UIEventKind
 from reuleauxcoder.services.llm.factory import build_llm_from_settings
 
@@ -447,11 +452,32 @@ def run_subagent_task(
         hook_registry=parent_agent.hook_registry.clone(),
         approval_provider=build_subagent_approval_provider(parent_agent, mode, task),
     )
+    runtime_agent_id = f"subagent:{mode}:{uuid.uuid4().hex[:10]}"
+    setattr(sub, "runtime_agent_id", runtime_agent_id)
 
     holder: dict[str, str] = {}
 
     def _run() -> None:
-        holder["result"] = sub.chat(task)
+        def _emit_runtime_status(payload: dict) -> None:
+            emit_event = getattr(parent_agent, "_emit_event", None)
+            if callable(emit_event):
+                emit_event(AgentEvent.runtime_status(payload))
+
+        try:
+            with get_agent_runtime_limiter().agent_slot(
+                runtime_agent_id,
+                agent_type=f"subagent:{mode}",
+                label=task[:160],
+                is_cancelled=sub.stop_requested,
+                on_wait=_emit_runtime_status,
+            ):
+                holder["result"] = sub.chat(task)
+        except AgentRuntimeCancelled:
+            holder["result"] = (
+                f"[Sub-agent cancelled][mode={mode}]\n"
+                "Sub-agent was cancelled while waiting for a server Agent slot.\n"
+                "[Sub-agent finished status=cancelled]"
+            )
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()

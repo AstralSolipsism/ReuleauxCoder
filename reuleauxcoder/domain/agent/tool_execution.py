@@ -3,12 +3,17 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, List
 import concurrent.futures
+from contextlib import nullcontext
 
 if TYPE_CHECKING:
     from reuleauxcoder.domain.agent.agent import Agent
     from reuleauxcoder.domain.llm.models import ToolCall
 
 from reuleauxcoder.domain.agent.events import AgentEvent
+from reuleauxcoder.app.runtime.agent_runtime import (
+    AgentRuntimeCancelled,
+    get_agent_runtime_limiter,
+)
 from reuleauxcoder.domain.approval import ApprovalRequest
 from reuleauxcoder.domain.hooks.types import (
     AfterToolExecuteContext,
@@ -168,7 +173,24 @@ class ToolExecutor:
             except Exception:
                 pass
         try:
-            result = tool.execute(**tool_call.arguments)
+            shell_context = nullcontext()
+            if tool_call.name == "shell":
+                agent_id = str(
+                    getattr(self.agent, "runtime_agent_id", "")
+                    or f"agent:{id(self.agent)}"
+                )
+
+                def _emit_shell_runtime(payload: dict) -> None:
+                    self.agent._emit_event(AgentEvent.runtime_status(payload))
+
+                shell_context = get_agent_runtime_limiter().shell_slot(
+                    agent_id,
+                    tool_call_id=tool_call.id,
+                    is_cancelled=self.agent.stop_requested,
+                    on_wait=_emit_shell_runtime,
+                )
+            with shell_context:
+                result = tool.execute(**tool_call.arguments)
             if (shell_cwd := getattr(tool, "_cwd", None)) is not None:
                 setattr(self.agent, "runtime_working_directory", str(shell_cwd))
             after_context = AfterToolExecuteContext(
@@ -188,6 +210,10 @@ class ToolExecutor:
             return after_context.result
         except TypeError as e:
             message = f"Error: bad arguments for {tool_call.name}: {e}"
+            self._emit_tool_end(tool_call, message, success=False, tool=tool)
+            return message
+        except AgentRuntimeCancelled:
+            message = f"Tool '{tool_call.name}' cancelled while waiting for runtime slot"
             self._emit_tool_end(tool_call, message, success=False, tool=tool)
             return message
         except Exception as e:

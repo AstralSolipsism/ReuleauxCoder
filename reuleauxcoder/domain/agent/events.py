@@ -18,6 +18,7 @@ class AgentEventType(Enum):
     COMPRESSION_START = "compression_start"
     COMPRESSION_END = "compression_end"
     USAGE_UPDATE = "usage_update"
+    RUNTIME_STATUS = "runtime_status"
     ERROR = "error"
 
 
@@ -177,4 +178,12 @@ class AgentEvent:
         return cls(
             event_type=AgentEventType.ERROR,
             error_message=message,
+        )
+
+    @classmethod
+    def runtime_status(cls, payload: dict[str, Any]) -> "AgentEvent":
+        """Create a runtime limiter status event."""
+        return cls(
+            event_type=AgentEventType.RUNTIME_STATUS,
+            data=payload,
         )
