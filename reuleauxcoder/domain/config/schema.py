@@ -139,6 +139,10 @@ CONFIG_SCHEMA = {
         "default_tool_timeout_sec": "int (default: 30)",
         "shell_timeout_sec": "int (default: 120)",
     },
+    "agent_runtime": {
+        "max_running_agents": "int (default: 4, global server-side Agent concurrency limit)",
+        "max_shells_per_agent": "int (default: 1, per-Agent shell concurrency limit)",
+    },
     "environment": {
         "cli_tools": {
             "tool_name": {

@@ -537,6 +537,17 @@ class RemoteRelayHTTPService:
                         result = {"ok": True, **service.admin_manager.status()}
                         self._send_json(HTTPStatus.OK, result)
                         return
+                    if path == "/remote/admin/server-settings/read":
+                        result = {
+                            "ok": True,
+                            **service.admin_manager.read_server_settings(),
+                        }
+                        self._send_json(HTTPStatus.OK, result)
+                        return
+                    if path == "/remote/admin/server-settings/update":
+                        result = service.admin_manager.update_server_settings(payload)
+                        self._send_json(result.status, result.payload)
+                        return
                     if path == "/remote/admin/providers/list":
                         result = {"ok": True, **service.admin_manager.list_providers()}
                         self._send_json(HTTPStatus.OK, result)

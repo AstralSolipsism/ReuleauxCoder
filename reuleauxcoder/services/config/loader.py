@@ -8,6 +8,7 @@ import yaml
 
 from reuleauxcoder.compat import migrate_bash_to_shell, migrate_legacy_config
 from reuleauxcoder.domain.config.models import (
+    AgentRuntimeConfig,
     ApprovalConfig,
     ApprovalRuleConfig,
     Config,
@@ -296,6 +297,7 @@ class ConfigLoader:
         prompt_config = data.get("prompt", {})
         context_config = data.get("context", {})
         remote_exec_config = data.get("remote_exec", {})
+        agent_runtime_config = data.get("agent_runtime", {})
         environment_config = data.get("environment", {})
         if not isinstance(environment_config, dict):
             environment_config = {}
@@ -495,6 +497,9 @@ class ConfigLoader:
                 ),
                 shell_timeout_sec=int(remote_exec_config.get("shell_timeout_sec", 120)),
             ),
+            agent_runtime=AgentRuntimeConfig.from_dict(
+                agent_runtime_config if isinstance(agent_runtime_config, dict) else {}
+            ),
             environment=EnvironmentConfig(cli_tools=cli_tools, skills=skills),
             session_auto_save=session_config.get(
                 "auto_save", DEFAULTS["session_auto_save"]
@@ -561,6 +566,10 @@ class ConfigLoader:
                     {"tool_name": "agent", "action": "require_approval"},
                     {"tool_source": "mcp", "action": "require_approval"},
                 ],
+            },
+            "agent_runtime": {
+                "max_running_agents": 4,
+                "max_shells_per_agent": 1,
             },
             "skills": {"enabled": True},
         }

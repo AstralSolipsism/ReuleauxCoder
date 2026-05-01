@@ -554,6 +554,29 @@ class RemoteExecConfig:
 
 
 @dataclass
+class AgentRuntimeConfig:
+    """Global server-side Agent runtime limits."""
+
+    max_running_agents: int = 4
+    max_shells_per_agent: int = 1
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "max_running_agents": self.max_running_agents,
+            "max_shells_per_agent": self.max_shells_per_agent,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "AgentRuntimeConfig":
+        if not isinstance(d, dict):
+            return cls()
+        return cls(
+            max_running_agents=int(d.get("max_running_agents", 4) or 4),
+            max_shells_per_agent=int(d.get("max_shells_per_agent", 1) or 1),
+        )
+
+
+@dataclass
 class EnvironmentCLIToolConfig:
     """Declarative CLI tool entry used by lightweight environment sync."""
 
@@ -843,6 +866,9 @@ class Config:
     # Remote execution settings
     remote_exec: RemoteExecConfig = field(default_factory=RemoteExecConfig)
 
+    # Server Agent runtime settings
+    agent_runtime: AgentRuntimeConfig = field(default_factory=AgentRuntimeConfig)
+
     # Server-authoritative environment manifest
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
 
@@ -862,6 +888,10 @@ class Config:
             errors.append("tool_output_max_chars must be positive")
         if self.tool_output_max_lines < 1:
             errors.append("tool_output_max_lines must be positive")
+        if self.agent_runtime.max_running_agents < 1:
+            errors.append("agent_runtime.max_running_agents must be positive")
+        if self.agent_runtime.max_shells_per_agent < 1:
+            errors.append("agent_runtime.max_shells_per_agent must be positive")
         valid_actions = {"allow", "warn", "require_approval", "deny"}
         if (
             self.active_model_profile

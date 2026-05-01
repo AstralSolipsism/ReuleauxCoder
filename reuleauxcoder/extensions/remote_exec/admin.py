@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from reuleauxcoder.app.runtime.agent_runtime import get_agent_runtime_limiter
 from reuleauxcoder.domain.config.models import (
+    AgentRuntimeConfig,
     EnvironmentCLIToolConfig,
     EnvironmentSkillConfig,
     MCPServerConfig,
@@ -57,7 +59,61 @@ class RemoteAdminConfigManager:
             "model_profiles": self.list_model_profiles()["model_profiles"],
             "active_main": self._models_data().get("active_main"),
             "active_sub": self._models_data().get("active_sub"),
+            "server_settings": self.read_server_settings()["settings"],
+            "agent_runtime": get_agent_runtime_limiter().snapshot(),
         }
+
+    def read_server_settings(self) -> dict[str, Any]:
+        data = self._load_data()
+        raw_runtime = data.get("agent_runtime", {})
+        runtime = AgentRuntimeConfig.from_dict(
+            raw_runtime if isinstance(raw_runtime, dict) else {}
+        )
+        return {
+            "settings": {"agent_runtime": runtime.to_dict()},
+            "runtime": get_agent_runtime_limiter().snapshot(),
+        }
+
+    def update_server_settings(self, payload: dict[str, Any]) -> AdminConfigResult:
+        raw_settings = payload.get("settings")
+        raw_runtime = payload.get("agent_runtime")
+        if isinstance(raw_settings, dict) and raw_runtime is None:
+            raw_runtime = raw_settings.get("agent_runtime")
+        if not isinstance(raw_runtime, dict):
+            return AdminConfigResult(False, {"error": "agent_runtime_required"}, 400)
+        try:
+            runtime = AgentRuntimeConfig.from_dict(raw_runtime)
+        except Exception as exc:
+            return AdminConfigResult(
+                False,
+                {"error": "invalid_agent_runtime", "message": str(exc)},
+                400,
+            )
+        if runtime.max_running_agents < 1 or runtime.max_shells_per_agent < 1:
+            return AdminConfigResult(
+                False,
+                {
+                    "error": "invalid_agent_runtime",
+                    "message": "agent_runtime limits must be positive integers",
+                },
+                400,
+            )
+
+        with self._lock:
+            previous_data = self._load_data()
+            data = deepcopy(previous_data)
+            data["agent_runtime"] = runtime.to_dict()
+            reload_error = self._commit_config(data, previous_data)
+            if reload_error:
+                return reload_error
+            get_agent_runtime_limiter().configure(
+                max_running_agents=runtime.max_running_agents,
+                max_shells_per_agent=runtime.max_shells_per_agent,
+            )
+            return AdminConfigResult(
+                True,
+                {"ok": True, **self.read_server_settings()},
+            )
 
     def list_toolchains(self) -> dict[str, Any]:
         data = self._load_data()
