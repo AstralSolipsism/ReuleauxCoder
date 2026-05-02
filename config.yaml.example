@@ -116,6 +116,39 @@ approval:
 # cli:
 #   # history_file: "~/.rcoder/history"
 
+# Optional server-authoritative Agent runtime snapshot.
+# Agent config references credential IDs only; do not put plaintext API keys here.
+# agent_runtime:
+#   max_running_agents: 4
+#   max_shells_per_agent: 1
+#   runtime_profiles:
+#     codex_remote:
+#       executor: "codex"
+#       execution_location: "remote_server"
+#       model: "gpt-5.2-codex"
+#       command: "codex"
+#       runtime_home_policy: "per_task"
+#       approval_mode: "autonomous"
+#       config_isolation: "per_agent"
+#       credential_refs:
+#         model: "cred_codex_team"
+#         git: "cred_github_repo_writer"
+#       mcp:
+#         servers: ["github"]
+#   agents:
+#     code_reviewer:
+#       name: "Code Reviewer"
+#       runtime_profile: "codex_remote"
+#       capabilities: ["code_review", "read_repo", "comment_issue"]
+#       prompt:
+#         agent_md: ".agents/code_reviewer/AGENT.md"
+#         system_append: |
+#           Focus on regression risk, missing tests, and reviewable findings.
+#       mcp:
+#         servers: ["github"]
+#       skills: ["code-review"]
+#       max_concurrent_tasks: 2
+
 skills:
   enabled: true
   scan_project: true

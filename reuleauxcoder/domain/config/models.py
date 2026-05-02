@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
+from reuleauxcoder.domain.agent_runtime.models import AgentConfig, RuntimeProfileConfig
+
 
 MCPPlacement = Literal["server", "peer", "both"]
 MCPDistribution = Literal["command", "artifact"]
@@ -555,24 +557,75 @@ class RemoteExecConfig:
 
 @dataclass
 class AgentRuntimeConfig:
-    """Global server-side Agent runtime limits."""
+    """Server-side Agent runtime settings and runtime snapshot config."""
 
     max_running_agents: int = 4
     max_shells_per_agent: int = 1
+    runtime_profiles: dict[str, RuntimeProfileConfig] = field(default_factory=dict)
+    agents: dict[str, AgentConfig] = field(default_factory=dict)
 
-    def to_dict(self) -> dict[str, int]:
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "max_running_agents": self.max_running_agents,
+            "max_shells_per_agent": self.max_shells_per_agent,
+        }
+        if self.runtime_profiles:
+            data["runtime_profiles"] = {
+                profile_id: profile.to_dict()
+                for profile_id, profile in self.runtime_profiles.items()
+            }
+        if self.agents:
+            data["agents"] = {
+                agent_id: agent.to_dict() for agent_id, agent in self.agents.items()
+            }
+        return data
+
+    def to_runtime_snapshot(self) -> dict[str, Any]:
+        """Return the server-authoritative runtime snapshot for executors."""
+
         return {
             "max_running_agents": self.max_running_agents,
             "max_shells_per_agent": self.max_shells_per_agent,
+            "runtime_profiles": {
+                profile_id: profile.to_dict()
+                for profile_id, profile in self.runtime_profiles.items()
+            },
+            "agents": {
+                agent_id: agent.to_dict() for agent_id, agent in self.agents.items()
+            },
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "AgentRuntimeConfig":
         if not isinstance(d, dict):
             return cls()
+        raw_profiles = d.get("runtime_profiles", {})
+        runtime_profiles = (
+            {
+                str(profile_id): RuntimeProfileConfig.from_dict(
+                    str(profile_id), profile_data
+                )
+                for profile_id, profile_data in raw_profiles.items()
+                if isinstance(profile_data, dict)
+            }
+            if isinstance(raw_profiles, dict)
+            else {}
+        )
+        raw_agents = d.get("agents", {})
+        agents = (
+            {
+                str(agent_id): AgentConfig.from_dict(str(agent_id), agent_data)
+                for agent_id, agent_data in raw_agents.items()
+                if isinstance(agent_data, dict)
+            }
+            if isinstance(raw_agents, dict)
+            else {}
+        )
         return cls(
             max_running_agents=int(d.get("max_running_agents", 4) or 4),
             max_shells_per_agent=int(d.get("max_shells_per_agent", 1) or 1),
+            runtime_profiles=runtime_profiles,
+            agents=agents,
         )
 
 
@@ -892,6 +945,14 @@ class Config:
             errors.append("agent_runtime.max_running_agents must be positive")
         if self.agent_runtime.max_shells_per_agent < 1:
             errors.append("agent_runtime.max_shells_per_agent must be positive")
+        for agent_id, agent in self.agent_runtime.agents.items():
+            if (
+                agent.runtime_profile
+                and agent.runtime_profile not in self.agent_runtime.runtime_profiles
+            ):
+                errors.append(
+                    f"agent_runtime.agents[{agent_id}].runtime_profile must exist in runtime_profiles"
+                )
         valid_actions = {"allow", "warn", "require_approval", "deny"}
         if (
             self.active_model_profile

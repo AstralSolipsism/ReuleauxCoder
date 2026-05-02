@@ -81,27 +81,35 @@ class RemoteAdminConfigManager:
             raw_runtime = raw_settings.get("agent_runtime")
         if not isinstance(raw_runtime, dict):
             return AdminConfigResult(False, {"error": "agent_runtime_required"}, 400)
-        try:
-            runtime = AgentRuntimeConfig.from_dict(raw_runtime)
-        except Exception as exc:
-            return AdminConfigResult(
-                False,
-                {"error": "invalid_agent_runtime", "message": str(exc)},
-                400,
-            )
-        if runtime.max_running_agents < 1 or runtime.max_shells_per_agent < 1:
-            return AdminConfigResult(
-                False,
-                {
-                    "error": "invalid_agent_runtime",
-                    "message": "agent_runtime limits must be positive integers",
-                },
-                400,
-            )
-
         with self._lock:
             previous_data = self._load_data()
             data = deepcopy(previous_data)
+            previous_runtime = (
+                previous_data.get("agent_runtime", {})
+                if isinstance(previous_data.get("agent_runtime"), dict)
+                else {}
+            )
+            merged = ConfigLoader()._merge_dicts(
+                {"agent_runtime": previous_runtime},
+                {"agent_runtime": raw_runtime},
+            )
+            try:
+                runtime = AgentRuntimeConfig.from_dict(merged["agent_runtime"])
+            except Exception as exc:
+                return AdminConfigResult(
+                    False,
+                    {"error": "invalid_agent_runtime", "message": str(exc)},
+                    400,
+                )
+            if runtime.max_running_agents < 1 or runtime.max_shells_per_agent < 1:
+                return AdminConfigResult(
+                    False,
+                    {
+                        "error": "invalid_agent_runtime",
+                        "message": "agent_runtime limits must be positive integers",
+                    },
+                    400,
+                )
             data["agent_runtime"] = runtime.to_dict()
             reload_error = self._commit_config(data, previous_data)
             if reload_error:

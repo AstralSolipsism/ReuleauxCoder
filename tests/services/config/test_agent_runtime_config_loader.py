@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
+from reuleauxcoder.extensions.remote_exec.admin import RemoteAdminConfigManager
 from reuleauxcoder.services.config.loader import ConfigLoader
 
 
@@ -166,3 +169,51 @@ def test_config_validate_rejects_agent_referencing_missing_runtime_profile() -> 
         "agent_runtime.agents[reviewer].runtime_profile must exist in runtime_profiles"
         in errors
     )
+
+
+def test_admin_server_settings_update_preserves_runtime_profiles_and_agents() -> None:
+    class MemoryAdminManager(RemoteAdminConfigManager):
+        def __init__(self) -> None:
+            super().__init__(config_path=None)
+            self.data = {
+                "agent_runtime": {
+                    "max_running_agents": 4,
+                    "max_shells_per_agent": 1,
+                    "runtime_profiles": {
+                        "codex_remote": {
+                            "executor": "codex",
+                            "model": "old-model",
+                            "credential_refs": {"model": "cred-model"},
+                        }
+                    },
+                    "agents": {
+                        "reviewer": {
+                            "runtime_profile": "codex_remote",
+                            "capabilities": ["review"],
+                        }
+                    },
+                }
+            }
+
+        def _load_data(self) -> dict:
+            return deepcopy(self.data)
+
+        def _commit_config(self, data: dict, previous_data: dict):
+            del previous_data
+            self.data = deepcopy(data)
+            return None
+
+    manager = MemoryAdminManager()
+
+    result = manager.update_server_settings(
+        {"agent_runtime": {"max_running_agents": 2}}
+    )
+
+    assert result.ok is True
+    runtime = manager.data["agent_runtime"]
+    assert runtime["max_running_agents"] == 2
+    assert runtime["runtime_profiles"]["codex_remote"]["executor"] == "codex"
+    assert runtime["runtime_profiles"]["codex_remote"]["credential_refs"] == {
+        "model": "cred-model"
+    }
+    assert runtime["agents"]["reviewer"]["runtime_profile"] == "codex_remote"

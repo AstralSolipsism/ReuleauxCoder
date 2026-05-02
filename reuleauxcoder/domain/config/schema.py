@@ -142,6 +142,37 @@ CONFIG_SCHEMA = {
     "agent_runtime": {
         "max_running_agents": "int (default: 4, global server-side Agent concurrency limit)",
         "max_shells_per_agent": "int (default: 1, per-Agent shell concurrency limit)",
+        "runtime_profiles": {
+            "profile_id": {
+                "executor": "string (one of reuleauxcoder, fake, codex, claude, gemini)",
+                "execution_location": "string (one of remote_server, local_workspace)",
+                "model": "string (optional, executor model override)",
+                "command": "string (optional, CLI command for external executors)",
+                "args": "list of strings (optional)",
+                "env": "dict of strings (optional, non-secret process env)",
+                "runtime_home_policy": "string (optional, e.g. per_task)",
+                "approval_mode": "string (optional, e.g. autonomous)",
+                "config_isolation": "string (optional, e.g. per_agent)",
+                "credential_refs": "dict of strings (optional, references server-managed secrets)",
+                "mcp": "dict (optional, executor-native MCP settings rendered from platform config)",
+            }
+        },
+        "agents": {
+            "agent_id": {
+                "name": "string (optional)",
+                "description": "string (optional)",
+                "runtime_profile": "string (required when task-dispatched, references runtime_profiles)",
+                "capabilities": "list of strings (optional)",
+                "prompt": {
+                    "agent_md": "string (optional)",
+                    "system_append": "string (optional)",
+                },
+                "mcp": "dict (optional, agent MCP allowlist, e.g. servers)",
+                "skills": "list of strings (optional)",
+                "max_concurrent_tasks": "int (optional)",
+                "credential_refs": "dict of strings (optional)",
+            }
+        },
     },
     "environment": {
         "cli_tools": {
