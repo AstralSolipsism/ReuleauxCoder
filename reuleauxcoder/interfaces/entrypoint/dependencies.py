@@ -25,6 +25,7 @@ from reuleauxcoder.interfaces.events import UIEventBus, UIEventKind
 from reuleauxcoder.interfaces.interactions import UIInteractor
 from reuleauxcoder.infrastructure.persistence.session_store import SessionStore
 from reuleauxcoder.services.config.loader import ConfigLoader
+from reuleauxcoder.services.agent_runtime.control_plane import AgentRuntimeControlPlane
 from reuleauxcoder.services.llm.client import LLM
 from reuleauxcoder.services.llm.factory import build_llm_from_settings
 
@@ -193,6 +194,10 @@ def _default_create_remote_http_service(
         environment_cli_tools=config.environment.cli_tools,
         environment_skills=config.environment.skills,
         admin_config_path=getattr(config, "_source_path", None),
+        runtime_control_plane=AgentRuntimeControlPlane(
+            max_running_tasks=config.agent_runtime.max_running_agents,
+            runtime_snapshot=config.agent_runtime.to_runtime_snapshot(),
+        ),
     )
 
 

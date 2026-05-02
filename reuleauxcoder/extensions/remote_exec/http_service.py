@@ -65,6 +65,11 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
 )
 from reuleauxcoder.extensions.remote_exec.server import RelayServer
 from reuleauxcoder.interfaces.events import UIEventBus, UIEventKind
+from reuleauxcoder.services.agent_runtime.executor_backend import (
+    ExecutorEvent,
+    ExecutorRunResult,
+)
+from reuleauxcoder.services.agent_runtime.control_plane import RuntimeTaskRequest
 
 
 @dataclass
@@ -235,6 +240,7 @@ class RemoteRelayHTTPService:
         admin_config_reload_handler: ConfigReloadHandler | None = None,
         admin_provider_test_handler: ProviderTestHandler | None = None,
         admin_provider_models_handler: ProviderModelsHandler | None = None,
+        runtime_control_plane: Any | None = None,
     ) -> None:
         self.relay_server = relay_server
         self.bind = bind
@@ -256,6 +262,7 @@ class RemoteRelayHTTPService:
             provider_test_handler=admin_provider_test_handler,
             provider_models_handler=admin_provider_models_handler,
         )
+        self.runtime_control_plane = runtime_control_plane
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._queues: dict[str, queue.Queue[RelayEnvelope]] = {}
@@ -265,6 +272,9 @@ class RemoteRelayHTTPService:
         self._chat_sessions: dict[str, _RemoteChatSession] = {}
         self._chat_sessions_lock = threading.Lock()
         self._chat_session_ttl_sec = 300.0
+        self._runtime_recovery_stop = threading.Event()
+        self._runtime_recovery_thread: threading.Thread | None = None
+        self._runtime_recovery_interval_sec = 2.0
         self.relay_server._send_fn = self._enqueue_outbound
 
     @property
@@ -282,6 +292,7 @@ class RemoteRelayHTTPService:
         self._server = ThreadingHTTPServer((host, port), handler_cls)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
+        self._start_runtime_recovery()
         if self.ui_bus is not None:
             self.ui_bus.info(
                 f"Remote relay HTTP service listening on {self.base_url}",
@@ -289,6 +300,7 @@ class RemoteRelayHTTPService:
             )
 
     def stop(self) -> None:
+        self._stop_runtime_recovery()
         if self._server is None:
             return
         self._server.shutdown()
@@ -297,6 +309,31 @@ class RemoteRelayHTTPService:
             self._thread.join(timeout=3)
             self._thread = None
         self._server = None
+
+    def _start_runtime_recovery(self) -> None:
+        if self.runtime_control_plane is None:
+            return
+        if self._runtime_recovery_thread is not None:
+            return
+        self._runtime_recovery_stop.clear()
+
+        def loop() -> None:
+            while not self._runtime_recovery_stop.wait(
+                self._runtime_recovery_interval_sec
+            ):
+                try:
+                    self.runtime_control_plane.recover_stale_tasks()
+                except Exception:
+                    continue
+
+        self._runtime_recovery_thread = threading.Thread(target=loop, daemon=True)
+        self._runtime_recovery_thread.start()
+
+    def _stop_runtime_recovery(self) -> None:
+        self._runtime_recovery_stop.set()
+        if self._runtime_recovery_thread is not None:
+            self._runtime_recovery_thread.join(timeout=3)
+            self._runtime_recovery_thread = None
 
     def issue_bootstrap_token(self, ttl_sec: int = 300) -> str:
         return self.relay_server.issue_bootstrap_token(ttl_sec=ttl_sec)
@@ -425,6 +462,21 @@ class RemoteRelayHTTPService:
                 if parsed.path == "/remote/environment/manifest":
                     self._handle_environment_manifest()
                     return
+                if parsed.path == "/remote/runtime/claim":
+                    self._handle_runtime_claim()
+                    return
+                if parsed.path == "/remote/runtime/event":
+                    self._handle_runtime_event()
+                    return
+                if parsed.path == "/remote/runtime/heartbeat":
+                    self._handle_runtime_heartbeat()
+                    return
+                if parsed.path == "/remote/runtime/session":
+                    self._handle_runtime_session()
+                    return
+                if parsed.path == "/remote/runtime/complete":
+                    self._handle_runtime_complete()
+                    return
                 if parsed.path == "/remote/disconnect":
                     self._handle_disconnect()
                     return
@@ -536,6 +588,149 @@ class RemoteRelayHTTPService:
                     if path == "/remote/admin/status":
                         result = {"ok": True, **service.admin_manager.status()}
                         self._send_json(HTTPStatus.OK, result)
+                        return
+                    if path == "/remote/admin/runtime/submit":
+                        if service.runtime_control_plane is None:
+                            self._send_json(
+                                HTTPStatus.SERVICE_UNAVAILABLE,
+                                {"error": "agent_runtime_unavailable"},
+                            )
+                            return
+                        metadata = (
+                            dict(payload.get("metadata", {}))
+                            if isinstance(payload.get("metadata"), dict)
+                            else {}
+                        )
+                        if payload.get("workspace_root") is not None:
+                            metadata.setdefault(
+                                "workspace_root", str(payload["workspace_root"])
+                            )
+                        task = service.runtime_control_plane.submit_task(
+                            RuntimeTaskRequest(
+                                issue_id=str(payload.get("issue_id") or "manual"),
+                                agent_id=str(payload.get("agent_id") or "default"),
+                                prompt=str(payload.get("prompt") or ""),
+                                executor=str(payload.get("executor") or "reuleauxcoder"),
+                                execution_location=str(
+                                    payload.get("execution_location")
+                                    or "local_workspace"
+                                ),
+                                runtime_profile_id=(
+                                    str(payload["runtime_profile_id"])
+                                    if payload.get("runtime_profile_id") is not None
+                                    else None
+                                ),
+                                workdir=(
+                                    str(payload["workdir"])
+                                    if payload.get("workdir") is not None
+                                    else None
+                                ),
+                                model=(
+                                    str(payload["model"])
+                                    if payload.get("model") is not None
+                                    else None
+                                ),
+                                metadata=metadata,
+                            ),
+                            task_id=(
+                                str(payload["task_id"])
+                                if payload.get("task_id") is not None
+                                else None
+                            ),
+                        )
+                        self._send_json(
+                            HTTPStatus.OK,
+                            {
+                                "ok": True,
+                                "task": service.runtime_control_plane.task_to_dict(
+                                    task.id
+                                ),
+                            },
+                        )
+                        return
+                    if path == "/remote/admin/runtime/events":
+                        if service.runtime_control_plane is None:
+                            self._send_json(
+                                HTTPStatus.SERVICE_UNAVAILABLE,
+                                {"error": "agent_runtime_unavailable"},
+                            )
+                            return
+                        task_id = str(payload.get("task_id") or "")
+                        after_seq = int(payload.get("after_seq") or 0)
+                        self._send_json(
+                            HTTPStatus.OK,
+                            {
+                                "ok": True,
+                                "events": [
+                                    event.to_dict()
+                                    for event in service.runtime_control_plane.list_events(
+                                        task_id, after_seq=after_seq
+                                    )
+                                ],
+                            },
+                        )
+                        return
+                    if path == "/remote/admin/runtime/cancel":
+                        if service.runtime_control_plane is None:
+                            self._send_json(
+                                HTTPStatus.SERVICE_UNAVAILABLE,
+                                {"error": "agent_runtime_unavailable"},
+                            )
+                            return
+                        task_id = str(payload.get("task_id") or "")
+                        if not task_id:
+                            self._send_json(
+                                HTTPStatus.BAD_REQUEST, {"error": "task_id_required"}
+                            )
+                            return
+                        ok = service.runtime_control_plane.cancel_task(
+                            task_id,
+                            reason=str(payload.get("reason") or "user_cancelled"),
+                        )
+                        self._send_json(HTTPStatus.OK, {"ok": ok, "task_id": task_id})
+                        return
+                    if path == "/remote/admin/runtime/retry":
+                        if service.runtime_control_plane is None:
+                            self._send_json(
+                                HTTPStatus.SERVICE_UNAVAILABLE,
+                                {"error": "agent_runtime_unavailable"},
+                            )
+                            return
+                        task_id = str(payload.get("task_id") or "")
+                        if not task_id:
+                            self._send_json(
+                                HTTPStatus.BAD_REQUEST, {"error": "task_id_required"}
+                            )
+                            return
+                        try:
+                            retry = service.runtime_control_plane.retry_task(
+                                task_id,
+                                new_task_id=(
+                                    str(payload["new_task_id"])
+                                    if payload.get("new_task_id") is not None
+                                    else None
+                                ),
+                            )
+                        except KeyError:
+                            self._send_json(
+                                HTTPStatus.NOT_FOUND, {"error": "task_not_found"}
+                            )
+                            return
+                        except ValueError as exc:
+                            self._send_json(
+                                HTTPStatus.BAD_REQUEST,
+                                {"error": "task_not_retryable", "message": str(exc)},
+                            )
+                            return
+                        self._send_json(
+                            HTTPStatus.OK,
+                            {
+                                "ok": True,
+                                "task": service.runtime_control_plane.task_to_dict(
+                                    retry.id
+                                ),
+                            },
+                        )
                         return
                     if path == "/remote/admin/server-settings/read":
                         result = {
@@ -771,6 +966,294 @@ class RemoteRelayHTTPService:
                     req.os, req.arch, req.workspace
                 )
                 self._send_json(HTTPStatus.OK, response.to_dict())
+
+            def _handle_runtime_claim(self) -> None:
+                payload = self._read_json()
+                peer_token = payload.get("peer_token")
+                peer_id = self._verify_peer_token(peer_token)
+                if peer_id is None:
+                    self._send_json(
+                        HTTPStatus.UNAUTHORIZED, {"error": "invalid_peer_token"}
+                    )
+                    return
+                if service.runtime_control_plane is None:
+                    self._send_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "agent_runtime_unavailable"},
+                    )
+                    return
+                service.relay_server.registry.update_heartbeat(peer_id)
+                raw_executors = payload.get("executors", [])
+                executors = raw_executors if isinstance(raw_executors, list) else []
+                worker_id = str(payload.get("worker_id") or peer_id)
+                peer = service.relay_server.registry.get(peer_id)
+                peer_capabilities = list(peer.capabilities) if peer is not None else []
+                workspace_root = peer.workspace_root if peer is not None else None
+                claim = service.runtime_control_plane.claim_task(
+                    worker_id=worker_id,
+                    executors=[str(executor) for executor in executors],
+                    peer_id=peer_id,
+                    peer_capabilities=peer_capabilities,
+                    workspace_root=workspace_root,
+                )
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"claim": claim.to_dict() if claim is not None else None},
+                )
+
+            def _handle_runtime_heartbeat(self) -> None:
+                payload = self._read_json()
+                peer_token = payload.get("peer_token")
+                peer_id = self._verify_peer_token(peer_token)
+                if peer_id is None:
+                    self._send_json(
+                        HTTPStatus.UNAUTHORIZED, {"error": "invalid_peer_token"}
+                    )
+                    return
+                if service.runtime_control_plane is None:
+                    self._send_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "agent_runtime_unavailable"},
+                    )
+                    return
+                request_id = str(payload.get("request_id") or "")
+                task_id = str(payload.get("task_id") or "")
+                worker_id = str(payload.get("worker_id") or "")
+                if not request_id or not task_id or not worker_id:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "request_id_task_id_and_worker_id_required"},
+                    )
+                    return
+                service.relay_server.registry.update_heartbeat(peer_id)
+                response = service.runtime_control_plane.heartbeat_task(
+                    request_id=request_id,
+                    task_id=task_id,
+                    worker_id=worker_id,
+                    peer_id=peer_id,
+                    lease_sec=(
+                        int(payload["lease_sec"])
+                        if payload.get("lease_sec") is not None
+                        else None
+                    ),
+                )
+                self._send_json(HTTPStatus.OK, response)
+
+            def _handle_runtime_session(self) -> None:
+                payload = self._read_json()
+                peer_token = payload.get("peer_token")
+                peer_id = self._verify_peer_token(peer_token)
+                if peer_id is None:
+                    self._send_json(
+                        HTTPStatus.UNAUTHORIZED, {"error": "invalid_peer_token"}
+                    )
+                    return
+                if service.runtime_control_plane is None:
+                    self._send_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "agent_runtime_unavailable"},
+                    )
+                    return
+                request_id = str(payload.get("request_id") or "")
+                task_id = str(payload.get("task_id") or "")
+                worker_id = str(payload.get("worker_id") or "")
+                if not request_id or not task_id or not worker_id:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "request_id_task_id_and_worker_id_required"},
+                    )
+                    return
+                metadata: dict[str, Any] = {}
+                for key in ("repo_url", "cache_path"):
+                    if payload.get(key) is not None:
+                        metadata[key] = str(payload[key])
+                try:
+                    ok, reason = service.runtime_control_plane.pin_claimed_session(
+                        request_id=request_id,
+                        task_id=task_id,
+                        worker_id=worker_id,
+                        peer_id=peer_id,
+                        workdir=(
+                            str(payload["workdir"])
+                            if payload.get("workdir") is not None
+                            else None
+                        ),
+                        branch=(
+                            str(payload["branch"])
+                            if payload.get("branch") is not None
+                            else None
+                        ),
+                        executor_session_id=(
+                            str(payload["executor_session_id"])
+                            if payload.get("executor_session_id") is not None
+                            else None
+                        ),
+                        metadata=metadata,
+                    )
+                except KeyError:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "task_not_found"})
+                    return
+                if not ok:
+                    status = (
+                        HTTPStatus.NOT_FOUND
+                        if reason == "task_not_found"
+                        else HTTPStatus.FORBIDDEN
+                    )
+                    self._send_json(
+                        status,
+                        {"ok": False, "error": reason or "claim_owner_mismatch"},
+                    )
+                    return
+                service.relay_server.registry.update_heartbeat(peer_id)
+                self._send_json(HTTPStatus.OK, {"ok": True})
+
+            def _handle_runtime_event(self) -> None:
+                payload = self._read_json()
+                peer_token = payload.get("peer_token")
+                peer_id = self._verify_peer_token(peer_token)
+                if peer_id is None:
+                    self._send_json(
+                        HTTPStatus.UNAUTHORIZED, {"error": "invalid_peer_token"}
+                    )
+                    return
+                if service.runtime_control_plane is None:
+                    self._send_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "agent_runtime_unavailable"},
+                    )
+                    return
+                task_id = str(payload.get("task_id") or "")
+                request_id = str(payload.get("request_id") or "")
+                worker_id = str(payload.get("worker_id") or "")
+                event_type = str(payload.get("type") or "")
+                if not task_id or not event_type or not request_id or not worker_id:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {
+                            "error": "request_id_task_id_worker_id_and_type_required"
+                        },
+                    )
+                    return
+                data = payload.get("data", {})
+                ok, reason = service.runtime_control_plane.append_executor_event(
+                    task_id,
+                    ExecutorEvent(
+                        type=event_type,
+                        text=(
+                            str(payload["text"])
+                            if payload.get("text") is not None
+                            else None
+                        ),
+                        data=dict(data) if isinstance(data, dict) else {},
+                    ),
+                    request_id=request_id,
+                    worker_id=worker_id,
+                    peer_id=peer_id,
+                )
+                if not ok:
+                    status = (
+                        HTTPStatus.NOT_FOUND
+                        if reason == "task_not_found"
+                        else HTTPStatus.FORBIDDEN
+                    )
+                    self._send_json(
+                        status,
+                        {"ok": False, "error": reason or "claim_owner_mismatch"},
+                    )
+                    return
+                service.relay_server.registry.update_heartbeat(peer_id)
+                self._send_json(HTTPStatus.OK, {"ok": True})
+
+            def _handle_runtime_complete(self) -> None:
+                payload = self._read_json()
+                peer_token = payload.get("peer_token")
+                peer_id = self._verify_peer_token(peer_token)
+                if peer_id is None:
+                    self._send_json(
+                        HTTPStatus.UNAUTHORIZED, {"error": "invalid_peer_token"}
+                    )
+                    return
+                if service.runtime_control_plane is None:
+                    self._send_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "agent_runtime_unavailable"},
+                    )
+                    return
+                task_id = str(payload.get("task_id") or "")
+                request_id = str(payload.get("request_id") or "")
+                worker_id = str(payload.get("worker_id") or "")
+                if not task_id or not request_id or not worker_id:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "request_id_task_id_and_worker_id_required"},
+                    )
+                    return
+                raw_events = payload.get("events", [])
+                events = [
+                    ExecutorEvent(
+                        type=str(event.get("type", "status")),
+                        text=(
+                            str(event["text"])
+                            if event.get("text") is not None
+                            else None
+                        ),
+                        data=(
+                            dict(event.get("data", {}))
+                            if isinstance(event.get("data"), dict)
+                            else {}
+                        ),
+                    )
+                    for event in raw_events
+                    if isinstance(event, dict)
+                ]
+                usage = payload.get("usage", {})
+                artifacts = payload.get("artifacts", [])
+                result = ExecutorRunResult(
+                    task_id=task_id,
+                    status=str(payload.get("status") or "failed"),
+                    output=str(payload.get("output") or ""),
+                    executor_session_id=(
+                        str(payload["executor_session_id"])
+                        if payload.get("executor_session_id") is not None
+                        else None
+                    ),
+                    events=events,
+                    usage=dict(usage) if isinstance(usage, dict) else {},
+                    error=(
+                        str(payload["error"])
+                        if payload.get("error") is not None
+                        else None
+                    ),
+                )
+                try:
+                    ok, reason, _ = service.runtime_control_plane.complete_claimed_task(
+                        task_id,
+                        result,
+                        request_id=request_id,
+                        worker_id=worker_id,
+                        peer_id=peer_id,
+                        artifacts=[
+                            artifact
+                            for artifact in artifacts
+                            if isinstance(artifact, dict)
+                        ],
+                    )
+                except KeyError:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "task_not_found"})
+                    return
+                if not ok:
+                    status = (
+                        HTTPStatus.NOT_FOUND
+                        if reason == "task_not_found"
+                        else HTTPStatus.FORBIDDEN
+                    )
+                    self._send_json(
+                        status,
+                        {"ok": False, "error": reason or "claim_owner_mismatch"},
+                    )
+                    return
+                service.relay_server.registry.update_heartbeat(peer_id)
+                self._send_json(HTTPStatus.OK, {"ok": True})
 
             def _handle_register(self) -> None:
                 payload = self._read_json()
