@@ -1,0 +1,90 @@
+"""Render canonical Agent context into executor-native prompt files."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import re
+from typing import Any
+
+
+_SECRET_PATTERNS = [
+    re.compile(r"sk-[A-Za-z0-9._-]+"),
+    re.compile(r"(?i)(api[_-]?key|token|secret)\s*[:=]\s*[A-Za-z0-9._-]+"),
+]
+
+
+def _redact_secret_text(value: str) -> str:
+    redacted = value
+    for pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub("[REDACTED_SECRET]", redacted)
+    return redacted
+
+
+@dataclass
+class CanonicalAgentContext:
+    """Executor-neutral context generated from server Agent config."""
+
+    agent_id: str
+    agent_name: str = ""
+    agent_md: str | None = None
+    system_append: str = ""
+    capabilities: list[str] = field(default_factory=list)
+    mcp_servers: list[str] = field(default_factory=list)
+    credential_refs: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class RenderedPrompt:
+    """Rendered prompt files and metadata for an executor runtime."""
+
+    files: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class ExecutorPromptRenderer:
+    """Render canonical Agent context to the instruction file each CLI expects."""
+
+    _FILES_BY_EXECUTOR = {
+        "codex": "AGENTS.md",
+        "claude": "CLAUDE.md",
+        "gemini": "GEMINI.md",
+        "reuleauxcoder": "AGENT_RUNTIME.md",
+    }
+
+    def render(self, executor: str, context: CanonicalAgentContext) -> RenderedPrompt:
+        executor_key = str(executor).strip().lower()
+        filename = self._FILES_BY_EXECUTOR.get(executor_key, "AGENT_RUNTIME.md")
+        markdown = self._render_markdown(context)
+        return RenderedPrompt(
+            files={filename: markdown},
+            metadata={
+                "executor": executor_key,
+                "agent_id": context.agent_id,
+                "credential_refs": dict(context.credential_refs),
+                "system_prompt": markdown,
+            },
+        )
+
+    def _render_markdown(self, context: CanonicalAgentContext) -> str:
+        lines = [
+            "# Agent Runtime Context",
+            "",
+            f"- Agent ID: `{context.agent_id}`",
+        ]
+        if context.agent_name:
+            lines.append(f"- Agent Name: {context.agent_name}")
+        if context.agent_md:
+            lines.append(f"- Agent Instructions: `{context.agent_md}`")
+        if context.capabilities:
+            lines.append("")
+            lines.append("## Capabilities")
+            lines.extend(f"- `{capability}`" for capability in context.capabilities)
+        if context.mcp_servers:
+            lines.append("")
+            lines.append("## MCP Servers")
+            lines.extend(f"- `{server}`" for server in context.mcp_servers)
+        if context.system_append:
+            lines.append("")
+            lines.append("## Additional Instructions")
+            lines.append(_redact_secret_text(context.system_append))
+        return "\n".join(lines).strip() + "\n"
