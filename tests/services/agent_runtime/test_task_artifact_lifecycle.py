@@ -106,3 +106,26 @@ def test_non_code_task_can_complete_with_report_artifact_only() -> None:
     assert state.artifacts["artifact-2"].branch_name is None
     assert state.artifacts["artifact-2"].pr_url is None
     assert state.artifacts["artifact-2"].merge_status is None
+
+
+def test_publish_failure_artifact_is_preserved_without_blocking_completion() -> None:
+    lifecycle = _lifecycle()
+
+    state = lifecycle.TaskLifecycleState.create(
+        task_id="task-3",
+        issue_id="issue-3",
+        agent_id="coder",
+    )
+    state.attach_artifact(
+        artifact_id="artifact-failed",
+        type="log",
+        status="failed",
+        content="gh pr create failed",
+        metadata={"stage": "pr_create"},
+    )
+    state.complete_task(output="executor completed")
+
+    assert state.task.status.value == "completed"
+    assert state.artifacts["artifact-failed"].status.value == "failed"
+    assert state.artifacts["artifact-failed"].metadata["stage"] == "pr_create"
+    assert state.issue_status.value == "done"
