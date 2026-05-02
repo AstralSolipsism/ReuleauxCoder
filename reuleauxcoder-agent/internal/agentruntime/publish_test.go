@@ -1,0 +1,296 @@
+package agentruntime
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+func TestPublishWorktreeCommitsPushesAndCreatesPR(t *testing.T) {
+	requireGit(t)
+	origin := createGitRepo(t)
+	worktree := createPublishWorktree(t, origin, "task-publish-create")
+	writeWorktreeFile(t, worktree.Path, "feature.txt", "created by agent\n")
+	installFakeGH(t)
+	t.Setenv("EZCODE_FAKE_GH_CREATE_URL", "https://example.test/pr/new")
+
+	result := PublishWorktree(context.Background(), RunRequest{
+		TaskID:   "task-publish-create",
+		AgentID:  "coder",
+		IssueID:  "issue-1",
+		Workdir:  worktree.Path,
+		Branch:   worktree.BranchName,
+		Metadata: map[string]any{"repo_url": origin, "pr_body": "body"},
+	}, PublishOptions{})
+
+	assertArtifact(t, result.Artifacts, "branch", "pushed")
+	assertArtifact(t, result.Artifacts, "pull_request", "pr_created")
+	assertRemoteBranch(t, worktree.Path, worktree.BranchName)
+	author := strings.TrimSpace(runGitOutput(t, worktree.Path, "log", "-1", "--format=%an <%ae>"))
+	if author != "EZCode Agent <agent@ezcode.local>" {
+		t.Fatalf("commit author = %q", author)
+	}
+	if !hasPublishStatus(result.Events, "branch_pushed") || !hasPublishStatus(result.Events, "pr_created") {
+		t.Fatalf("publish events missing: %#v", result.Events)
+	}
+}
+
+func TestPublishWorktreeReportsNoChanges(t *testing.T) {
+	requireGit(t)
+	origin := createGitRepo(t)
+	worktree := createPublishWorktree(t, origin, "task-publish-clean")
+
+	result := PublishWorktree(context.Background(), RunRequest{
+		TaskID:   "task-publish-clean",
+		AgentID:  "coder",
+		Workdir:  worktree.Path,
+		Branch:   worktree.BranchName,
+		Metadata: map[string]any{"repo_url": origin, "pr_body": "body"},
+	}, PublishOptions{})
+
+	artifact := assertArtifact(t, result.Artifacts, "report", "generated")
+	metadata, _ := artifact["metadata"].(map[string]any)
+	if metadata["no_changes"] != true {
+		t.Fatalf("expected no_changes metadata: %#v", artifact)
+	}
+	if hasPublishStatus(result.Events, "branch_pushed") {
+		t.Fatalf("clean worktree should not push: %#v", result.Events)
+	}
+}
+
+func TestPublishWorktreeReusesExistingPR(t *testing.T) {
+	requireGit(t)
+	origin := createGitRepo(t)
+	worktree := createPublishWorktree(t, origin, "task-publish-existing")
+	writeWorktreeFile(t, worktree.Path, "existing.txt", "change\n")
+	installFakeGH(t)
+	t.Setenv("EZCODE_FAKE_GH_EXISTING_URL", "https://example.test/pr/existing")
+
+	result := PublishWorktree(context.Background(), RunRequest{
+		TaskID:   "task-publish-existing",
+		AgentID:  "coder",
+		Workdir:  worktree.Path,
+		Branch:   worktree.BranchName,
+		Metadata: map[string]any{"repo_url": origin, "pr_body": "body"},
+	}, PublishOptions{})
+
+	artifact := assertArtifact(t, result.Artifacts, "pull_request", "pr_created")
+	if artifact["pr_url"] != "https://example.test/pr/existing" {
+		t.Fatalf("unexpected PR artifact: %#v", artifact)
+	}
+	metadata, _ := artifact["metadata"].(map[string]any)
+	if metadata["reused"] != true {
+		t.Fatalf("expected reused PR metadata: %#v", artifact)
+	}
+}
+
+func TestPublishWorktreeCanDisablePR(t *testing.T) {
+	requireGit(t)
+	origin := createGitRepo(t)
+	worktree := createPublishWorktree(t, origin, "task-publish-no-pr")
+	writeWorktreeFile(t, worktree.Path, "branch-only.txt", "change\n")
+	logPath := installFakeGH(t)
+
+	result := PublishWorktree(context.Background(), RunRequest{
+		TaskID:  "task-publish-no-pr",
+		AgentID: "coder",
+		Workdir: worktree.Path,
+		Branch:  worktree.BranchName,
+		Metadata: map[string]any{
+			"repo_url":   origin,
+			"pr_enabled": false,
+		},
+	}, PublishOptions{})
+
+	assertArtifact(t, result.Artifacts, "branch", "pushed")
+	if artifactOfType(result.Artifacts, "pull_request") != nil {
+		t.Fatalf("PR artifact should not be created: %#v", result.Artifacts)
+	}
+	if content, _ := os.ReadFile(logPath); len(content) > 0 {
+		t.Fatalf("gh should not be called when pr_enabled=false: %s", content)
+	}
+}
+
+func TestPublishWorktreePushAndGHFailuresBecomeArtifacts(t *testing.T) {
+	requireGit(t)
+	origin := createGitRepo(t)
+	worktree := createPublishWorktree(t, origin, "task-publish-push-fail")
+	writeWorktreeFile(t, worktree.Path, "push-fail.txt", "change\n")
+	runGit(t, worktree.Path, "remote", "set-url", "origin", localRepoURL(filepath.Join(t.TempDir(), "missing-origin")))
+
+	pushFailed := PublishWorktree(context.Background(), RunRequest{
+		TaskID:   "task-publish-push-fail",
+		AgentID:  "coder",
+		Workdir:  worktree.Path,
+		Branch:   worktree.BranchName,
+		Metadata: map[string]any{"repo_url": origin, "pr_body": "body"},
+	}, PublishOptions{})
+
+	failed := assertArtifact(t, pushFailed.Artifacts, "log", "failed")
+	metadata, _ := failed["metadata"].(map[string]any)
+	if metadata["stage"] != "push" {
+		t.Fatalf("expected push failure metadata: %#v", failed)
+	}
+
+	worktree = createPublishWorktree(t, origin, "task-publish-gh-fail")
+	writeWorktreeFile(t, worktree.Path, "gh-fail.txt", "change\n")
+	installFakeGH(t)
+	t.Setenv("EZCODE_FAKE_GH_FAIL_CREATE", "1")
+	ghFailed := PublishWorktree(context.Background(), RunRequest{
+		TaskID:   "task-publish-gh-fail",
+		AgentID:  "coder",
+		Workdir:  worktree.Path,
+		Branch:   worktree.BranchName,
+		Metadata: map[string]any{"repo_url": origin},
+	}, PublishOptions{})
+
+	assertArtifact(t, ghFailed.Artifacts, "branch", "pushed")
+	failed = assertArtifact(t, ghFailed.Artifacts, "log", "failed")
+	metadata, _ = failed["metadata"].(map[string]any)
+	if metadata["stage"] != "pr_create" {
+		t.Fatalf("expected pr_create failure metadata: %#v", failed)
+	}
+}
+
+func TestPublishWorktreeHonorsCancelledContext(t *testing.T) {
+	requireGit(t)
+	origin := createGitRepo(t)
+	worktree := createPublishWorktree(t, origin, "task-publish-cancel")
+	writeWorktreeFile(t, worktree.Path, "cancel.txt", "change\n")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result := PublishWorktree(ctx, RunRequest{
+		TaskID:   "task-publish-cancel",
+		AgentID:  "coder",
+		Workdir:  worktree.Path,
+		Branch:   worktree.BranchName,
+		Metadata: map[string]any{"repo_url": origin},
+	}, PublishOptions{})
+
+	assertArtifact(t, result.Artifacts, "log", "failed")
+	if !hasPublishStatus(result.Events, "publish_failed") {
+		t.Fatalf("cancelled publish did not emit failure: %#v", result.Events)
+	}
+}
+
+func createPublishWorktree(t *testing.T, origin, taskID string) *WorktreeResult {
+	t.Helper()
+	cache, err := NewRepoCache(filepath.Join(t.TempDir(), "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := cache.CreateWorktree(context.Background(), WorktreeParams{
+		WorkspaceID: "workspace",
+		RepoURL:     origin,
+		WorkDir:     filepath.Join(t.TempDir(), "work"),
+		AgentName:   "coder",
+		TaskID:      taskID,
+	})
+	if err != nil {
+		skipIfGitSandboxBlocked(t, err)
+		t.Fatal(err)
+	}
+	return worktree
+}
+
+func writeWorktreeFile(t *testing.T, workdir, name, content string) {
+	t.Helper()
+	path := filepath.Join(workdir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertRemoteBranch(t *testing.T, workdir, branch string) {
+	t.Helper()
+	out := runGitOutput(t, workdir, "ls-remote", "--heads", "origin", branch)
+	if !strings.Contains(out, branch) {
+		t.Fatalf("remote branch %q missing: %s", branch, out)
+	}
+}
+
+func assertArtifact(t *testing.T, artifacts []map[string]any, artifactType, status string) map[string]any {
+	t.Helper()
+	for _, artifact := range artifacts {
+		if artifact["type"] == artifactType && artifact["status"] == status {
+			return artifact
+		}
+	}
+	t.Fatalf("artifact type=%s status=%s missing: %#v", artifactType, status, artifacts)
+	return nil
+}
+
+func artifactOfType(artifacts []map[string]any, artifactType string) map[string]any {
+	for _, artifact := range artifacts {
+		if artifact["type"] == artifactType {
+			return artifact
+		}
+	}
+	return nil
+}
+
+func hasPublishStatus(events []Event, status string) bool {
+	for _, event := range events {
+		if event.Type == EventStatus && event.Data["status"] == status {
+			return true
+		}
+	}
+	return false
+}
+
+func installFakeGH(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "gh.log")
+	t.Setenv("EZCODE_FAKE_GH_LOG", logPath)
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(dir, "gh.bat")
+		content := "@echo off\r\n" +
+			"if \"%1\"==\"pr\" if \"%2\"==\"view\" goto view\r\n" +
+			"if \"%1\"==\"pr\" if \"%2\"==\"create\" goto create\r\n" +
+			"exit /b 2\r\n" +
+			":view\r\n" +
+			"echo pr view>>\"%EZCODE_FAKE_GH_LOG%\"\r\n" +
+			"if not \"%EZCODE_FAKE_GH_EXISTING_URL%\"==\"\" echo %EZCODE_FAKE_GH_EXISTING_URL%& exit /b 0\r\n" +
+			"exit /b 1\r\n" +
+			":create\r\n" +
+			"echo pr create>>\"%EZCODE_FAKE_GH_LOG%\"\r\n" +
+			"if \"%EZCODE_FAKE_GH_FAIL_CREATE%\"==\"1\" goto fail_create\r\n" +
+			"if not \"%EZCODE_FAKE_GH_CREATE_URL%\"==\"\" echo %EZCODE_FAKE_GH_CREATE_URL%& exit /b 0\r\n" +
+			"echo https://example.test/pr/new\r\n" +
+			"exit /b 0\r\n" +
+			":fail_create\r\n" +
+			"echo gh create failed 1>&2\r\n" +
+			"exit /b 1\r\n"
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		path := filepath.Join(dir, "gh")
+		content := "#!/bin/sh\n" +
+			"if [ \"$1\" = pr ] && [ \"$2\" = view ]; then\n" +
+			"  echo pr view >> \"$EZCODE_FAKE_GH_LOG\"\n" +
+			"  if [ -n \"$EZCODE_FAKE_GH_EXISTING_URL\" ]; then echo \"$EZCODE_FAKE_GH_EXISTING_URL\"; exit 0; fi\n" +
+			"  exit 1\n" +
+			"fi\n" +
+			"if [ \"$1\" = pr ] && [ \"$2\" = create ]; then\n" +
+			"  echo pr create >> \"$EZCODE_FAKE_GH_LOG\"\n" +
+			"  if [ \"$EZCODE_FAKE_GH_FAIL_CREATE\" = 1 ]; then echo gh create failed >&2; exit 1; fi\n" +
+			"  if [ -n \"$EZCODE_FAKE_GH_CREATE_URL\" ]; then echo \"$EZCODE_FAKE_GH_CREATE_URL\"; else echo https://example.test/pr/new; fi\n" +
+			"  exit 0\n" +
+			"fi\n" +
+			"exit 2\n"
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
