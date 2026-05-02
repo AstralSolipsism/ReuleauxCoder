@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import shutil
 import socket
 import subprocess
@@ -29,6 +30,7 @@ from reuleauxcoder.domain.config.models import (
     MCPLaunchConfig,
     MCPServerConfig,
 )
+from reuleauxcoder.services.agent_runtime.control_plane import AgentRuntimeControlPlane
 from reuleauxcoder.extensions.remote_exec.protocol import (
     ChatResponse,
     ChatStartRequest,
@@ -110,6 +112,43 @@ def _cleanup_provider_build_dir(provider: object) -> None:
     build_dir = getattr(provider, "_build_dir", None)
     if isinstance(build_dir, Path):
         shutil.rmtree(build_dir, ignore_errors=True)
+
+
+def _fake_gh_env(tmp_path: Path, *, pr_url: str = "https://example.test/pr/fake") -> tuple[dict[str, str], Path]:
+    gh_dir = tmp_path / "fake-gh"
+    gh_dir.mkdir()
+    log_path = gh_dir / "gh.log"
+    if os.name == "nt":
+        gh_path = gh_dir / "gh.bat"
+        gh_path.write_text(
+            "@echo off\r\n"
+            "if \"%1\"==\"pr\" if \"%2\"==\"view\" goto view\r\n"
+            "if \"%1\"==\"pr\" if \"%2\"==\"create\" goto create\r\n"
+            "exit /b 2\r\n"
+            ":view\r\n"
+            "echo pr view>>\"%EZCODE_FAKE_GH_LOG%\"\r\n"
+            "exit /b 1\r\n"
+            ":create\r\n"
+            "echo pr create>>\"%EZCODE_FAKE_GH_LOG%\"\r\n"
+            "echo %EZCODE_FAKE_GH_CREATE_URL%\r\n"
+            "exit /b 0\r\n",
+            encoding="utf-8",
+        )
+    else:
+        gh_path = gh_dir / "gh"
+        gh_path.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = pr ] && [ \"$2\" = view ]; then echo pr view >> \"$EZCODE_FAKE_GH_LOG\"; exit 1; fi\n"
+            "if [ \"$1\" = pr ] && [ \"$2\" = create ]; then echo pr create >> \"$EZCODE_FAKE_GH_LOG\"; echo \"$EZCODE_FAKE_GH_CREATE_URL\"; exit 0; fi\n"
+            "exit 2\n",
+            encoding="utf-8",
+        )
+        gh_path.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = str(gh_dir) + os.pathsep + env.get("PATH", "")
+    env["EZCODE_FAKE_GH_LOG"] = str(log_path)
+    env["EZCODE_FAKE_GH_CREATE_URL"] = pr_url
+    return env, log_path
 
 
 class TestRemoteRelayHTTPService:
@@ -1797,6 +1836,187 @@ class TestRemoteRelayHTTPService:
             service.stop()
             relay.stop()
 
+    def test_runtime_heartbeat_and_admin_cancel_roundtrip(self) -> None:
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        control = AgentRuntimeControlPlane()
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            admin_access_secret="admin-secret",
+            runtime_control_plane=control,
+        )
+        service.start()
+        try:
+            _, register_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/register",
+                {
+                    "bootstrap_token": relay.issue_bootstrap_token(ttl_sec=60),
+                    "cwd": "G:/repo/main",
+                    "workspace_root": "G:/repo/main",
+                    "capabilities": [
+                        "agent_runtime",
+                        "agent_runtime.local_workspace",
+                    ],
+                },
+            )
+            peer_token = register_body["payload"]["peer_token"]
+            admin_headers = {"X-RC-Admin-Secret": "admin-secret"}
+
+            _, submit_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/runtime/submit",
+                {
+                    "task_id": "task-http-runtime",
+                    "issue_id": "issue-1",
+                    "agent_id": "coder",
+                    "prompt": "run fake",
+                    "executor": "fake",
+                    "execution_location": "local_workspace",
+                    "workspace_root": "G:/repo/main",
+                },
+                headers=admin_headers,
+            )
+            assert submit_body["ok"] is True
+
+            _, claim_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/runtime/claim",
+                {
+                    "peer_token": peer_token,
+                    "worker_id": "worker-1",
+                    "executors": ["fake"],
+                },
+            )
+            claim = claim_body["claim"]
+            assert claim is not None
+            assert claim["task"]["id"] == "task-http-runtime"
+
+            _, heartbeat_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/runtime/heartbeat",
+                {
+                    "peer_token": peer_token,
+                    "request_id": claim["request_id"],
+                    "task_id": "task-http-runtime",
+                    "worker_id": "worker-1",
+                },
+            )
+            assert heartbeat_body["ok"] is True
+            assert heartbeat_body["cancel_requested"] is False
+
+            _, session_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/runtime/session",
+                {
+                    "peer_token": peer_token,
+                    "request_id": claim["request_id"],
+                    "task_id": "task-http-runtime",
+                    "worker_id": "worker-1",
+                    "workdir": "G:/repo/main/.rcoder/agent-runtime/ws/task/workdir/repo",
+                    "branch": "agent/coder/task-http",
+                    "repo_url": "file:///repo/main",
+                    "cache_path": "G:/repo/main/.rcoder/agent-runtime/repos/ws/repo.git",
+                },
+            )
+            assert session_body["ok"] is True
+
+            _, event_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/runtime/event",
+                {
+                    "peer_token": peer_token,
+                    "request_id": claim["request_id"],
+                    "task_id": "task-http-runtime",
+                    "worker_id": "worker-1",
+                    "type": "text",
+                    "text": "hello",
+                },
+            )
+            assert event_body["ok"] is True
+
+            try:
+                _json_request(
+                    "POST",
+                    f"{service.base_url}/remote/runtime/event",
+                    {
+                        "peer_token": peer_token,
+                        "request_id": claim["request_id"],
+                        "task_id": "task-http-runtime",
+                        "worker_id": "other-worker",
+                        "type": "text",
+                        "text": "bad",
+                    },
+                )
+                raise AssertionError("non-owner runtime event should be rejected")
+            except HTTPError as exc:
+                assert exc.code == 403
+
+            _, cancel_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/runtime/cancel",
+                {"task_id": "task-http-runtime", "reason": "user_stop"},
+                headers=admin_headers,
+            )
+            assert cancel_body == {"ok": True, "task_id": "task-http-runtime"}
+
+            _, cancelled_heartbeat = _json_request(
+                "POST",
+                f"{service.base_url}/remote/runtime/heartbeat",
+                {
+                    "peer_token": peer_token,
+                    "request_id": claim["request_id"],
+                    "task_id": "task-http-runtime",
+                    "worker_id": "worker-1",
+                },
+            )
+            assert cancelled_heartbeat["ok"] is True
+            assert cancelled_heartbeat["cancel_requested"] is True
+            assert cancelled_heartbeat["reason"] == "user_stop"
+
+            _, complete_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/runtime/complete",
+                {
+                    "peer_token": peer_token,
+                    "request_id": claim["request_id"],
+                    "task_id": "task-http-runtime",
+                    "worker_id": "worker-1",
+                    "status": "cancelled",
+                    "output": "",
+                    "error": "execution cancelled",
+                    "events": [
+                        {
+                            "request_id": claim["request_id"],
+                            "task_id": "task-http-runtime",
+                            "worker_id": "worker-1",
+                            "type": "status",
+                            "data": {"status": "cancelled"},
+                        }
+                    ],
+                },
+            )
+            assert complete_body["ok"] is True
+
+            _, retry_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/runtime/retry",
+                {
+                    "task_id": "task-http-runtime",
+                    "new_task_id": "task-http-runtime-retry",
+                },
+                headers=admin_headers,
+            )
+            assert retry_body["ok"] is True
+            assert retry_body["task"]["id"] == "task-http-runtime-retry"
+            assert retry_body["task"]["status"] == "queued"
+            assert retry_body["task"]["metadata"]["retry_of"] == "task-http-runtime"
+        finally:
+            service.stop()
+            relay.stop()
+
     def test_default_artifact_provider_prefers_prebuilt_binary(
         self, tmp_path: Path
     ) -> None:
@@ -1882,6 +2102,158 @@ class TestRemoteRelayHTTPService:
                 assert body["error"] == "artifact_unavailable"
                 assert "no prebuilt binary found" in body["message"]
         finally:
+            service.stop()
+            relay.stop()
+
+    @pytest.mark.skipif(not _GO_AVAILABLE, reason="go toolchain is not installed")
+    def test_go_agent_runtime_fake_daemon_worktree_end_to_end(
+        self, tmp_path: Path
+    ) -> None:
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        control = AgentRuntimeControlPlane()
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            admin_access_secret="admin-secret",
+            runtime_control_plane=control,
+        )
+        service.start()
+        agent_binary = _build_go_agent_binary()
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, check=True, timeout=30)
+        subprocess.run(["git", "checkout", "-B", "main"], cwd=repo, check=True, timeout=30)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.invalid"],
+            cwd=repo,
+            check=True,
+            timeout=30,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test User"],
+            cwd=repo,
+            check=True,
+            timeout=30,
+        )
+        (repo / "tracked.txt").write_text("initial\n")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True, timeout=30)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, timeout=30)
+        agent_env, gh_log = _fake_gh_env(tmp_path)
+        proc = subprocess.Popen(
+            [
+                str(agent_binary),
+                "--host",
+                service.base_url,
+                "--bootstrap-token",
+                relay.issue_bootstrap_token(ttl_sec=60),
+                "--cwd",
+                str(repo),
+                "--workspace-root",
+                str(repo),
+                "--poll-interval",
+                "100ms",
+                "--agent-runtime",
+                "--runtime-worker-id",
+                "worker-runtime-1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=agent_env,
+        )
+        try:
+            deadline = time.time() + 10
+            while time.time() < deadline and not relay.registry.list_online():
+                time.sleep(0.1)
+            assert relay.registry.list_online()
+
+            admin_headers = {"X-RC-Admin-Secret": "admin-secret"}
+            _, submit = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/runtime/submit",
+                {
+                    "task_id": "task-go-runtime-worktree",
+                    "issue_id": "issue-1",
+                    "agent_id": "coder",
+                    "prompt": "hello from fake runtime",
+                    "executor": "fake",
+                    "execution_location": "daemon_worktree",
+                    "metadata": {
+                        "repo_url": repo.resolve().as_uri(),
+                        "workspace_id": "test-workspace",
+                        "prompt_files": {
+                            "AGENTS.md": "Use project conventions.\n",
+                        },
+                        "fake_files": {
+                            "agent-output.txt": "created by fake executor\n",
+                        },
+                        "pr_body": "body",
+                    },
+                },
+                headers=admin_headers,
+            )
+            assert submit["ok"] is True
+
+            deadline = time.time() + 25
+            task = control.get_task("task-go-runtime-worktree")
+            while time.time() < deadline and not task.is_terminal:
+                time.sleep(0.2)
+                task = control.get_task("task-go-runtime-worktree")
+
+            assert task.status.value == "completed"
+            assert task.output == "hello from fake runtime"
+            assert task.workdir is not None
+            assert task.branch_name is not None
+            workdir = Path(task.workdir)
+            assert (workdir / "tracked.txt").exists()
+            assert (workdir / "agent-output.txt").read_text() == "created by fake executor\n"
+            assert (workdir / "AGENTS.md").read_text() == "Use project conventions.\n"
+            artifacts = control.artifacts_to_dict("task-go-runtime-worktree")
+            artifact_types = {artifact["type"]: artifact for artifact in artifacts}
+            assert artifact_types["branch"]["status"] == "pushed"
+            assert artifact_types["pull_request"]["status"] == "pr_created"
+            assert artifact_types["pull_request"]["pr_url"] == "https://example.test/pr/fake"
+            assert task.pr_url == "https://example.test/pr/fake"
+            pushed = subprocess.run(
+                ["git", "ls-remote", "--heads", "origin", task.branch_name],
+                cwd=workdir,
+                check=True,
+                timeout=30,
+                capture_output=True,
+                text=True,
+            )
+            assert task.branch_name in pushed.stdout
+            assert "pr create" in gh_log.read_text(encoding="utf-8")
+            events = control.list_events("task-go-runtime-worktree")
+            assert any(event.type == "session_pinned" for event in events)
+            assert any(
+                event.type == "status"
+                and event.payload.get("data", {}).get("status") == "worktree_ready"
+                for event in events
+            )
+            assert any(
+                event.type == "text" and event.payload.get("text") == "hello from fake runtime"
+                for event in events
+            )
+            assert any(
+                event.type == "status"
+                and event.payload.get("data", {}).get("status") == "branch_pushed"
+                for event in events
+            )
+            assert any(
+                event.type == "status"
+                and event.payload.get("data", {}).get("status") == "pr_created"
+                for event in events
+            )
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
             service.stop()
             relay.stop()
 
