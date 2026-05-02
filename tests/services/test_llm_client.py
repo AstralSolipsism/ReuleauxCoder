@@ -1,7 +1,10 @@
 import json
 
+from reuleauxcoder.domain.hooks.registry import HookRegistry
+from reuleauxcoder.domain.hooks.types import HookPoint
+from reuleauxcoder.domain.hooks.builtin.project_context import ProjectContextHook
 from reuleauxcoder.interfaces.events import UIEventBus, UIEventLevel
-from reuleauxcoder.services.llm.client import LLM
+from reuleauxcoder.services.llm.client import LLM, _merge_hook_request_overrides
 from reuleauxcoder.services.llm.sanitizer import sanitize_messages_for_llm
 
 
@@ -335,6 +338,91 @@ class _FakeChunk:
                 )
             )
         ]
+
+
+def test_llm_chat_applies_project_context_hook_to_provider_request(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "AGENT.md").write_text(
+        "Use the EZCode project context marker: hook-injected-context.",
+        encoding="utf-8",
+    )
+    captured = {}
+    registry = HookRegistry()
+    registry.register(HookPoint.BEFORE_LLM_REQUEST, ProjectContextHook())
+
+    llm = LLM(model="demo-model", api_key="sk-test-12345678")
+
+    def _fake_call_with_retry(params):
+        captured.update(params)
+        return iter(
+            [
+                _FakeChunk(content="Hello"),
+                _FakeChunk(usage=_FakeUsage(prompt_tokens=1, completion_tokens=1)),
+            ]
+        )
+
+    llm._call_with_retry = _fake_call_with_retry  # type: ignore[method-assign]
+
+    response = llm.chat(
+        [{"role": "user", "content": "Hi"}],
+        hook_registry=registry,
+    )
+
+    assert response.content == "Hello"
+    assert any(
+        "hook-injected-context" in str(message.get("content") or "")
+        for message in captured["messages"]
+    )
+
+
+def test_hook_request_override_merge_protects_provider_payload_keys() -> None:
+    openai_merged = _merge_hook_request_overrides(
+        "openai_chat",
+        {
+            "messages": [{"role": "system", "content": "rebuilt"}],
+            "tools": [{"function": {"name": "rebuilt_tool"}}],
+            "temperature": 0.0,
+        },
+        {
+            "messages": [{"role": "user", "content": "stale"}],
+            "tools": [{"function": {"name": "stale_tool"}}],
+            "temperature": 0.5,
+        },
+        {
+            "messages": [{"role": "user", "content": "stale"}],
+            "tools": [{"function": {"name": "stale_tool"}}],
+            "temperature": 0.0,
+        },
+    )
+    assert openai_merged["messages"][0]["content"] == "rebuilt"
+    assert openai_merged["tools"][0]["function"]["name"] == "rebuilt_tool"
+    assert openai_merged["temperature"] == 0.5
+
+    anthropic_merged = _merge_hook_request_overrides(
+        "anthropic_messages",
+        {"system": "rebuilt", "messages": ["rebuilt"], "tools": ["rebuilt"]},
+        {"system": "stale", "messages": ["stale"], "tools": ["stale"]},
+        {"system": "stale", "messages": ["stale"], "tools": ["stale"]},
+    )
+    assert anthropic_merged == {
+        "system": "rebuilt",
+        "messages": ["rebuilt"],
+        "tools": ["rebuilt"],
+    }
+
+    responses_merged = _merge_hook_request_overrides(
+        "openai_responses",
+        {"input": ["rebuilt"], "tools": ["rebuilt"], "store": False},
+        {"input": ["stale"], "tools": ["stale"], "store": True},
+        {"input": ["stale"], "tools": ["stale"], "store": False},
+    )
+    assert responses_merged == {
+        "input": ["rebuilt"],
+        "tools": ["rebuilt"],
+        "store": True,
+    }
 
 
 def test_llm_chat_sends_explicit_thinking_enabled_state() -> None:
