@@ -146,7 +146,8 @@ def _handle_show_help(command, ctx) -> CommandResult:
 
 
 def _handle_exit(command, ctx) -> CommandResult:
-    if ctx.agent.messages:
+    session_id = command.current_session_id
+    if getattr(ctx.config, "session_auto_save", True) and ctx.agent.messages:
         sid = SessionStore(ctx.sessions_dir).save(
             ctx.agent.messages,
             getattr(ctx.agent.llm, "model", ctx.config.model),
@@ -158,8 +159,9 @@ def _handle_exit(command, ctx) -> CommandResult:
             runtime_state=build_session_runtime_state(ctx.config, ctx.agent),
             fingerprint=get_session_fingerprint(ctx.config, ctx.agent),
         )
+        session_id = sid
         ctx.ui_bus.info(f"Session auto-saved: {sid}")
-    return CommandResult(action="exit", session_id=command.current_session_id)
+    return CommandResult(action="exit", session_id=session_id)
 
 
 def _handle_reset(command, ctx) -> CommandResult:
