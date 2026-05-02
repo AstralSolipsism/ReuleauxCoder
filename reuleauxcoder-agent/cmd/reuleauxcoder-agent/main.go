@@ -12,14 +12,16 @@ import (
 
 func main() {
 	var (
-		host           string
-		bootstrapToken string
-		cwd            string
-		workspaceRoot  string
-		peerInfoFile   string
-		pollInterval   time.Duration
-		interactive    bool
-		envSync        bool
+		host            string
+		bootstrapToken  string
+		cwd             string
+		workspaceRoot   string
+		peerInfoFile    string
+		pollInterval    time.Duration
+		interactive     bool
+		envSync         bool
+		agentRuntime    bool
+		runtimeWorkerID string
 	)
 
 	flag.StringVar(&host, "host", "", "Remote relay host base URL")
@@ -30,6 +32,8 @@ func main() {
 	flag.DurationVar(&pollInterval, "poll-interval", 500*time.Millisecond, "Polling interval when no work is available")
 	flag.BoolVar(&interactive, "interactive", false, "Run interactive chat loop proxied through host")
 	flag.BoolVar(&envSync, "env-sync", false, "Run one lightweight CLI environment sync chat and exit")
+	flag.BoolVar(&agentRuntime, "agent-runtime", false, "Run Agent Runtime worker loop")
+	flag.StringVar(&runtimeWorkerID, "runtime-worker-id", "", "Stable Agent Runtime worker id")
 	flag.Parse()
 
 	if host == "" {
@@ -42,14 +46,16 @@ func main() {
 	}
 
 	r := runner.New(runner.Config{
-		Host:           host,
-		BootstrapToken: bootstrapToken,
-		CWD:            cwd,
-		WorkspaceRoot:  workspaceRoot,
-		PeerInfoFile:   peerInfoFile,
-		PollInterval:   pollInterval,
-		Interactive:    interactive,
-		EnvSync:        envSync,
+		Host:            host,
+		BootstrapToken:  bootstrapToken,
+		CWD:             cwd,
+		WorkspaceRoot:   workspaceRoot,
+		PeerInfoFile:    peerInfoFile,
+		PollInterval:    pollInterval,
+		Interactive:     interactive,
+		EnvSync:         envSync,
+		AgentRuntime:    agentRuntime,
+		RuntimeWorkerID: runtimeWorkerID,
 	})
 	if err := r.Run(context.Background()); err != nil {
 		log.Printf("agent exited with error: %v", err)

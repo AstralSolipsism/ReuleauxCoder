@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -15,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/RC-CHN/ReuleauxCoder/reuleauxcoder-agent/internal/agentruntime"
 	"github.com/RC-CHN/ReuleauxCoder/reuleauxcoder-agent/internal/client"
 	"github.com/RC-CHN/ReuleauxCoder/reuleauxcoder-agent/internal/mcp"
 	"github.com/RC-CHN/ReuleauxCoder/reuleauxcoder-agent/internal/protocol"
@@ -23,14 +26,16 @@ import (
 )
 
 type Config struct {
-	Host           string
-	BootstrapToken string
-	CWD            string
-	WorkspaceRoot  string
-	PeerInfoFile   string
-	PollInterval   time.Duration
-	Interactive    bool
-	EnvSync        bool
+	Host            string
+	BootstrapToken  string
+	CWD             string
+	WorkspaceRoot   string
+	PeerInfoFile    string
+	PollInterval    time.Duration
+	Interactive     bool
+	EnvSync         bool
+	AgentRuntime    bool
+	RuntimeWorkerID string
 }
 
 type Runner struct {
@@ -74,16 +79,33 @@ func (r *Runner) Run(ctx context.Context) error {
 		workspaceRoot = cwd
 	}
 
+	capabilities := []string{"shell", "read_file", "write_file", "edit_file", "glob", "grep", "tool_preview"}
+	hostInfo := map[string]any{
+		"os":       runtimeOS(),
+		"arch":     runtimeArch(),
+		"hostname": runtimeHostname(),
+	}
+	if r.cfg.AgentRuntime {
+		capabilities = append(
+			capabilities,
+			"agent_runtime",
+			"agent_runtime.local_workspace",
+			"agent_runtime.daemon_worktree",
+			"agent_runtime.remote_server",
+		)
+		hostInfo["agent_runtime"] = map[string]any{
+			"executors":           runtimeExecutors(),
+			"execution_locations": runtimeExecutionLocations(),
+			"workspace_root":      workspaceRoot,
+			"runtime_root":        filepath.Join(workspaceRoot, ".rcoder", "agent-runtime"),
+		}
+	}
 	registerResp, err := r.client.Register(ctx, protocol.RegisterRequest{
 		BootstrapToken: r.cfg.BootstrapToken,
 		CWD:            cwd,
 		WorkspaceRoot:  workspaceRoot,
-		Capabilities:   []string{"shell", "read_file", "write_file", "edit_file", "glob", "grep", "tool_preview"},
-		HostInfoMin: map[string]any{
-			"os":       runtimeOS(),
-			"arch":     runtimeArch(),
-			"hostname": runtimeHostname(),
-		},
+		Capabilities:   capabilities,
+		HostInfoMin:    hostInfo,
 	})
 	if err != nil {
 		return fmt.Errorf("register failed: %w", err)
@@ -135,6 +157,10 @@ func (r *Runner) Run(ctx context.Context) error {
 		default:
 		}
 		return err
+	}
+
+	if r.cfg.AgentRuntime {
+		return r.runAgentRuntimeLoop(childCtx, registerResp.PeerToken, pollInterval, workspaceRoot)
 	}
 
 	r.mcp = mcp.NewSupervisor(r.client, registerResp.PeerToken, workspaceRoot)
@@ -197,6 +223,419 @@ func writePeerInfoFile(path string, resp protocol.RegisterResponse) error {
 		return err
 	}
 	return os.WriteFile(path, payload, 0o600)
+}
+
+func (r *Runner) runAgentRuntimeLoop(ctx context.Context, peerToken string, pollInterval time.Duration, workspaceRoot string) error {
+	workerID := r.cfg.RuntimeWorkerID
+	if strings.TrimSpace(workerID) == "" {
+		workerID = "peer-runtime"
+	}
+	backend := agentruntime.SubprocessBackend{}
+	runtimeRoot := filepath.Join(workspaceRoot, ".rcoder", "agent-runtime")
+	workspaceID := runtimeWorkspaceID(workspaceRoot)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		claimCtx, cancelClaim := context.WithTimeout(ctx, 30*time.Second)
+		claimResp, err := r.client.ClaimAgentRuntimeTask(claimCtx, protocol.AgentRuntimeClaimRequest{
+			PeerToken: peerToken,
+			WorkerID:  workerID,
+			Executors: runtimeExecutors(),
+		})
+		cancelClaim()
+		if err != nil {
+			return fmt.Errorf("agent runtime claim failed: %w", err)
+		}
+		if claimResp.Claim == nil {
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		claim := claimResp.Claim
+		req := runtimeRunRequest(claim.ExecutorRequest)
+		taskCtx, taskCancel := context.WithCancel(ctx)
+		r.registerActiveRequest(claim.RequestID, taskCancel)
+		go r.runtimeHeartbeatLoop(taskCtx, peerToken, workerID, claim.RequestID, req.TaskID, taskCancel)
+		var result agentruntime.RunResult
+		var runErr error
+		manager, resolved, resolveErr := agentruntime.ResolveRunWithExecEnv(req, claim.RuntimeSnapshot, runtimeRoot, workspaceID)
+		if resolveErr == nil {
+			req = resolved.Request
+			resolved, resolveErr = r.prepareAgentRuntimeRun(
+				taskCtx,
+				peerToken,
+				claim.RequestID,
+				workerID,
+				workspaceRoot,
+				runtimeRoot,
+				manager,
+				resolved,
+			)
+			req = resolved.Request
+		}
+		if resolveErr == nil {
+			if err := r.sendRuntimeEvent(context.Background(), peerToken, claim.RequestID, workerID, req.TaskID, agentruntime.Event{
+				Type: agentruntime.EventStatus,
+				Data: map[string]any{
+					"status":     "running",
+					"request_id": claim.RequestID,
+					"workdir":    req.Workdir,
+					"branch":     req.Branch,
+				},
+			}); err != nil {
+				log.Printf("agent runtime start event failed: %v", err)
+			}
+		}
+		if resolveErr != nil {
+			runErr = resolveErr
+			status := "failed"
+			var blocked blockedRunError
+			if errors.As(resolveErr, &blocked) {
+				status = "blocked"
+			}
+			event := agentruntime.Event{
+				Type: agentruntime.EventStatus,
+				Data: map[string]any{
+					"status": status,
+					"error":  resolveErr.Error(),
+				},
+			}
+			result = agentruntime.RunResult{
+				TaskID: req.TaskID,
+				Status: status,
+				Error:  resolveErr.Error(),
+				Events: []agentruntime.Event{event},
+			}
+		} else {
+			session, startErr := backend.Start(taskCtx, resolved.Request, resolved.Options)
+			if startErr != nil {
+				runErr = startErr
+				result = agentruntime.RunResult{TaskID: req.TaskID, Status: "failed", Error: startErr.Error()}
+			} else {
+				streamedEvents := []agentruntime.Event{}
+				pinnedExecutorSessionID := ""
+				for event := range session.Events {
+					streamedEvents = append(streamedEvents, event)
+					if threadID := eventThreadID(event); threadID != "" && threadID != pinnedExecutorSessionID {
+						pinnedExecutorSessionID = threadID
+						if err := r.pinRuntimeSession(context.Background(), peerToken, claim.RequestID, workerID, req.TaskID, "", "", "", "", threadID); err != nil {
+							log.Printf("agent runtime executor session pin failed: %v", err)
+						}
+					}
+					if err := r.sendRuntimeEvent(context.Background(), peerToken, claim.RequestID, workerID, req.TaskID, event); err != nil {
+						log.Printf("agent runtime event failed: %v", err)
+					}
+				}
+				select {
+				case result = <-session.Result:
+				default:
+					result = agentruntime.RunResult{TaskID: req.TaskID, Status: "failed", Error: "executor session ended without result"}
+				}
+				if len(result.Events) == 0 && len(streamedEvents) > 0 {
+					result.Events = streamedEvents
+				}
+			}
+		}
+		publishArtifacts := []map[string]any{}
+		if taskCtx.Err() == nil && result.Status == "completed" && runtimeNeedsWorktree(req.ExecutionLocation) {
+			publish := agentruntime.PublishWorktree(taskCtx, req, agentruntime.PublishOptions{
+				EventSink: func(event agentruntime.Event) {
+					if err := r.sendRuntimeEvent(context.Background(), peerToken, claim.RequestID, workerID, req.TaskID, event); err != nil {
+						log.Printf("agent runtime publish event failed: %v", err)
+					}
+				},
+			})
+			publishArtifacts = append(publishArtifacts, publish.Artifacts...)
+			result.Events = append(result.Events, publish.Events...)
+		}
+		cancelledBeforeStop := taskCtx.Err() == context.Canceled
+		taskCancel()
+		r.unregisterActiveRequest(claim.RequestID)
+		if cancelledBeforeStop && result.Status != "timeout" {
+			result.Status = "cancelled"
+			if result.Error == "" {
+				result.Error = "execution cancelled"
+			}
+		}
+		completeReq := protocol.AgentRuntimeCompleteRequest{
+			PeerToken: peerToken,
+			RequestID: claim.RequestID,
+			TaskID:    req.TaskID,
+			WorkerID:  workerID,
+			Status:    result.Status,
+			Output:    result.Output,
+			Error:     result.Error,
+			SessionID: result.ExecutorSessionID,
+			Usage:     runtimeUsage(result.Usage),
+			Artifacts: publishArtifacts,
+			Events:    runtimeEvents(peerToken, claim.RequestID, workerID, req.TaskID, result.Events),
+		}
+		if runErr != nil && completeReq.Error == "" {
+			completeReq.Error = runErr.Error()
+			if completeReq.Status == "" {
+				completeReq.Status = "failed"
+			}
+		}
+		completeCtx, cancelComplete := context.WithTimeout(context.Background(), 30*time.Second)
+		_, completeErr := r.client.CompleteAgentRuntimeTask(completeCtx, completeReq)
+		cancelComplete()
+		if completeErr != nil {
+			return fmt.Errorf("agent runtime complete failed: %w", completeErr)
+		}
+	}
+}
+
+func (r *Runner) runtimeHeartbeatLoop(ctx context.Context, peerToken, workerID, requestID, taskID string, cancel context.CancelFunc) {
+	send := func() bool {
+		heartbeatCtx, cancelHeartbeat := context.WithTimeout(context.Background(), 10*time.Second)
+		resp, err := r.client.AgentRuntimeHeartbeat(heartbeatCtx, protocol.AgentRuntimeHeartbeatRequest{
+			PeerToken: peerToken,
+			RequestID: requestID,
+			TaskID:    taskID,
+			WorkerID:  workerID,
+			LeaseSec:  15,
+		})
+		cancelHeartbeat()
+		if err != nil {
+			log.Printf("agent runtime heartbeat failed: %v", err)
+			return false
+		}
+		if !resp.OK {
+			log.Printf("agent runtime heartbeat rejected task_id=%s reason=%s", taskID, resp.Reason)
+			cancel()
+			return true
+		}
+		if resp.CancelRequested {
+			log.Printf("agent runtime cancellation requested task_id=%s reason=%s", taskID, resp.Reason)
+			cancel()
+			return true
+		}
+		return false
+	}
+	if send() {
+		return
+	}
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if send() {
+				return
+			}
+		}
+	}
+}
+
+type blockedRunError struct {
+	reason string
+}
+
+func (e blockedRunError) Error() string {
+	return e.reason
+}
+
+func (r *Runner) prepareAgentRuntimeRun(
+	ctx context.Context,
+	peerToken string,
+	requestID string,
+	workerID string,
+	workspaceRoot string,
+	runtimeRoot string,
+	manager *agentruntime.ExecEnvManager,
+	resolved agentruntime.ResolvedRun,
+) (agentruntime.ResolvedRun, error) {
+	req := resolved.Request
+	if runtimeNeedsWorktree(req.ExecutionLocation) {
+		if err := r.sendRuntimeEvent(context.Background(), peerToken, requestID, workerID, req.TaskID, agentruntime.Event{
+			Type: agentruntime.EventStatus,
+			Data: map[string]any{"status": "preparing_worktree"},
+		}); err != nil {
+			log.Printf("agent runtime preparing event failed: %v", err)
+		}
+		repoURL, err := r.resolveRepoURL(ctx, req, workspaceRoot)
+		if err != nil {
+			return resolved, err
+		}
+		repoWorkspaceID := metadataString(req.Metadata, "workspace_id")
+		if repoWorkspaceID == "" {
+			repoWorkspaceID = runtimeWorkspaceID(workspaceRoot)
+		}
+		cache, err := agentruntime.NewRepoCache(filepath.Join(runtimeRoot, "repos"))
+		if err != nil {
+			return resolved, err
+		}
+		worktree, err := cache.CreateWorktree(ctx, agentruntime.WorktreeParams{
+			WorkspaceID: repoWorkspaceID,
+			RepoURL:     repoURL,
+			WorkDir:     resolved.Plan.WorkDir,
+			AgentName:   req.AgentID,
+			TaskID:      req.TaskID,
+		})
+		if err != nil {
+			return resolved, err
+		}
+		resolved.Request.Workdir = worktree.Path
+		resolved.Request.Branch = worktree.BranchName
+		prepared, err := agentruntime.PrepareResolvedRun(manager, resolved, agentruntime.PromptFilesFromMetadata(resolved.Request.Metadata))
+		if err != nil {
+			return resolved, err
+		}
+		if err := r.pinRuntimeSession(context.Background(), peerToken, requestID, workerID, req.TaskID, worktree.Path, worktree.BranchName, worktree.RepoURL, worktree.CachePath, ""); err != nil {
+			log.Printf("agent runtime worktree session pin failed: %v", err)
+		}
+		if err := r.sendRuntimeEvent(context.Background(), peerToken, requestID, workerID, req.TaskID, agentruntime.Event{
+			Type: agentruntime.EventStatus,
+			Data: map[string]any{
+				"status":     "worktree_ready",
+				"workdir":    worktree.Path,
+				"branch":     worktree.BranchName,
+				"repo_url":   worktree.RepoURL,
+				"cache_path": worktree.CachePath,
+			},
+		}); err != nil {
+			log.Printf("agent runtime worktree event failed: %v", err)
+		}
+		return prepared, nil
+	}
+	return agentruntime.PrepareResolvedRun(manager, resolved, agentruntime.PromptFilesFromMetadata(resolved.Request.Metadata))
+}
+
+func runtimeNeedsWorktree(location string) bool {
+	return strings.EqualFold(location, "daemon_worktree") || strings.EqualFold(location, "remote_server")
+}
+
+func (r *Runner) resolveRepoURL(ctx context.Context, req agentruntime.RunRequest, workspaceRoot string) (string, error) {
+	if repoURL := metadataString(req.Metadata, "repo_url"); repoURL != "" {
+		return repoURL, nil
+	}
+	if root := metadataString(req.Metadata, "workspace_root"); root != "" {
+		if repoURL, err := gitOriginURL(ctx, root); err == nil && strings.TrimSpace(repoURL) != "" {
+			return strings.TrimSpace(repoURL), nil
+		}
+	}
+	if repoURL, err := gitOriginURL(ctx, workspaceRoot); err == nil && strings.TrimSpace(repoURL) != "" {
+		return strings.TrimSpace(repoURL), nil
+	}
+	return "", blockedRunError{reason: "repo_url missing and git origin could not be inferred from workspace_root"}
+}
+
+func gitOriginURL(ctx context.Context, workspaceRoot string) (string, error) {
+	if strings.TrimSpace(workspaceRoot) == "" {
+		return "", fmt.Errorf("workspace_root is empty")
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", workspaceRoot, "remote", "get-url", "origin")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git remote get-url origin failed: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func metadataString(metadata map[string]any, key string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	if value, ok := metadata[key]; ok && value != nil {
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
+	return ""
+}
+
+func eventThreadID(event agentruntime.Event) string {
+	if event.Data == nil {
+		return ""
+	}
+	for _, key := range []string{"thread_id", "threadId", "executor_session_id"} {
+		if value, ok := event.Data[key]; ok && value != nil {
+			if text := strings.TrimSpace(fmt.Sprint(value)); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func (r *Runner) pinRuntimeSession(ctx context.Context, peerToken, requestID, workerID, taskID, workdir, branch, repoURL, cachePath, executorSessionID string) error {
+	sessionCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err := r.client.PinAgentRuntimeSession(sessionCtx, protocol.AgentRuntimeSessionPinRequest{
+		PeerToken:         peerToken,
+		RequestID:         requestID,
+		TaskID:            taskID,
+		WorkerID:          workerID,
+		Workdir:           workdir,
+		Branch:            branch,
+		RepoURL:           repoURL,
+		CachePath:         cachePath,
+		ExecutorSessionID: executorSessionID,
+	})
+	return err
+}
+
+func (r *Runner) sendRuntimeEvent(ctx context.Context, peerToken, requestID, workerID, taskID string, event agentruntime.Event) error {
+	eventCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return r.client.SendAgentRuntimeEvent(eventCtx, protocol.AgentRuntimeEventReport{
+		PeerToken: peerToken,
+		RequestID: requestID,
+		TaskID:    taskID,
+		WorkerID:  workerID,
+		Type:      string(event.Type),
+		Text:      event.Text,
+		Data:      event.Data,
+	})
+}
+
+func runtimeRunRequest(req protocol.ExecutorRequest) agentruntime.RunRequest {
+	return agentruntime.RunRequest{
+		TaskID:            req.TaskID,
+		AgentID:           req.AgentID,
+		Executor:          req.Executor,
+		Prompt:            req.Prompt,
+		ExecutionLocation: req.ExecutionLocation,
+		IssueID:           req.IssueID,
+		RuntimeProfileID:  req.RuntimeProfileID,
+		Workdir:           req.Workdir,
+		Branch:            req.Branch,
+		Model:             req.Model,
+		ExecutorSessionID: req.ExecutorSessionID,
+		Metadata:          req.Metadata,
+	}
+}
+
+func runtimeEvents(peerToken, requestID, workerID, taskID string, events []agentruntime.Event) []protocol.AgentRuntimeEventReport {
+	reports := make([]protocol.AgentRuntimeEventReport, 0, len(events))
+	for _, event := range events {
+		reports = append(reports, protocol.AgentRuntimeEventReport{
+			PeerToken: peerToken,
+			RequestID: requestID,
+			TaskID:    taskID,
+			WorkerID:  workerID,
+			Type:      string(event.Type),
+			Text:      event.Text,
+			Data:      event.Data,
+		})
+	}
+	return reports
+}
+
+func runtimeUsage(usage map[string]agentruntime.TokenUsage) map[string]any {
+	if len(usage) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(usage))
+	for key, val := range usage {
+		out[key] = val
+	}
+	return out
 }
 
 func (r *Runner) runPollLoop(ctx context.Context, peerToken, cwd string, pollInterval time.Duration) error {
@@ -604,4 +1043,20 @@ func runtimeHostname() string {
 		return ""
 	}
 	return hostname
+}
+
+func runtimeExecutors() []string {
+	return []string{"fake", "codex", "claude", "gemini"}
+}
+
+func runtimeExecutionLocations() []string {
+	return []string{"local_workspace", "daemon_worktree", "remote_server"}
+}
+
+func runtimeWorkspaceID(workspaceRoot string) string {
+	base := strings.TrimSpace(filepath.Base(filepath.Clean(workspaceRoot)))
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return "workspace"
+	}
+	return base
 }
