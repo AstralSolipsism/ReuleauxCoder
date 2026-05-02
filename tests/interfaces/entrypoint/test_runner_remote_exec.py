@@ -138,7 +138,11 @@ class FakeAgent:
 
 
 def _build_runner_with_fake_agent(
-    relay_bind: str, chat_behavior=None, load_tools=None, session_dir: str | None = None
+    relay_bind: str,
+    chat_behavior=None,
+    load_tools=None,
+    session_dir: str | None = None,
+    session_auto_save: bool = True,
 ) -> AppRunner:
     config = Config(
         api_key="key",
@@ -151,6 +155,7 @@ def _build_runner_with_fake_agent(
         },
         active_mode="coder",
         session_dir=session_dir,
+        session_auto_save=session_auto_save,
     )
     config.skills.enabled = False
     return AppRunner(
@@ -604,6 +609,47 @@ class TestRunnerRemoteExec:
             assert ready["session_id"] != "session-old"
             assert "old-context" not in end["payload"]["response"]
             assert "fresh|history=fresh|sid=session_" in end["payload"]["response"]
+        finally:
+            runner.cleanup(ctx.agent)
+
+    def test_runner_stream_chat_skips_session_save_when_auto_save_disabled(
+        self, tmp_path: Path
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        port = _free_port()
+        sessions_dir = tmp_path / "sessions"
+        runner = _build_runner_with_fake_agent(
+            f"127.0.0.1:{port}",
+            session_dir=str(sessions_dir),
+            session_auto_save=False,
+        )
+        ctx = runner.initialize()
+        try:
+            assert runner._relay_server is not None
+            assert runner._relay_http_service is not None
+            _, peer_token = _register_peer(
+                runner._relay_http_service.base_url,
+                runner._relay_server.issue_bootstrap_token(ttl_sec=60),
+                str(workspace),
+            )
+
+            _, start_body = _json_request(
+                "POST",
+                f"{runner._relay_http_service.base_url}/remote/chat/start",
+                {"peer_token": peer_token, "prompt": "fresh"},
+            )
+            _collect_stream_events(
+                runner._relay_http_service.base_url, peer_token, start_body["chat_id"]
+            )
+
+            _, listed = _json_request(
+                "POST",
+                f"{runner._relay_http_service.base_url}/remote/sessions/list",
+                {"peer_token": peer_token},
+            )
+            assert listed["sessions"] == []
+            assert SessionStore(sessions_dir).list(limit=10, fingerprint=None) == []
         finally:
             runner.cleanup(ctx.agent)
 

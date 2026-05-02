@@ -1,6 +1,11 @@
 """Tests for ContextManager wall-hit progressive compression state machine."""
 
-from reuleauxcoder.domain.context.manager import ContextManager, estimate_tokens
+from reuleauxcoder.domain.context.manager import (
+    MESSAGE_TOKEN_KEY,
+    ContextManager,
+    estimate_message_tokens,
+    estimate_tokens,
+)
 
 
 def _make_long_tool_output(lines: int = 20, extra_chars: int = 1600) -> dict:
@@ -31,6 +36,20 @@ def _make_snippable_tool_messages(count: int = 11) -> list[dict]:
 
 class TestWallHitStateMachine:
     """Test the progressive compression wall-hit counters."""
+
+    def test_snip_tool_outputs_clears_stale_token_cache(self) -> None:
+        manager = ContextManager()
+        messages = _make_snippable_tool_messages(6)
+        cached_tokens = estimate_message_tokens(messages[0])
+
+        assert MESSAGE_TOKEN_KEY in messages[0]
+
+        changed = manager._snip_tool_outputs(messages)
+
+        assert changed is True
+        assert MESSAGE_TOKEN_KEY not in messages[0]
+        refreshed_tokens = estimate_message_tokens(messages[0])
+        assert refreshed_tokens < cached_tokens
 
     def test_snip_hit_count_increments_when_snip_doesnt_reduce_enough(self) -> None:
         """When snip runs but doesn't reduce below threshold, hit count should increment."""

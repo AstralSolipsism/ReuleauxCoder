@@ -406,6 +406,7 @@ class ContextManager:
                 + "\n".join(lines[-3:])
             )
             m["content"] = snipped
+            m.pop(MESSAGE_TOKEN_KEY, None)
             changed = True
         return changed
 

@@ -8,12 +8,50 @@ from prompt_toolkit.history import FileHistory
 
 from reuleauxcoder import __version__
 from reuleauxcoder.app.commands.registry import ActionRegistry
+from reuleauxcoder.app.runtime.session_state import (
+    build_session_runtime_state,
+    get_session_fingerprint,
+)
 from reuleauxcoder.infrastructure.fs.paths import ensure_user_dirs
 from reuleauxcoder.infrastructure.persistence.session_store import SessionStore
 from reuleauxcoder.interfaces.cli.commands import handle_command
 from reuleauxcoder.interfaces.cli.render import show_banner
 from reuleauxcoder.interfaces.events import UIEventBus, UIEventKind
 from reuleauxcoder.interfaces.ui_registry import UIProfile
+
+
+def _auto_save_session(
+    agent,
+    config,
+    sessions_dir: Path | None,
+    current_session_id: str | None,
+    ui_bus: UIEventBus,
+    *,
+    is_exit: bool = False,
+) -> str | None:
+    if not getattr(config, "session_auto_save", True):
+        return current_session_id
+    if not getattr(agent, "messages", None):
+        return current_session_id
+
+    sid = SessionStore(sessions_dir).save(
+        agent.messages,
+        getattr(agent.llm, "model", config.model),
+        current_session_id,
+        is_exit=is_exit,
+        total_prompt_tokens=agent.state.total_prompt_tokens,
+        total_completion_tokens=agent.state.total_completion_tokens,
+        active_mode=getattr(agent, "active_mode", None),
+        runtime_state=build_session_runtime_state(config, agent),
+        fingerprint=get_session_fingerprint(config, agent),
+    )
+    setattr(agent, "current_session_id", sid)
+    ui_bus.info(
+        f"Session auto-saved: {sid}",
+        kind=UIEventKind.SESSION,
+        session_id=sid,
+    )
+    return sid
 
 
 def run_repl(
@@ -55,17 +93,14 @@ def run_repl(
             user_input = pt_prompt("You > ", history=history).strip()
         except (EOFError, KeyboardInterrupt):
             ui_bus.info("\nBye!")
-            if agent.messages:
-                sid = SessionStore(sessions_dir).save(
-                    agent.messages,
-                    config.model,
-                    current_session_id,
-                    is_exit=True,
-                    total_prompt_tokens=agent.state.total_prompt_tokens,
-                    total_completion_tokens=agent.state.total_completion_tokens,
-                    active_mode=getattr(agent, "active_mode", None),
-                )
-                ui_bus.info(f"Session auto-saved: {sid}", kind=UIEventKind.SESSION)
+            current_session_id = _auto_save_session(
+                agent,
+                config,
+                sessions_dir,
+                current_session_id,
+                ui_bus,
+                is_exit=True,
+            )
             break
 
         if not user_input:
@@ -109,8 +144,22 @@ def run_repl(
 
         try:
             agent.chat(chat_input)
+            current_session_id = _auto_save_session(
+                agent,
+                config,
+                sessions_dir,
+                current_session_id,
+                ui_bus,
+            )
         except KeyboardInterrupt:
             ui_bus.warning("Interrupted.")
+            current_session_id = _auto_save_session(
+                agent,
+                config,
+                sessions_dir,
+                current_session_id,
+                ui_bus,
+            )
         except Exception as e:
             diagnostic_path = getattr(e, "llm_diagnostic_path", None)
             if diagnostic_path and current_session_id:
@@ -128,3 +177,10 @@ def run_repl(
                 )
             else:
                 ui_bus.error(f"Error: {e}")
+            current_session_id = _auto_save_session(
+                agent,
+                config,
+                sessions_dir,
+                current_session_id,
+                ui_bus,
+            )

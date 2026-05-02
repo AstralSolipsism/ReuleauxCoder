@@ -18,7 +18,7 @@ from reuleauxcoder.domain.hooks.types import (
     HookPoint,
 )
 from reuleauxcoder.domain.llm.models import LLMResponse
-from reuleauxcoder.domain.providers.models import ProviderRequest
+from reuleauxcoder.domain.providers.models import ProviderDiagnostic, ProviderRequest
 from reuleauxcoder.infrastructure.fs.paths import get_diagnostics_dir
 from reuleauxcoder.interfaces.events import UIEventBus, UIEventKind
 from reuleauxcoder.services.llm.diagnostics import (
@@ -35,6 +35,59 @@ from reuleauxcoder.services.providers.manager import ProviderManager
 
 MAX_DEBUG_CONTENT_CHARS = 400
 MAX_DEBUG_STREAM_EVENTS = 200
+
+_PROVIDER_PAYLOAD_KEYS_BY_TYPE: dict[str, set[str]] = {
+    "openai_chat": {"messages", "tools"},
+    "anthropic_messages": {"system", "messages", "tools"},
+    "openai_responses": {"input", "tools"},
+}
+
+
+def _provider_diagnostic_key(item: Any) -> tuple[str, str, str] | None:
+    if isinstance(item, ProviderDiagnostic):
+        return (item.code, item.message, item.level)
+    if isinstance(item, dict):
+        code = item.get("code")
+        message = item.get("message")
+        level = item.get("level", "warning")
+        if code is None or message is None:
+            return None
+        return (str(code), str(message), str(level))
+    return None
+
+
+def _dedupe_provider_diagnostics(metadata: dict[str, Any]) -> None:
+    diagnostics = metadata.get("provider_diagnostics")
+    if not isinstance(diagnostics, list):
+        return
+
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list[Any] = []
+    for item in diagnostics:
+        key = _provider_diagnostic_key(item)
+        if key is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+        deduped.append(item)
+    metadata["provider_diagnostics"] = deduped
+
+
+def _merge_hook_request_overrides(
+    provider_type: str,
+    rebuilt_params: dict[str, Any],
+    hook_params: dict[str, Any],
+    original_params: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(rebuilt_params)
+    payload_keys = _PROVIDER_PAYLOAD_KEYS_BY_TYPE.get(provider_type, set())
+
+    for key, value in hook_params.items():
+        if key in payload_keys:
+            continue
+        if key not in original_params or value != original_params.get(key):
+            merged[key] = value
+    return merged
 
 
 def _mask_api_key(api_key: str) -> str:
@@ -244,9 +297,12 @@ class LLM:
             metadata=dict(metadata or {}),
         )
         params: dict[str, Any] = {}
+        final_messages = list(sanitized_messages)
+        final_metadata = dict(request.metadata)
 
         try:
             params = provider.build_request_params(request)
+            original_params = dict(params)
             before_context = BeforeLLMRequestContext(
                 hook_point=HookPoint.BEFORE_LLM_REQUEST,
                 request_params=dict(params),
@@ -274,8 +330,22 @@ class LLM:
                     HookPoint.BEFORE_LLM_REQUEST, before_context
                 )
 
-            request.request_params = dict(before_context.request_params)
             request.metadata = dict(before_context.metadata)
+            request.messages = list(before_context.messages)
+            request.tools = list(before_context.tools)
+            _dedupe_provider_diagnostics(request.metadata)
+            rebuilt_params = provider.build_request_params(request)
+            _dedupe_provider_diagnostics(request.metadata)
+            request.request_params = _merge_hook_request_overrides(
+                self.provider_type,
+                rebuilt_params,
+                before_context.request_params,
+                original_params,
+            )
+            params = dict(request.request_params)
+            before_context.metadata = dict(request.metadata)
+            final_messages = list(request.messages)
+            final_metadata = dict(before_context.metadata)
             provider_response = provider.chat(request)
             response = provider_response.to_llm_response()
             params = dict(response.provider_extra.get("request_params") or params)
@@ -338,9 +408,9 @@ class LLM:
                     },
                     "messages": {
                         "raw_count": len(raw_messages),
-                        "sanitized_count": len(sanitized_messages),
+                        "sanitized_count": len(final_messages),
                         "raw_tail": snapshot_messages(raw_messages),
-                        "sanitized_tail": snapshot_messages(sanitized_messages),
+                        "sanitized_tail": snapshot_messages(final_messages),
                     },
                     "stream": {
                         "event_count": len(debug_events),
@@ -399,9 +469,9 @@ class LLM:
                 session_id=session_id,
                 request_params=params,
                 raw_messages=raw_messages,
-                sanitized_messages=sanitized_messages,
+                sanitized_messages=final_messages,
                 error=e,
-                metadata=dict(metadata or {}),
+                metadata=final_metadata,
             )
             setattr(e, "llm_diagnostic_path", str(diagnostic_path))
             raise
