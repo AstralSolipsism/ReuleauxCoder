@@ -217,6 +217,20 @@ def test_session_store_delete_removes_session_file(tmp_path: Path) -> None:
     assert store.delete(session_id) is False
 
 
+def test_session_store_snapshot_roundtrip(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    session_id = store.save(messages=[{"role": "user", "content": "hi"}], model="m1")
+    snapshot = {"turns": [{"id": "t1"}], "traceNodes": [{"id": "n1"}]}
+
+    store.save_snapshot(session_id, snapshot)
+    loaded, error = store.load_snapshot(session_id)
+
+    assert error is None
+    assert loaded == snapshot
+    assert store.delete_snapshot(session_id) is True
+    assert store.load_snapshot(session_id) == (None, None)
+
+
 def test_session_store_concurrent_save_keeps_sessions_readable(tmp_path: Path) -> None:
     store = SessionStore(tmp_path)
     session_id = store.save(

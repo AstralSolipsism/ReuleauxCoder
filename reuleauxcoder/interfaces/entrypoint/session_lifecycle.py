@@ -28,7 +28,7 @@ def restore_session(
     sessions_dir = Path(config.session_dir) if config.session_dir else None
     current_fingerprint = get_session_fingerprint(config, agent)
 
-    session_store = dependencies.create_session_store(sessions_dir)
+    session_store = dependencies.create_configured_session_store(config, sessions_dir)
     if options.resume_session_id:
         loaded = session_store.load(options.resume_session_id)
         if loaded:

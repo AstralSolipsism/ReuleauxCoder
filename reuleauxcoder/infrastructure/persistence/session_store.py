@@ -179,6 +179,35 @@ class SessionStore:
             path.unlink()
             return True
 
+    def load_snapshot(self, session_id: str) -> tuple[dict | None, str | None]:
+        """Load the latest UI snapshot sidecar for a session."""
+        path = self._get_snapshot_path(session_id)
+        if not path.exists():
+            return None, None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return None, str(exc)
+        if not isinstance(data, dict):
+            return None, "snapshot_not_object"
+        return data, None
+
+    def save_snapshot(self, session_id: str, snapshot: dict) -> None:
+        """Save a UI snapshot sidecar for a session."""
+        path = self._get_snapshot_path(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def delete_snapshot(self, session_id: str) -> bool:
+        """Delete a UI snapshot sidecar if it exists."""
+        path = self._get_snapshot_path(session_id)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
     def list(
         self,
         limit: int = 20,
@@ -282,3 +311,7 @@ class SessionStore:
         """Map session ID to JSON file path."""
         safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id)
         return self._sessions_dir / f"{safe_id}.json"
+
+    def _get_snapshot_path(self, session_id: str) -> Path:
+        path = self._get_session_path(session_id)
+        return path.with_name(f"{path.stem}.ui.json")

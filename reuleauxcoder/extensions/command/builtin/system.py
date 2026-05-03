@@ -24,7 +24,9 @@ from reuleauxcoder.app.runtime.session_state import (
     restore_config_runtime_defaults,
 )
 from reuleauxcoder.domain.context.manager import estimate_tokens
-from reuleauxcoder.infrastructure.persistence.session_store import SessionStore
+from reuleauxcoder.infrastructure.persistence.factory import (
+    create_session_store as create_configured_session_store,
+)
 from reuleauxcoder.interfaces.cli.views.common import render_markdown_panel
 from reuleauxcoder.interfaces.view_registration import register_view
 
@@ -148,7 +150,7 @@ def _handle_show_help(command, ctx) -> CommandResult:
 def _handle_exit(command, ctx) -> CommandResult:
     session_id = command.current_session_id
     if getattr(ctx.config, "session_auto_save", True) and ctx.agent.messages:
-        sid = SessionStore(ctx.sessions_dir).save(
+        sid = create_configured_session_store(ctx.config, ctx.sessions_dir).save(
             ctx.agent.messages,
             getattr(ctx.agent.llm, "model", ctx.config.model),
             command.current_session_id,

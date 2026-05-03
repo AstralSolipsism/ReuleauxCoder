@@ -26,7 +26,9 @@ from reuleauxcoder.app.runtime.session_state import (
     restore_config_runtime_defaults,
 )
 from reuleauxcoder.domain.hooks import HookPoint, SessionSaveContext
-from reuleauxcoder.infrastructure.persistence.session_store import SessionStore
+from reuleauxcoder.infrastructure.persistence.factory import (
+    create_session_store as create_configured_session_store,
+)
 from reuleauxcoder.interfaces.cli.views.common import stop_stream_and_clear
 from reuleauxcoder.interfaces.events import UIEventKind
 from reuleauxcoder.interfaces.view_registration import register_view
@@ -119,7 +121,7 @@ def render_sessions_view(renderer, event) -> bool:
 
 
 def _handle_list_sessions(command, ctx) -> CommandResult:
-    store = SessionStore(ctx.sessions_dir)
+    store = create_configured_session_store(ctx.config, ctx.sessions_dir)
     fingerprint = get_session_fingerprint(ctx.config, ctx.agent)
     filter_fingerprint = None if command.show_all else fingerprint
     sessions = store.list(limit=command.limit, fingerprint=filter_fingerprint)
@@ -183,7 +185,7 @@ def _handle_resume_session(command, ctx) -> CommandResult:
         )
         return CommandResult(action="continue")
 
-    store = SessionStore(ctx.sessions_dir)
+    store = create_configured_session_store(ctx.config, ctx.sessions_dir)
     fingerprint = get_session_fingerprint(ctx.config, ctx.agent)
     session_id = command.target
     if command.target == "latest":
@@ -244,7 +246,7 @@ def _handle_resume_session(command, ctx) -> CommandResult:
 
 
 def _handle_save_session(command, ctx) -> CommandResult:
-    store = SessionStore(ctx.sessions_dir)
+    store = create_configured_session_store(ctx.config, ctx.sessions_dir)
     fingerprint = get_session_fingerprint(ctx.config, ctx.agent)
     session_id = store.save(
         ctx.agent.messages,
@@ -273,7 +275,7 @@ def _handle_save_session(command, ctx) -> CommandResult:
 
 
 def _handle_new_session(command, ctx) -> CommandResult:
-    store = SessionStore(ctx.sessions_dir)
+    store = create_configured_session_store(ctx.config, ctx.sessions_dir)
     fingerprint = get_session_fingerprint(ctx.config, ctx.agent)
     previous_session_id = command.current_session_id
     if getattr(ctx.config, "session_auto_save", True) and ctx.agent.messages:

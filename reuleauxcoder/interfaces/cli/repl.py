@@ -13,7 +13,9 @@ from reuleauxcoder.app.runtime.session_state import (
     get_session_fingerprint,
 )
 from reuleauxcoder.infrastructure.fs.paths import ensure_user_dirs
-from reuleauxcoder.infrastructure.persistence.session_store import SessionStore
+from reuleauxcoder.infrastructure.persistence.factory import (
+    create_session_store as create_configured_session_store,
+)
 from reuleauxcoder.interfaces.cli.commands import handle_command
 from reuleauxcoder.interfaces.cli.render import show_banner
 from reuleauxcoder.interfaces.events import UIEventBus, UIEventKind
@@ -34,7 +36,7 @@ def _auto_save_session(
     if not getattr(agent, "messages", None):
         return current_session_id
 
-    sid = SessionStore(sessions_dir).save(
+    sid = create_configured_session_store(config, sessions_dir).save(
         agent.messages,
         getattr(agent.llm, "model", config.model),
         current_session_id,
@@ -163,7 +165,7 @@ def run_repl(
         except Exception as e:
             diagnostic_path = getattr(e, "llm_diagnostic_path", None)
             if diagnostic_path and current_session_id:
-                SessionStore(sessions_dir).append_system_message(
+                create_configured_session_store(config, sessions_dir).append_system_message(
                     current_session_id,
                     config.model,
                     f"[LLM_ERROR_DIAGNOSTIC] path={diagnostic_path} error={type(e).__name__}: {e}",
