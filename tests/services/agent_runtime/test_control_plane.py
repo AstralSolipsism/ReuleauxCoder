@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from reuleauxcoder.domain.agent_runtime.models import (
     AgentConfig,
     ExecutionLocation,
@@ -26,7 +28,15 @@ from reuleauxcoder.services.agent_runtime.worktree import (
 def test_task_queue_claim_pin_complete_and_pr_artifact() -> None:
     control = AgentRuntimeControlPlane(
         max_running_tasks=1,
-        runtime_snapshot={"agents": {"coder": {"runtime_profile": "codex"}}},
+        runtime_snapshot={
+            "runtime_profiles": {
+                "codex": {
+                    "executor": "codex",
+                    "execution_location": "daemon_worktree",
+                }
+            },
+            "agents": {"coder": {"runtime_profile": "codex"}},
+        },
     )
     task = control.submit_task(
         RuntimeTaskRequest(
@@ -131,6 +141,134 @@ def test_claim_includes_rendered_prompt_files_from_runtime_snapshot() -> None:
     }
     assert metadata["system_prompt"] == metadata["prompt_files"]["AGENTS.md"]
     assert control.get_task(task.id).status.value == "dispatched"
+
+
+def test_runtime_configure_refreshes_snapshot_without_dropping_tasks() -> None:
+    control = AgentRuntimeControlPlane()
+    existing = control.submit_task(
+        RuntimeTaskRequest(issue_id="issue-1", agent_id="legacy", prompt="old"),
+        task_id="task-existing",
+    )
+
+    control.configure(
+        max_running_tasks=3,
+        runtime_snapshot={
+            "runtime_profiles": {
+                "fake_profile": {
+                    "executor": "fake",
+                    "execution_location": "daemon_worktree",
+                }
+            },
+            "agents": {
+                "reviewer": {
+                    "runtime_profile": "fake_profile",
+                    "capabilities": ["review"],
+                }
+            },
+        },
+    )
+    control.submit_task(
+        RuntimeTaskRequest(issue_id="issue-2", agent_id="reviewer", prompt="new"),
+        task_id="task-new",
+    )
+
+    assert control.max_running_tasks == 3
+    assert control.get_task(existing.id).status.value == "queued"
+    claim = control.claim_task(worker_id="worker-1", executors=["fake"])
+
+    assert claim is not None
+    assert claim.task.id == "task-new"
+    assert "fake_profile" in claim.runtime_snapshot["runtime_profiles"]
+
+
+def test_submit_resolves_agent_runtime_profile_defaults() -> None:
+    control = AgentRuntimeControlPlane(
+        runtime_snapshot={
+            "runtime_profiles": {
+                "fake_profile": {
+                    "executor": "fake",
+                    "execution_location": "daemon_worktree",
+                    "model": "smoke-model",
+                }
+            },
+            "agents": {
+                "reviewer": {
+                    "name": "Reviewer",
+                    "runtime_profile": "fake_profile",
+                    "capabilities": ["read_repo", "code_review"],
+                    "prompt": {"system_append": "Review carefully."},
+                }
+            },
+        }
+    )
+
+    task = control.submit_task(
+        RuntimeTaskRequest(issue_id="issue-1", agent_id="reviewer", prompt="review"),
+        task_id="task-agent-defaults",
+    )
+
+    assert task.executor == ExecutorType.FAKE
+    assert task.execution_location == ExecutionLocation.DAEMON_WORKTREE
+    assert task.runtime_profile_id == "fake_profile"
+    assert task.metadata["model"] == "smoke-model"
+    claim = control.claim_task(worker_id="worker-1", executors=["fake"])
+    assert claim is not None
+    assert claim.executor_request.runtime_profile_id == "fake_profile"
+    assert claim.executor_request.executor == ExecutorType.FAKE
+    assert "AGENT_RUNTIME.md" in claim.executor_request.metadata["prompt_files"]
+    assert (
+        "Review carefully."
+        in claim.executor_request.metadata["prompt_files"]["AGENT_RUNTIME.md"]
+    )
+
+
+def test_submit_explicit_executor_and_profile_override_agent_defaults() -> None:
+    control = AgentRuntimeControlPlane(
+        runtime_snapshot={
+            "runtime_profiles": {
+                "codex_profile": {
+                    "executor": "codex",
+                    "execution_location": "daemon_worktree",
+                },
+                "fake_profile": {
+                    "executor": "fake",
+                    "execution_location": "remote_server",
+                    "model": "profile-model",
+                },
+            },
+            "agents": {"coder": {"runtime_profile": "codex_profile"}},
+        }
+    )
+
+    task = control.submit_task(
+        RuntimeTaskRequest(
+            issue_id="issue-1",
+            agent_id="coder",
+            prompt="run",
+            runtime_profile_id="fake_profile",
+            executor="claude",
+            execution_location="local_workspace",
+            model="explicit-model",
+        ),
+        task_id="task-explicit",
+    )
+
+    assert task.runtime_profile_id == "fake_profile"
+    assert task.executor == ExecutorType.CLAUDE
+    assert task.execution_location == ExecutionLocation.LOCAL_WORKSPACE
+    assert task.metadata["model"] == "explicit-model"
+
+
+def test_submit_rejects_missing_agent_runtime_profile() -> None:
+    control = AgentRuntimeControlPlane(
+        runtime_snapshot={"agents": {"reviewer": {"runtime_profile": "missing"}}}
+    )
+
+    with pytest.raises(ValueError, match="runtime profile not found: missing"):
+        control.submit_task(
+            RuntimeTaskRequest(issue_id="issue-1", agent_id="reviewer", prompt="run"),
+            task_id="task-missing-profile",
+        )
 
 
 def test_waiting_approval_event_updates_task_status() -> None:

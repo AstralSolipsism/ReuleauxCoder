@@ -29,6 +29,7 @@ from reuleauxcoder.services.agent_runtime.prompt_renderer import (
     CanonicalAgentContext,
     ExecutorPromptRenderer,
 )
+from reuleauxcoder.services.agent_runtime.runtime_store import RuntimeStore
 
 
 def _new_id(prefix: str) -> str:
@@ -48,6 +49,24 @@ def _coerce_location(value: ExecutionLocation | str | None) -> ExecutionLocation
         return value
     if value is None or str(value).strip() == "":
         return ExecutionLocation.LOCAL_WORKSPACE
+    return ExecutionLocation(str(value))
+
+
+def _optional_executor(value: ExecutorType | str | None) -> ExecutorType | None:
+    if isinstance(value, ExecutorType):
+        return value
+    if value is None or str(value).strip() == "":
+        return None
+    return ExecutorType(str(value))
+
+
+def _optional_location(
+    value: ExecutionLocation | str | None,
+) -> ExecutionLocation | None:
+    if isinstance(value, ExecutionLocation):
+        return value
+    if value is None or str(value).strip() == "":
+        return None
     return ExecutionLocation(str(value))
 
 
@@ -115,8 +134,8 @@ class RuntimeTaskRequest:
     issue_id: str
     agent_id: str
     prompt: str
-    executor: ExecutorType | str = ExecutorType.REULEAUXCODER
-    execution_location: ExecutionLocation | str = ExecutionLocation.LOCAL_WORKSPACE
+    executor: ExecutorType | str | None = None
+    execution_location: ExecutionLocation | str | None = None
     trigger_mode: TriggerMode | str = TriggerMode.ISSUE_TASK
     runtime_profile_id: str | None = None
     parent_task_id: str | None = None
@@ -128,8 +147,8 @@ class RuntimeTaskRequest:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.executor = _coerce_executor(self.executor)
-        self.execution_location = _coerce_location(self.execution_location)
+        self.executor = _optional_executor(self.executor)
+        self.execution_location = _optional_location(self.execution_location)
         if not isinstance(self.trigger_mode, TriggerMode):
             self.trigger_mode = TriggerMode(str(self.trigger_mode))
 
@@ -216,10 +235,12 @@ class AgentRuntimeControlPlane:
         max_running_tasks: int = 4,
         runtime_snapshot: dict[str, Any] | None = None,
         pr_flow: PRFlow | None = None,
+        store: RuntimeStore | None = None,
     ) -> None:
         self.max_running_tasks = max(1, int(max_running_tasks or 1))
         self.runtime_snapshot = dict(runtime_snapshot or {})
         self.pr_flow = pr_flow or InMemoryPRFlow()
+        self._store = store
         self._lock = threading.RLock()
         self._states: dict[str, TaskLifecycleState] = {}
         self._sessions: dict[str, TaskSessionRef] = {}
@@ -228,10 +249,35 @@ class AgentRuntimeControlPlane:
         self._claim_leases: dict[str, dict[str, Any]] = {}
         self._cancel_requests: dict[str, str] = {}
 
+    def configure(
+        self,
+        *,
+        max_running_tasks: int | None = None,
+        runtime_snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        """Refresh runtime config without dropping queued/running task state."""
+
+        with self._lock:
+            if self._store is not None:
+                self._store.configure(
+                    max_running_tasks=max_running_tasks,
+                    runtime_snapshot=runtime_snapshot,
+                )
+                self.max_running_tasks = self._store.max_running_tasks
+                self.runtime_snapshot = dict(self._store.runtime_snapshot)
+                return
+            if max_running_tasks is not None:
+                self.max_running_tasks = max(1, int(max_running_tasks or 1))
+            if runtime_snapshot is not None:
+                self.runtime_snapshot = dict(runtime_snapshot)
+
     def submit_task(
         self, request: RuntimeTaskRequest, *, task_id: str | None = None
     ) -> TaskRecord:
+        if self._store is not None:
+            return self._store.submit_task(request, task_id=task_id)
         with self._lock:
+            request = self._resolve_request_locked(request)
             metadata = dict(request.metadata)
             if request.model is not None:
                 metadata.setdefault("model", request.model)
@@ -257,6 +303,33 @@ class AgentRuntimeControlPlane:
             self._append_event_locked(task.id, "queued", {"task": _task_to_dict(task)})
             return task
 
+    def _resolve_request_locked(self, request: RuntimeTaskRequest) -> RuntimeTaskRequest:
+        snapshot = self.runtime_snapshot
+        agents = _dict_from(snapshot.get("agents"))
+        profiles = _dict_from(snapshot.get("runtime_profiles"))
+        raw_agent = _dict_from(agents.get(request.agent_id))
+
+        agent_profile_id = str(raw_agent.get("runtime_profile") or "").strip()
+        profile_id = str(request.runtime_profile_id or agent_profile_id).strip()
+        raw_profile = _dict_from(profiles.get(profile_id)) if profile_id else {}
+        if profile_id and not raw_profile:
+            raise ValueError(f"runtime profile not found: {profile_id}")
+
+        request.runtime_profile_id = profile_id or None
+        request.executor = (
+            request.executor
+            or _optional_executor(raw_profile.get("executor"))
+            or ExecutorType.REULEAUXCODER
+        )
+        request.execution_location = (
+            request.execution_location
+            or _optional_location(raw_profile.get("execution_location"))
+            or ExecutionLocation.LOCAL_WORKSPACE
+        )
+        if request.model is None and raw_profile.get("model") is not None:
+            request.model = str(raw_profile["model"])
+        return request
+
     def claim_task(
         self,
         *,
@@ -267,6 +340,15 @@ class AgentRuntimeControlPlane:
         workspace_root: str | None = None,
         lease_sec: int = 15,
     ) -> RuntimeTaskClaim | None:
+        if self._store is not None:
+            return self._store.claim_task(
+                worker_id=worker_id,
+                executors=executors,
+                peer_id=peer_id,
+                peer_capabilities=peer_capabilities,
+                workspace_root=workspace_root,
+                lease_sec=lease_sec,
+            )
         allowed = {_coerce_executor(executor) for executor in executors or []}
         capabilities = (
             {str(capability) for capability in peer_capabilities}
@@ -347,6 +429,14 @@ class AgentRuntimeControlPlane:
         peer_id: str | None = None,
         lease_sec: int | None = None,
     ) -> dict[str, Any]:
+        if self._store is not None:
+            return self._store.heartbeat_task(
+                request_id=request_id,
+                task_id=task_id,
+                worker_id=worker_id,
+                peer_id=peer_id,
+                lease_sec=lease_sec,
+            )
         with self._lock:
             state = self._states.get(task_id)
             if state is None:
@@ -401,6 +491,13 @@ class AgentRuntimeControlPlane:
         worker_id: str,
         peer_id: str | None = None,
     ) -> tuple[bool, str]:
+        if self._store is not None:
+            return self._store.validate_claim_owner(
+                request_id=request_id,
+                task_id=task_id,
+                worker_id=worker_id,
+                peer_id=peer_id,
+            )
         with self._lock:
             return self._validate_claim_owner_locked(
                 request_id=request_id,
@@ -410,6 +507,8 @@ class AgentRuntimeControlPlane:
             )
 
     def recover_stale_tasks(self, *, now: float | None = None) -> list[str]:
+        if self._store is not None:
+            return self._store.recover_stale_tasks(now=now)
         current = time.time() if now is None else now
         recovered: list[str] = []
         with self._lock:
@@ -523,6 +622,9 @@ class AgentRuntimeControlPlane:
         return ExecutorPromptRenderer().render(executor.value, context)
 
     def pin_session(self, task_id: str, session: TaskSessionRef) -> None:
+        if self._store is not None:
+            self._store.pin_session(task_id, session)
+            return
         with self._lock:
             task = self._task_locked(task_id)
             task.status = TaskStatus.RUNNING
@@ -565,6 +667,17 @@ class AgentRuntimeControlPlane:
         executor_session_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> tuple[bool, str]:
+        if self._store is not None:
+            return self._store.pin_claimed_session(
+                request_id=request_id,
+                task_id=task_id,
+                worker_id=worker_id,
+                peer_id=peer_id,
+                workdir=workdir,
+                branch=branch,
+                executor_session_id=executor_session_id,
+                metadata=metadata,
+            )
         with self._lock:
             ok, reason = self._validate_claim_owner_locked(
                 request_id=request_id,
@@ -607,6 +720,14 @@ class AgentRuntimeControlPlane:
         worker_id: str | None = None,
         peer_id: str | None = None,
     ) -> tuple[bool, str]:
+        if self._store is not None:
+            return self._store.append_executor_event(
+                task_id,
+                event,
+                request_id=request_id,
+                worker_id=worker_id,
+                peer_id=peer_id,
+            )
         with self._lock:
             if request_id or worker_id or peer_id:
                 ok, reason = self._validate_claim_owner_locked(
@@ -638,6 +759,15 @@ class AgentRuntimeControlPlane:
         peer_id: str | None = None,
         artifacts: list[dict[str, Any]] | None = None,
     ) -> tuple[bool, str, TaskRecord | None]:
+        if self._store is not None:
+            return self._store.complete_claimed_task(
+                task_id,
+                result,
+                request_id=request_id,
+                worker_id=worker_id,
+                peer_id=peer_id,
+                artifacts=artifacts,
+            )
         with self._lock:
             ok, reason = self._validate_claim_owner_locked(
                 request_id=request_id,
@@ -656,6 +786,8 @@ class AgentRuntimeControlPlane:
         *,
         artifacts: list[dict[str, Any]] | None = None,
     ) -> TaskRecord:
+        if self._store is not None:
+            return self._store.complete_task(task_id, result, artifacts=artifacts)
         with self._lock:
             task = self._task_locked(task_id)
             if result.succeeded:
@@ -689,6 +821,8 @@ class AgentRuntimeControlPlane:
         *,
         new_task_id: str | None = None,
     ) -> TaskRecord:
+        if self._store is not None:
+            return self._store.retry_task(task_id, new_task_id=new_task_id)
         with self._lock:
             task = self._task_locked(task_id)
             if not task.is_terminal:
@@ -718,6 +852,8 @@ class AgentRuntimeControlPlane:
             return self.submit_task(retry, task_id=new_task_id)
 
     def fail_task(self, task_id: str, *, error: str) -> TaskRecord:
+        if self._store is not None:
+            return self._store.fail_task(task_id, error=error)
         with self._lock:
             task = self._task_locked(task_id)
             task.status = TaskStatus.FAILED
@@ -728,6 +864,8 @@ class AgentRuntimeControlPlane:
             return task
 
     def cancel_task(self, task_id: str, *, reason: str = "user_cancelled") -> bool:
+        if self._store is not None:
+            return self._store.cancel_task(task_id, reason=reason)
         with self._lock:
             task = self._task_locked(task_id)
             if task.is_terminal:
@@ -762,6 +900,18 @@ class AgentRuntimeControlPlane:
         path: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> TaskArtifact:
+        if self._store is not None:
+            return self._store.attach_artifact(
+                task_id,
+                type=type,
+                status=status,
+                artifact_id=artifact_id,
+                branch_name=branch_name,
+                pr_url=pr_url,
+                content=content,
+                path=path,
+                metadata=metadata,
+            )
         with self._lock:
             state = self._states[task_id]
             artifact = state.attach_artifact(
@@ -788,6 +938,8 @@ class AgentRuntimeControlPlane:
             return artifact
 
     def create_or_update_pr(self, task_id: str, *, diff: str = "") -> TaskArtifact:
+        if self._store is not None:
+            return self._store.create_or_update_pr(task_id, diff=diff)
         with self._lock:
             task = self._task_locked(task_id)
             pr = self.pr_flow.create_or_update(task, diff=diff)
@@ -804,6 +956,8 @@ class AgentRuntimeControlPlane:
             )
 
     def list_events(self, task_id: str, *, after_seq: int = 0) -> list[RuntimeTaskEvent]:
+        if self._store is not None:
+            return self._store.list_events(task_id, after_seq=after_seq)
         with self._lock:
             return [
                 event
@@ -812,18 +966,78 @@ class AgentRuntimeControlPlane:
             ]
 
     def list_artifacts(self, task_id: str) -> list[TaskArtifact]:
+        if self._store is not None:
+            return self._store.list_artifacts(task_id)
         with self._lock:
             return list(self._states[task_id].artifacts.values())
 
     def get_task(self, task_id: str) -> TaskRecord:
+        if self._store is not None:
+            return self._store.get_task(task_id)
         with self._lock:
             return self._task_locked(task_id)
 
     def task_to_dict(self, task_id: str) -> dict[str, Any]:
+        if self._store is not None:
+            return self._store.task_to_dict(task_id)
         return _task_to_dict(self.get_task(task_id))
 
     def artifacts_to_dict(self, task_id: str) -> list[dict[str, Any]]:
+        if self._store is not None:
+            return self._store.artifacts_to_dict(task_id)
         return [_artifact_to_dict(artifact) for artifact in self.list_artifacts(task_id)]
+
+    def list_tasks(
+        self,
+        *,
+        status: str | None = None,
+        agent_id: str | None = None,
+        issue_id: str | None = None,
+        limit: int = 50,
+        after_created_at: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if self._store is not None:
+            return self._store.list_tasks(
+                status=status,
+                agent_id=agent_id,
+                issue_id=issue_id,
+                limit=limit,
+                after_created_at=after_created_at,
+            )
+        with self._lock:
+            tasks = [_task_to_dict(state.task) for state in self._states.values()]
+            if status:
+                tasks = [task for task in tasks if task.get("status") == status]
+            if agent_id:
+                tasks = [task for task in tasks if task.get("agent_id") == agent_id]
+            if issue_id:
+                tasks = [task for task in tasks if task.get("issue_id") == issue_id]
+            return tasks[-max(1, int(limit or 50)) :]
+
+    def load_task_detail(self, task_id: str, *, event_limit: int = 100) -> dict[str, Any]:
+        if self._store is not None:
+            return self._store.load_task_detail(task_id, event_limit=event_limit)
+        task = self.task_to_dict(task_id)
+        events = [event.to_dict() for event in self.list_events(task_id, after_seq=0)]
+        session = self._sessions.get(task_id)
+        return {
+            "task": task,
+            "artifacts": self.artifacts_to_dict(task_id),
+            "session": {
+                "agent_id": session.agent_id,
+                "executor": session.executor.value,
+                "execution_location": session.execution_location.value,
+                "issue_id": session.issue_id,
+                "task_id": session.task_id,
+                "workdir": session.workdir,
+                "branch": session.branch,
+                "executor_session_id": session.executor_session_id,
+            }
+            if session is not None
+            else None,
+            "claim": None,
+            "events": events[-max(1, int(event_limit or 100)) :],
+        }
 
     def _running_count_locked(self) -> int:
         return sum(

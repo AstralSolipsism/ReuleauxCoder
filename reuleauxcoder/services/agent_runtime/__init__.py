@@ -17,6 +17,7 @@ from reuleauxcoder.services.agent_runtime.control_plane import (
     RuntimeTaskEvent,
     RuntimeTaskRequest,
 )
+from reuleauxcoder.services.agent_runtime.postgres_store import PostgresRuntimeStore
 from reuleauxcoder.services.agent_runtime.scheduler import (
     AgentScheduleDecision,
     BasicAgentScheduler,
@@ -39,6 +40,7 @@ __all__ = [
     "ExecutorRunResult",
     "InMemoryPRFlow",
     "PRArtifactResult",
+    "PostgresRuntimeStore",
     "ReuleauxCoderExecutorBackend",
     "RuntimeTaskClaim",
     "RuntimeTaskEvent",
