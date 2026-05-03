@@ -15,4 +15,8 @@ if [ ! -f "$CONFIG_PATH" ]; then
   envsubst < /app/docker/config.host.yaml.template > "$CONFIG_PATH"
 fi
 
+if [ -n "${EZCODE_DATABASE_URL:-}" ] && [ "${EZCODE_AUTO_MIGRATE:-true}" = "true" ]; then
+  rcoder --config "$CONFIG_PATH" db migrate
+fi
+
 exec rcoder --config "$CONFIG_PATH" --server

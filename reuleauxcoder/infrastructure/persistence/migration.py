@@ -1,0 +1,50 @@
+"""Alembic migration helpers for EZCode persistence."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from reuleauxcoder.infrastructure.persistence.db import normalize_database_url
+
+
+def migrations_dir() -> Path:
+    return Path(__file__).with_name("migrations")
+
+
+def _alembic_config(database_url: str) -> Any:
+    try:
+        from alembic.config import Config
+    except ImportError as exc:  # pragma: no cover - exercised without extras.
+        raise RuntimeError(
+            "Database migrations require alembic. Install package dependencies "
+            "or disable persistence.auto_migrate."
+        ) from exc
+
+    config = Config()
+    config.set_main_option("script_location", str(migrations_dir()))
+    config.set_main_option("sqlalchemy.url", normalize_database_url(database_url))
+    return config
+
+
+def run_migrations(database_url: str) -> None:
+    try:
+        from alembic import command
+    except ImportError as exc:  # pragma: no cover - exercised without extras.
+        raise RuntimeError("Database migrations require alembic.") from exc
+
+    command.upgrade(_alembic_config(database_url), "head")
+
+
+def current_revision(database_url: str) -> str | None:
+    try:
+        from alembic.runtime.migration import MigrationContext
+        from sqlalchemy import create_engine
+    except ImportError as exc:  # pragma: no cover - exercised without extras.
+        raise RuntimeError("Database migration status requires alembic/sqlalchemy.") from exc
+
+    engine = create_engine(normalize_database_url(database_url), pool_pre_ping=True)
+    with engine.connect() as connection:
+        context = MigrationContext.configure(connection)
+        return context.get_current_revision()
+

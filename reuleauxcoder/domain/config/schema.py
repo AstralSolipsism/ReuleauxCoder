@@ -174,6 +174,15 @@ CONFIG_SCHEMA = {
             }
         },
     },
+    "persistence": {
+        "backend": "string (optional, one of auto, memory, postgres; default auto)",
+        "database_url": "string (optional, Postgres URL; supports environment expansion)",
+        "auto_migrate": "bool (default: true)",
+        "runtime_enabled": "bool (default: true)",
+        "sessions_enabled": "bool (default: true)",
+        "legacy_session_import": "string (one of lazy, disabled; default lazy)",
+        "retention_days": "int (default: 0, zero keeps runtime events and snapshots forever)",
+    },
     "environment": {
         "cli_tools": {
             "tool_name": {

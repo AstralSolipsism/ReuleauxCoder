@@ -630,6 +630,44 @@ class AgentRuntimeConfig:
 
 
 @dataclass
+class PersistenceConfig:
+    """Durable persistence settings for runtime and session state."""
+
+    backend: str = "auto"
+    database_url: str = ""
+    auto_migrate: bool = True
+    runtime_enabled: bool = True
+    sessions_enabled: bool = True
+    legacy_session_import: str = "lazy"
+    retention_days: int = 0
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "PersistenceConfig":
+        if not isinstance(data, dict):
+            return cls()
+        return cls(
+            backend=str(data.get("backend", "auto") or "auto"),
+            database_url=str(data.get("database_url", "") or ""),
+            auto_migrate=bool(data.get("auto_migrate", True)),
+            runtime_enabled=bool(data.get("runtime_enabled", True)),
+            sessions_enabled=bool(data.get("sessions_enabled", True)),
+            legacy_session_import=str(data.get("legacy_session_import", "lazy") or "lazy"),
+            retention_days=int(data.get("retention_days", 0) or 0),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "backend": self.backend,
+            "database_url": self.database_url,
+            "auto_migrate": self.auto_migrate,
+            "runtime_enabled": self.runtime_enabled,
+            "sessions_enabled": self.sessions_enabled,
+            "legacy_session_import": self.legacy_session_import,
+            "retention_days": self.retention_days,
+        }
+
+
+@dataclass
 class EnvironmentCLIToolConfig:
     """Declarative CLI tool entry used by lightweight environment sync."""
 
@@ -922,6 +960,9 @@ class Config:
     # Server Agent runtime settings
     agent_runtime: AgentRuntimeConfig = field(default_factory=AgentRuntimeConfig)
 
+    # Durable persistence settings
+    persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
+
     # Server-authoritative environment manifest
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
 
@@ -945,6 +986,15 @@ class Config:
             errors.append("agent_runtime.max_running_agents must be positive")
         if self.agent_runtime.max_shells_per_agent < 1:
             errors.append("agent_runtime.max_shells_per_agent must be positive")
+        valid_persistence_backends = {"auto", "memory", "postgres"}
+        if self.persistence.backend not in valid_persistence_backends:
+            errors.append("persistence.backend must be one of auto, memory, postgres")
+        if self.persistence.backend == "postgres" and not self.persistence.database_url:
+            errors.append("persistence.database_url is required when backend is postgres")
+        if self.persistence.legacy_session_import not in {"lazy", "disabled"}:
+            errors.append("persistence.legacy_session_import must be lazy or disabled")
+        if self.persistence.retention_days < 0:
+            errors.append("persistence.retention_days must be zero or positive")
         for agent_id, agent in self.agent_runtime.agents.items():
             if (
                 agent.runtime_profile

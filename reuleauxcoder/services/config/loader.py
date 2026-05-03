@@ -19,6 +19,7 @@ from reuleauxcoder.domain.config.models import (
     MCPServerConfig,
     ModeConfig,
     ModelProfileConfig,
+    PersistenceConfig,
     PromptConfig,
     ProviderConfig,
     ProvidersConfig,
@@ -117,6 +118,17 @@ class ConfigLoader:
                                 profile_data[field],
                                 f"models.profiles.{profile_id}.{field}",
                             )
+        persistence = expanded.get("persistence", {})
+        if isinstance(persistence, dict) and "database_url" in persistence:
+            value = str(persistence.get("database_url") or "").strip()
+            if value:
+                match = self._ENV_REF_RE.match(value)
+                if match is not None and match.group(1) not in os.environ:
+                    persistence["database_url"] = ""
+                else:
+                    persistence["database_url"] = self._expand_env_value(
+                        persistence["database_url"], "persistence.database_url"
+                    )
         return expanded
 
     def _resolve_llm_params(
@@ -298,6 +310,7 @@ class ConfigLoader:
         context_config = data.get("context", {})
         remote_exec_config = data.get("remote_exec", {})
         agent_runtime_config = data.get("agent_runtime", {})
+        persistence_config = data.get("persistence", {})
         environment_config = data.get("environment", {})
         if not isinstance(environment_config, dict):
             environment_config = {}
@@ -499,6 +512,9 @@ class ConfigLoader:
             ),
             agent_runtime=AgentRuntimeConfig.from_dict(
                 agent_runtime_config if isinstance(agent_runtime_config, dict) else {}
+            ),
+            persistence=PersistenceConfig.from_dict(
+                persistence_config if isinstance(persistence_config, dict) else {}
             ),
             environment=EnvironmentConfig(cli_tools=cli_tools, skills=skills),
             session_auto_save=session_config.get(

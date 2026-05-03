@@ -23,6 +23,19 @@ def parse_args():
         "-v", "--version", action="version", version=f"%(prog)s {__version__}"
     )
     subparsers = parser.add_subparsers(dest="command")
+    db_parser = subparsers.add_parser("db", help="Manage optional Postgres persistence")
+    db_subparsers = db_parser.add_subparsers(dest="db_command")
+    db_subparsers.add_parser("migrate", help="Run database migrations")
+    db_subparsers.add_parser("status", help="Print current database migration revision")
+    import_sessions = db_subparsers.add_parser(
+        "import-sessions", help="Import legacy JSON sessions into Postgres"
+    )
+    import_sessions.add_argument("--session-dir")
+    cleanup = db_subparsers.add_parser(
+        "cleanup", help="Delete old persisted snapshots and terminal task events"
+    )
+    cleanup.add_argument("--retention-days", type=int, required=True)
+
     env_parser = subparsers.add_parser(
         "env", help="Record lightweight CLI environment manifest entries"
     )

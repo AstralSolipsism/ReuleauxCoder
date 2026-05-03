@@ -38,6 +38,15 @@ remote_exec:
   default_tool_timeout_sec: 30
   shell_timeout_sec: 120
 
+persistence:
+  backend: auto
+  database_url: ${EZCODE_DATABASE_URL}
+  auto_migrate: true
+  runtime_enabled: true
+  sessions_enabled: true
+  legacy_session_import: lazy
+  retention_days: 0
+
 session:
   auto_save: false
 

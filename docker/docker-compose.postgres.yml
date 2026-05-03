@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ezcode}
+      POSTGRES_USER: ${POSTGRES_USER:-ezcode}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ezcode}
+    volumes:
+      - ezcode-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ezcode} -d ${POSTGRES_DB:-ezcode}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  rcoder-host:
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      EZCODE_DATABASE_URL: postgresql://${POSTGRES_USER:-ezcode}:${POSTGRES_PASSWORD:-ezcode}@postgres:5432/${POSTGRES_DB:-ezcode}
+
+volumes:
+  ezcode-postgres:
