@@ -26,11 +26,13 @@ _GO_AVAILABLE = shutil.which("go") is not None
 from reuleauxcoder.extensions.remote_exec.http_service import RemoteRelayHTTPService
 from reuleauxcoder.domain.config.models import (
     EnvironmentCLIToolConfig,
+    AgentRuntimeConfig,
     MCPArtifactConfig,
     MCPLaunchConfig,
     MCPServerConfig,
 )
 from reuleauxcoder.services.agent_runtime.control_plane import AgentRuntimeControlPlane
+from reuleauxcoder.infrastructure.yaml.loader import load_yaml_config, save_yaml_config
 from reuleauxcoder.extensions.remote_exec.protocol import (
     ChatResponse,
     ChatStartRequest,
@@ -2013,6 +2015,251 @@ class TestRemoteRelayHTTPService:
             assert retry_body["task"]["id"] == "task-http-runtime-retry"
             assert retry_body["task"]["status"] == "queued"
             assert retry_body["task"]["metadata"]["retry_of"] == "task-http-runtime"
+        finally:
+            service.stop()
+            relay.stop()
+
+    def test_server_settings_update_refreshes_runtime_snapshot_for_agent_submit(
+        self, tmp_path: Path
+    ) -> None:
+        config_path = tmp_path / "config.host.yaml"
+        save_yaml_config(
+            config_path,
+            {"agent_runtime": {"max_running_agents": 1, "max_shells_per_agent": 1}},
+        )
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        control = AgentRuntimeControlPlane()
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            admin_access_secret="admin-secret",
+            admin_config_path=config_path,
+            runtime_control_plane=control,
+        )
+
+        def reload_runtime_config() -> None:
+            data = load_yaml_config(config_path)
+            runtime = AgentRuntimeConfig.from_dict(data.get("agent_runtime", {}))
+            control.configure(
+                max_running_tasks=runtime.max_running_agents,
+                runtime_snapshot=runtime.to_runtime_snapshot(),
+            )
+
+        service.admin_manager.reload_handler = reload_runtime_config
+        service.start()
+        try:
+            _, register_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/register",
+                {
+                    "bootstrap_token": relay.issue_bootstrap_token(ttl_sec=60),
+                    "cwd": "/tmp/repo",
+                    "workspace_root": "/tmp/repo",
+                    "capabilities": [
+                        "agent_runtime",
+                        "agent_runtime.daemon_worktree",
+                    ],
+                },
+            )
+            peer_token = register_body["payload"]["peer_token"]
+            admin_headers = {"X-RC-Admin-Secret": "admin-secret"}
+
+            _, update_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/server-settings/update",
+                {
+                    "agent_runtime": {
+                        "max_running_agents": 4,
+                        "max_shells_per_agent": 1,
+                        "runtime_profiles": {
+                            "smoke_fake_profile": {
+                                "executor": "fake",
+                                "execution_location": "daemon_worktree",
+                                "credential_refs": {"model": "smoke_model_ref"},
+                            }
+                        },
+                        "agents": {
+                            "smoke_reviewer": {
+                                "name": "Smoke Reviewer",
+                                "runtime_profile": "smoke_fake_profile",
+                                "capabilities": ["read_repo", "code_review"],
+                                "prompt": {
+                                    "system_append": (
+                                        "You are the smoke reviewer agent."
+                                    )
+                                },
+                            }
+                        },
+                    }
+                },
+                headers=admin_headers,
+            )
+            assert update_body["ok"] is True
+            assert control.max_running_tasks == 4
+
+            _, submit_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/runtime/submit",
+                {
+                    "task_id": "task-agent-only",
+                    "issue_id": "issue-1",
+                    "agent_id": "smoke_reviewer",
+                    "prompt": "run smoke",
+                },
+                headers=admin_headers,
+            )
+            assert submit_body["ok"] is True
+            assert submit_body["task"]["executor"] == "fake"
+            assert submit_body["task"]["execution_location"] == "daemon_worktree"
+            assert submit_body["task"]["runtime_profile_id"] == "smoke_fake_profile"
+
+            _, claim_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/runtime/claim",
+                {
+                    "peer_token": peer_token,
+                    "worker_id": "worker-1",
+                    "executors": ["fake"],
+                },
+            )
+            claim = claim_body["claim"]
+            assert claim is not None
+            assert claim["executor_request"]["executor"] == "fake"
+            assert (
+                claim["executor_request"]["runtime_profile_id"]
+                == "smoke_fake_profile"
+            )
+            prompt_files = claim["executor_request"]["metadata"]["prompt_files"]
+            assert "AGENT_RUNTIME.md" in prompt_files
+            assert "Smoke Reviewer" in prompt_files["AGENT_RUNTIME.md"]
+            assert (
+                "You are the smoke reviewer agent."
+                in prompt_files["AGENT_RUNTIME.md"]
+            )
+            assert (
+                claim["runtime_snapshot"]["runtime_profiles"]["smoke_fake_profile"][
+                    "credential_refs"
+                ]["model"]
+                == "smoke_model_ref"
+            )
+        finally:
+            service.stop()
+            relay.stop()
+
+    def test_server_settings_update_replace_removes_runtime_profiles_and_agents(
+        self, tmp_path: Path
+    ) -> None:
+        config_path = tmp_path / "config.host.yaml"
+        save_yaml_config(
+            config_path,
+            {
+                "agent_runtime": {
+                    "max_running_agents": 2,
+                    "max_shells_per_agent": 1,
+                    "runtime_profiles": {
+                        "old_profile": {
+                            "executor": "fake",
+                            "execution_location": "daemon_worktree",
+                        }
+                    },
+                    "agents": {"old_agent": {"runtime_profile": "old_profile"}},
+                }
+            },
+        )
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        runtime = AgentRuntimeConfig.from_dict(
+            load_yaml_config(config_path).get("agent_runtime", {})
+        )
+        control = AgentRuntimeControlPlane(
+            max_running_tasks=runtime.max_running_agents,
+            runtime_snapshot=runtime.to_runtime_snapshot(),
+        )
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            admin_access_secret="admin-secret",
+            admin_config_path=config_path,
+            runtime_control_plane=control,
+        )
+
+        def reload_runtime_config() -> None:
+            data = load_yaml_config(config_path)
+            runtime = AgentRuntimeConfig.from_dict(data.get("agent_runtime", {}))
+            control.configure(
+                max_running_tasks=runtime.max_running_agents,
+                runtime_snapshot=runtime.to_runtime_snapshot(),
+            )
+
+        service.admin_manager.reload_handler = reload_runtime_config
+        service.start()
+        try:
+            _, update_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/server-settings/update",
+                {
+                    "agent_runtime_update_mode": "replace",
+                    "agent_runtime": {
+                        "max_running_agents": 3,
+                        "runtime_profiles": {},
+                        "agents": {},
+                    },
+                },
+                headers={"X-RC-Admin-Secret": "admin-secret"},
+            )
+
+            assert update_body["ok"] is True
+            runtime_settings = update_body["settings"]["agent_runtime"]
+            assert runtime_settings["max_running_agents"] == 3
+            assert runtime_settings["max_shells_per_agent"] == 1
+            assert "runtime_profiles" not in runtime_settings
+            assert "agents" not in runtime_settings
+            assert control.max_running_tasks == 3
+            assert control.runtime_snapshot["runtime_profiles"] == {}
+            assert control.runtime_snapshot["agents"] == {}
+        finally:
+            service.stop()
+            relay.stop()
+
+    def test_admin_runtime_submit_rejects_missing_agent_profile(self) -> None:
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        control = AgentRuntimeControlPlane(
+            runtime_snapshot={
+                "agents": {"smoke_reviewer": {"runtime_profile": "missing_profile"}}
+            }
+        )
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            admin_access_secret="admin-secret",
+            runtime_control_plane=control,
+        )
+        service.start()
+        try:
+            try:
+                _json_request(
+                    "POST",
+                    f"{service.base_url}/remote/admin/runtime/submit",
+                    {
+                        "task_id": "task-missing-profile",
+                        "issue_id": "issue-1",
+                        "agent_id": "smoke_reviewer",
+                        "prompt": "run smoke",
+                    },
+                    headers={"X-RC-Admin-Secret": "admin-secret"},
+                )
+            except HTTPError as exc:
+                body = json.loads(exc.read().decode("utf-8"))
+                assert exc.code == 400
+                assert body["error"] == "invalid_runtime_task"
+                assert "runtime profile not found: missing_profile" in body["message"]
+            else:
+                raise AssertionError("submit should reject missing runtime profile")
         finally:
             service.stop()
             relay.stop()

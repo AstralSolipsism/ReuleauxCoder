@@ -16,6 +16,7 @@ _URLOPEN = request.build_opener(request.ProxyHandler({})).open
 
 from reuleauxcoder.domain.agent.events import AgentEvent
 from reuleauxcoder.domain.config.models import (
+    AgentRuntimeConfig,
     Config,
     ContextConfig,
     MCPServerConfig,
@@ -29,6 +30,7 @@ from reuleauxcoder.extensions.remote_exec.backend import RemoteRelayToolBackend
 from reuleauxcoder.extensions.remote_exec.http_service import RemoteRelayHTTPService
 from reuleauxcoder.extensions.remote_exec.protocol import ToolPreviewResult
 from reuleauxcoder.extensions.remote_exec.server import RelayServer
+from reuleauxcoder.infrastructure.yaml.loader import load_yaml_config, save_yaml_config
 from reuleauxcoder.infrastructure.persistence.session_store import SessionStore
 from reuleauxcoder.interfaces.entrypoint.runner import (
     AppDependencies,
@@ -49,10 +51,13 @@ def _free_port() -> int:
 
 
 def _json_request(
-    method: str, url: str, payload: dict | None = None
+    method: str,
+    url: str,
+    payload: dict | None = None,
+    headers: dict[str, str] | None = None,
 ) -> tuple[int, dict]:
     data = None
-    headers = {}
+    headers = dict(headers or {})
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -449,6 +454,111 @@ class TestRunnerRemoteExec:
             assert "RC_HOST" in body
             assert "rcoder-peer" in body
             assert "/remote/artifacts/{os}/{arch}/rcoder-peer" in body
+        finally:
+            runner.cleanup(ctx.agent)
+
+    def test_server_settings_reload_refreshes_runtime_control_plane_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        port = _free_port()
+        relay_bind = f"127.0.0.1:{port}"
+        config_path = tmp_path / "config.host.yaml"
+        save_yaml_config(
+            config_path,
+            {
+                "api_key": "key",
+                "remote_exec": {
+                    "enabled": True,
+                    "host_mode": True,
+                    "relay_bind": relay_bind,
+                    "admin_access_secret": "admin-secret",
+                },
+                "agent_runtime": {
+                    "max_running_agents": 1,
+                    "max_shells_per_agent": 1,
+                },
+                "skills": {"enabled": False},
+            },
+        )
+
+        def load_test_config(path: Path | None) -> Config:
+            data = load_yaml_config(path or config_path)
+            remote_exec = data.get("remote_exec", {})
+            config = Config(
+                api_key="key",
+                remote_exec=RemoteExecConfig(
+                    enabled=bool(remote_exec.get("enabled", True)),
+                    host_mode=bool(remote_exec.get("host_mode", True)),
+                    relay_bind=str(remote_exec.get("relay_bind", relay_bind)),
+                    admin_access_secret=str(
+                        remote_exec.get("admin_access_secret", "admin-secret")
+                    ),
+                ),
+                agent_runtime=AgentRuntimeConfig.from_dict(
+                    data.get("agent_runtime", {})
+                ),
+                modes={
+                    "coder": ModeConfig(
+                        name="coder", description="Default coding mode"
+                    )
+                },
+                active_mode="coder",
+            )
+            config.skills.enabled = False
+            return config
+
+        runner = AppRunner(
+            options=AppOptions(config_path=config_path, server_mode=True),
+            dependencies=AppDependencies(
+                load_config=load_test_config,
+                create_llm=lambda cfg: FakeLLM(cfg.model),
+                load_tools=lambda _backend: [],
+                create_agent=lambda llm, tools, _config: FakeAgent(llm, tools=tools),
+            ),
+        )
+        ctx = runner.initialize()
+        try:
+            assert runner._relay_http_service is not None
+            control = runner._relay_http_service.runtime_control_plane
+            assert control is not None
+
+            _, body = _json_request(
+                "POST",
+                f"{runner._relay_http_service.base_url}/remote/admin/server-settings/update",
+                {
+                    "agent_runtime": {
+                        "max_running_agents": 4,
+                        "max_shells_per_agent": 1,
+                        "runtime_profiles": {
+                            "smoke_fake_profile": {
+                                "executor": "fake",
+                                "execution_location": "daemon_worktree",
+                            }
+                        },
+                        "agents": {
+                            "smoke_reviewer": {
+                                "runtime_profile": "smoke_fake_profile"
+                            }
+                        },
+                    }
+                },
+                headers={"X-RC-Admin-Secret": "admin-secret"},
+            )
+
+            assert body["ok"] is True
+            assert control.max_running_tasks == 4
+            assert (
+                control.runtime_snapshot["runtime_profiles"]["smoke_fake_profile"][
+                    "executor"
+                ]
+                == "fake"
+            )
+            assert (
+                control.runtime_snapshot["agents"]["smoke_reviewer"][
+                    "runtime_profile"
+                ]
+                == "smoke_fake_profile"
+            )
         finally:
             runner.cleanup(ctx.agent)
 

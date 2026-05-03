@@ -72,6 +72,14 @@ from reuleauxcoder.services.agent_runtime.executor_backend import (
 from reuleauxcoder.services.agent_runtime.control_plane import RuntimeTaskRequest
 
 
+def _optional_payload_str(payload: dict[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 @dataclass
 class _RemoteChatSession:
     chat_id: str
@@ -605,39 +613,34 @@ class RemoteRelayHTTPService:
                             metadata.setdefault(
                                 "workspace_root", str(payload["workspace_root"])
                             )
-                        task = service.runtime_control_plane.submit_task(
-                            RuntimeTaskRequest(
-                                issue_id=str(payload.get("issue_id") or "manual"),
-                                agent_id=str(payload.get("agent_id") or "default"),
-                                prompt=str(payload.get("prompt") or ""),
-                                executor=str(payload.get("executor") or "reuleauxcoder"),
-                                execution_location=str(
-                                    payload.get("execution_location")
-                                    or "local_workspace"
+                        try:
+                            task = service.runtime_control_plane.submit_task(
+                                RuntimeTaskRequest(
+                                    issue_id=str(payload.get("issue_id") or "manual"),
+                                    agent_id=str(payload.get("agent_id") or "default"),
+                                    prompt=str(payload.get("prompt") or ""),
+                                    executor=_optional_payload_str(payload, "executor"),
+                                    execution_location=_optional_payload_str(
+                                        payload, "execution_location"
+                                    ),
+                                    runtime_profile_id=_optional_payload_str(
+                                        payload, "runtime_profile_id"
+                                    ),
+                                    workdir=_optional_payload_str(payload, "workdir"),
+                                    model=_optional_payload_str(payload, "model"),
+                                    metadata=metadata,
                                 ),
-                                runtime_profile_id=(
-                                    str(payload["runtime_profile_id"])
-                                    if payload.get("runtime_profile_id") is not None
-                                    else None
-                                ),
-                                workdir=(
-                                    str(payload["workdir"])
-                                    if payload.get("workdir") is not None
-                                    else None
-                                ),
-                                model=(
-                                    str(payload["model"])
-                                    if payload.get("model") is not None
-                                    else None
-                                ),
-                                metadata=metadata,
-                            ),
-                            task_id=(
-                                str(payload["task_id"])
-                                if payload.get("task_id") is not None
-                                else None
-                            ),
-                        )
+                                task_id=_optional_payload_str(payload, "task_id"),
+                            )
+                        except ValueError as exc:
+                            self._send_json(
+                                HTTPStatus.BAD_REQUEST,
+                                {
+                                    "error": "invalid_runtime_task",
+                                    "message": str(exc),
+                                },
+                            )
+                            return
                         self._send_json(
                             HTTPStatus.OK,
                             {
@@ -731,6 +734,54 @@ class RemoteRelayHTTPService:
                                 ),
                             },
                         )
+                        return
+                    if path == "/remote/admin/runtime/tasks/list":
+                        if service.runtime_control_plane is None:
+                            self._send_json(
+                                HTTPStatus.SERVICE_UNAVAILABLE,
+                                {"error": "agent_runtime_unavailable"},
+                            )
+                            return
+                        self._send_json(
+                            HTTPStatus.OK,
+                            {
+                                "ok": True,
+                                "tasks": service.runtime_control_plane.list_tasks(
+                                    status=_optional_payload_str(payload, "status"),
+                                    agent_id=_optional_payload_str(payload, "agent_id"),
+                                    issue_id=_optional_payload_str(payload, "issue_id"),
+                                    limit=int(payload.get("limit") or 50),
+                                    after_created_at=_optional_payload_str(
+                                        payload, "after_created_at"
+                                    ),
+                                ),
+                            },
+                        )
+                        return
+                    if path == "/remote/admin/runtime/tasks/load":
+                        if service.runtime_control_plane is None:
+                            self._send_json(
+                                HTTPStatus.SERVICE_UNAVAILABLE,
+                                {"error": "agent_runtime_unavailable"},
+                            )
+                            return
+                        task_id = str(payload.get("task_id") or "")
+                        if not task_id:
+                            self._send_json(
+                                HTTPStatus.BAD_REQUEST, {"error": "task_id_required"}
+                            )
+                            return
+                        try:
+                            detail = service.runtime_control_plane.load_task_detail(
+                                task_id,
+                                event_limit=int(payload.get("event_limit") or 100),
+                            )
+                        except KeyError:
+                            self._send_json(
+                                HTTPStatus.NOT_FOUND, {"error": "task_not_found"}
+                            )
+                            return
+                        self._send_json(HTTPStatus.OK, {"ok": True, **detail})
                         return
                     if path == "/remote/admin/server-settings/read":
                         result = {

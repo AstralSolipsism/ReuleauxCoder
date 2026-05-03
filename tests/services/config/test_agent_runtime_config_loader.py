@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import os
 
 from reuleauxcoder.extensions.remote_exec.admin import RemoteAdminConfigManager
 from reuleauxcoder.services.config.loader import ConfigLoader
@@ -171,6 +172,52 @@ def test_config_validate_rejects_agent_referencing_missing_runtime_profile() -> 
     )
 
 
+def test_parse_config_reads_persistence_settings() -> None:
+    config = ConfigLoader()._parse_config(
+        {
+            "models": {
+                "active_main": "main",
+                "profiles": {"main": {"model": "gpt", "api_key": "key"}},
+            },
+            "persistence": {
+                "backend": "postgres",
+                "database_url": "postgresql://user:pass@localhost/ezcode",
+                "auto_migrate": False,
+                "runtime_enabled": True,
+                "sessions_enabled": True,
+                "legacy_session_import": "disabled",
+                "retention_days": 30,
+            },
+        }
+    )
+
+    assert config.persistence.backend == "postgres"
+    assert config.persistence.database_url == "postgresql://user:pass@localhost/ezcode"
+    assert config.persistence.auto_migrate is False
+    assert config.persistence.legacy_session_import == "disabled"
+    assert config.persistence.retention_days == 30
+
+
+def test_missing_persistence_database_url_env_is_optional() -> None:
+    os.environ.pop("EZCODE_TEST_MISSING_DATABASE_URL", None)
+    loader = ConfigLoader()
+    data = loader._expand_env_refs(
+        {
+            "models": {
+                "active_main": "main",
+                "profiles": {"main": {"model": "gpt", "api_key": "key"}},
+            },
+            "persistence": {
+                "backend": "auto",
+                "database_url": "${EZCODE_TEST_MISSING_DATABASE_URL}",
+            },
+        }
+    )
+    config = loader._parse_config(data)
+
+    assert config.persistence.database_url == ""
+
+
 def test_admin_server_settings_update_preserves_runtime_profiles_and_agents() -> None:
     class MemoryAdminManager(RemoteAdminConfigManager):
         def __init__(self) -> None:
@@ -217,3 +264,94 @@ def test_admin_server_settings_update_preserves_runtime_profiles_and_agents() ->
         "model": "cred-model"
     }
     assert runtime["agents"]["reviewer"]["runtime_profile"] == "codex_remote"
+
+
+def test_admin_server_settings_update_replace_removes_runtime_profiles_and_agents() -> None:
+    class MemoryAdminManager(RemoteAdminConfigManager):
+        def __init__(self) -> None:
+            super().__init__(config_path=None)
+            self.data = {
+                "agent_runtime": {
+                    "max_running_agents": 4,
+                    "max_shells_per_agent": 2,
+                    "runtime_profiles": {
+                        "codex_remote": {
+                            "executor": "codex",
+                            "execution_location": "remote_server",
+                        }
+                    },
+                    "agents": {
+                        "reviewer": {
+                            "runtime_profile": "codex_remote",
+                            "capabilities": ["review"],
+                        }
+                    },
+                }
+            }
+
+        def _load_data(self) -> dict:
+            return deepcopy(self.data)
+
+        def _commit_config(self, data: dict, previous_data: dict):
+            del previous_data
+            self.data = deepcopy(data)
+            return None
+
+    manager = MemoryAdminManager()
+
+    result = manager.update_server_settings(
+        {
+            "agent_runtime_update_mode": "replace",
+            "agent_runtime": {
+                "max_running_agents": 3,
+                "runtime_profiles": {
+                    "fake_daemon": {
+                        "executor": "fake",
+                        "execution_location": "daemon_worktree",
+                    }
+                },
+                "agents": {
+                    "smoke": {
+                        "runtime_profile": "fake_daemon",
+                        "capabilities": ["smoke"],
+                    }
+                },
+            },
+        }
+    )
+
+    assert result.ok is True
+    runtime = manager.data["agent_runtime"]
+    assert runtime["max_running_agents"] == 3
+    assert runtime["max_shells_per_agent"] == 2
+    assert set(runtime["runtime_profiles"]) == {"fake_daemon"}
+    assert set(runtime["agents"]) == {"smoke"}
+
+
+def test_admin_server_settings_update_rejects_missing_agent_profile() -> None:
+    class MemoryAdminManager(RemoteAdminConfigManager):
+        def __init__(self) -> None:
+            super().__init__(config_path=None)
+            self.data = {"agent_runtime": {}}
+
+        def _load_data(self) -> dict:
+            return deepcopy(self.data)
+
+        def _commit_config(self, data: dict, previous_data: dict):
+            del data, previous_data
+            raise AssertionError("invalid config should not be committed")
+
+    result = MemoryAdminManager().update_server_settings(
+        {
+            "agent_runtime_update_mode": "replace",
+            "agent_runtime": {
+                "runtime_profiles": {},
+                "agents": {"reviewer": {"runtime_profile": "missing"}},
+            },
+        }
+    )
+
+    assert result.ok is False
+    assert result.status == 400
+    assert result.payload["error"] == "invalid_agent_runtime"
+    assert "reviewer" in result.payload["message"]

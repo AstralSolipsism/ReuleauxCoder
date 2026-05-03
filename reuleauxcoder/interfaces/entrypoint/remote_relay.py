@@ -114,7 +114,9 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
         else None
     )
     skills_service: SkillsService | None = getattr(agent, "skills_service", None)
-    session_store = runner.dependencies.create_session_store(sessions_dir)
+    session_store = runner.dependencies.create_configured_session_store(
+        config, sessions_dir
+    )
     startup_announced: set[tuple[str, str, str]] = set()
     agent_runtime_limiter = get_agent_runtime_limiter()
     if config is not None:
@@ -140,6 +142,11 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
             max_running_agents=next_config.agent_runtime.max_running_agents,
             max_shells_per_agent=next_config.agent_runtime.max_shells_per_agent,
         )
+        if runner._relay_http_service.runtime_control_plane is not None:
+            runner._relay_http_service.runtime_control_plane.configure(
+                max_running_tasks=next_config.agent_runtime.max_running_agents,
+                runtime_snapshot=next_config.agent_runtime.to_runtime_snapshot(),
+            )
         runner._relay_http_service.mcp_servers = list(next_config.mcp_servers)
         runner._relay_http_service.mcp_artifact_root = Path(
             next_config.mcp_artifact_root
@@ -175,10 +182,6 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                 )
         return f"remote:{machine_key}:{workspace_root or '.'}"
 
-    def _session_snapshot_path(session_id: str) -> Path:
-        session_path = session_store._get_session_path(session_id)
-        return session_path.with_name(f"{session_path.stem}.ui.json")
-
     def _session_metadata_payload(
         session: Session | SessionMetadata,
     ) -> dict[str, Any]:
@@ -196,16 +199,7 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
         }
 
     def _load_session_snapshot(session_id: str) -> tuple[dict[str, Any] | None, str | None]:
-        path = _session_snapshot_path(session_id)
-        if not path.exists():
-            return None, None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            return None, str(exc)
-        if not isinstance(data, dict):
-            return None, "snapshot_not_object"
-        return data, None
+        return session_store.load_snapshot(session_id)
 
     def _handle_session_request(
         action: str, peer_id: str, payload: dict[str, Any]
@@ -293,9 +287,7 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                     "_status": 403,
                 }
             deleted = session_store.delete(session_id)
-            snapshot_path = _session_snapshot_path(session_id)
-            if snapshot_path.exists():
-                snapshot_path.unlink()
+            session_store.delete_snapshot(session_id)
             return {
                 "ok": deleted,
                 "session_id": session_id,
@@ -318,11 +310,7 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                     "error": "session_fingerprint_mismatch",
                     "_status": 403,
                 }
-            path = _session_snapshot_path(session_id)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            session_store.save_snapshot(session_id, snapshot)
             return {"ok": True, "session_id": session_id}
 
         return {"ok": False, "error": "unknown_session_action", "_status": 404}

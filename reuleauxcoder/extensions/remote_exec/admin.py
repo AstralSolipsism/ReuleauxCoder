@@ -81,6 +81,16 @@ class RemoteAdminConfigManager:
             raw_runtime = raw_settings.get("agent_runtime")
         if not isinstance(raw_runtime, dict):
             return AdminConfigResult(False, {"error": "agent_runtime_required"}, 400)
+        update_mode = str(payload.get("agent_runtime_update_mode") or "merge").lower()
+        if update_mode not in {"merge", "replace"}:
+            return AdminConfigResult(
+                False,
+                {
+                    "error": "invalid_agent_runtime_update_mode",
+                    "message": "agent_runtime_update_mode must be merge or replace",
+                },
+                400,
+            )
         with self._lock:
             previous_data = self._load_data()
             data = deepcopy(previous_data)
@@ -89,10 +99,30 @@ class RemoteAdminConfigManager:
                 if isinstance(previous_data.get("agent_runtime"), dict)
                 else {}
             )
-            merged = ConfigLoader()._merge_dicts(
-                {"agent_runtime": previous_runtime},
-                {"agent_runtime": raw_runtime},
-            )
+            if update_mode == "replace":
+                for key in ("runtime_profiles", "agents"):
+                    if key in raw_runtime and not isinstance(raw_runtime.get(key), dict):
+                        return AdminConfigResult(
+                            False,
+                            {
+                                "error": "invalid_agent_runtime",
+                                "message": f"agent_runtime.{key} must be an object",
+                            },
+                            400,
+                        )
+                merged_runtime = ConfigLoader()._merge_dicts(
+                    previous_runtime,
+                    raw_runtime,
+                )
+                for key in ("runtime_profiles", "agents"):
+                    if key in raw_runtime:
+                        merged_runtime[key] = deepcopy(raw_runtime[key])
+                merged = {"agent_runtime": merged_runtime}
+            else:
+                merged = ConfigLoader()._merge_dicts(
+                    {"agent_runtime": previous_runtime},
+                    {"agent_runtime": raw_runtime},
+                )
             try:
                 runtime = AgentRuntimeConfig.from_dict(merged["agent_runtime"])
             except Exception as exc:
@@ -107,6 +137,24 @@ class RemoteAdminConfigManager:
                     {
                         "error": "invalid_agent_runtime",
                         "message": "agent_runtime limits must be positive integers",
+                    },
+                    400,
+                )
+            missing_profiles = [
+                agent_id
+                for agent_id, agent in runtime.agents.items()
+                if agent.runtime_profile
+                and agent.runtime_profile not in runtime.runtime_profiles
+            ]
+            if missing_profiles:
+                return AdminConfigResult(
+                    False,
+                    {
+                        "error": "invalid_agent_runtime",
+                        "message": (
+                            "agent runtime profile references must exist: "
+                            + ", ".join(sorted(missing_profiles))
+                        ),
                     },
                     400,
                 )

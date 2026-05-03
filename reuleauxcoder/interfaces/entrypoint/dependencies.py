@@ -24,6 +24,10 @@ from reuleauxcoder.extensions.skills.service import SkillsService
 from reuleauxcoder.interfaces.events import UIEventBus, UIEventKind
 from reuleauxcoder.interfaces.interactions import UIInteractor
 from reuleauxcoder.infrastructure.persistence.session_store import SessionStore
+from reuleauxcoder.infrastructure.persistence.factory import (
+    create_runtime_control_plane,
+    create_session_store as create_configured_session_store,
+)
 from reuleauxcoder.services.config.loader import ConfigLoader
 from reuleauxcoder.services.agent_runtime.control_plane import AgentRuntimeControlPlane
 from reuleauxcoder.services.llm.client import LLM
@@ -61,6 +65,12 @@ def _default_create_agent(llm: LLM, tools: list[Any], config: Config) -> Agent:
 
 def _default_create_session_store(sessions_dir: Path | None) -> SessionStore:
     return SessionStore(sessions_dir)
+
+
+def _default_create_configured_session_store(
+    config: Config, sessions_dir: Path | None
+):
+    return create_configured_session_store(config, sessions_dir)
 
 
 def _default_create_mcp_manager(ui_bus: UIEventBus) -> MCPManager:
@@ -194,10 +204,7 @@ def _default_create_remote_http_service(
         environment_cli_tools=config.environment.cli_tools,
         environment_skills=config.environment.skills,
         admin_config_path=getattr(config, "_source_path", None),
-        runtime_control_plane=AgentRuntimeControlPlane(
-            max_running_tasks=config.agent_runtime.max_running_agents,
-            runtime_snapshot=config.agent_runtime.to_runtime_snapshot(),
-        ),
+        runtime_control_plane=create_runtime_control_plane(config),
     )
 
 
@@ -215,6 +222,9 @@ class AppDependencies:
     create_agent: Callable[[LLM, list[Any], Config], Agent] = _default_create_agent
     create_session_store: Callable[[Path | None], SessionStore] = (
         _default_create_session_store
+    )
+    create_configured_session_store: Callable[[Config, Path | None], Any] = (
+        _default_create_configured_session_store
     )
     create_mcp_manager: Callable[[UIEventBus], MCPManager] = _default_create_mcp_manager
     create_action_registry: Callable[[], ActionRegistry] = (
