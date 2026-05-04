@@ -68,6 +68,32 @@ func TestBuildCodexInvocationUsesAppServerTransport(t *testing.T) {
 	}
 }
 
+func TestBuildInvocationRejectsUnsupportedExecutor(t *testing.T) {
+	_, err := BuildInvocation(RunRequest{Executor: "unknown-cli"}, RunOptions{})
+	if err == nil || !strings.Contains(err.Error(), "unsupported executor") {
+		t.Fatalf("expected unsupported executor error, got %v", err)
+	}
+}
+
+func TestNormalizeStreamLineMapsCommonCLIEvents(t *testing.T) {
+	cases := []struct {
+		line string
+		want EventType
+	}{
+		{`{"type":"tool_use","name":"read_file"}`, EventToolUse},
+		{`{"type":"tool-result","content":"ok"}`, EventToolResult},
+		{`{"type":"error","message":"bad"}`, EventError},
+		{`{"type":"result","usage":{"input_tokens":1}}`, EventResult},
+		{`{"type":"thinking","message":"plan"}`, EventThinking},
+		{`{"text":"hello"}`, EventText},
+	}
+	for _, tc := range cases {
+		if got := normalizeStreamLine("claude", tc.line); got.Type != tc.want {
+			t.Fatalf("line %s event type = %s want %s", tc.line, got.Type, tc.want)
+		}
+	}
+}
+
 func TestExecEnvManagerRejectsEscapingPromptFile(t *testing.T) {
 	manager, err := NewExecEnvManager(t.TempDir())
 	if err != nil {

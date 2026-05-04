@@ -129,14 +129,16 @@ func normalizeStreamLine(provider, line string) Event {
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
 		return Event{Type: EventLog, Text: line, Data: map[string]any{"provider": provider}}
 	}
-	if text, ok := raw["content"].(string); ok && text != "" {
-		return Event{Type: EventText, Text: text, Data: raw}
-	}
-	if text, ok := raw["text"].(string); ok && text != "" {
-		return Event{Type: EventText, Text: text, Data: raw}
-	}
 	if typ, ok := raw["type"].(string); ok {
 		switch strings.ReplaceAll(typ, "-", "_") {
+		case "text":
+			if text, ok := raw["text"].(string); ok && text != "" {
+				return Event{Type: EventText, Text: text, Data: raw}
+			}
+			if text, ok := raw["content"].(string); ok && text != "" {
+				return Event{Type: EventText, Text: text, Data: raw}
+			}
+			return Event{Type: EventText, Data: raw}
 		case "thinking":
 			return Event{Type: EventThinking, Data: raw}
 		case "tool_use":
@@ -148,6 +150,12 @@ func normalizeStreamLine(provider, line string) Event {
 		case "result":
 			return Event{Type: EventResult, Data: raw}
 		}
+	}
+	if text, ok := raw["content"].(string); ok && text != "" {
+		return Event{Type: EventText, Text: text, Data: raw}
+	}
+	if text, ok := raw["text"].(string); ok && text != "" {
+		return Event{Type: EventText, Text: text, Data: raw}
 	}
 	return Event{Type: EventStatus, Data: raw}
 }
