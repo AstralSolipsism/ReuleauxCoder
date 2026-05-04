@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+import json
+
+from reuleauxcoder.extensions.tools.mention import MentionAgentTool
+from reuleauxcoder.services.agent_runtime.control_plane import AgentRuntimeControlPlane
+from reuleauxcoder.services.issue_assignment.service import IssueAssignmentService
+from reuleauxcoder.services.taskflow.service import TaskflowService
+
+
+def test_mention_agent_tool_creates_record_without_dispatching_runtime_task() -> None:
+    runtime = AgentRuntimeControlPlane(
+        runtime_snapshot={
+            "runtime_profiles": {"docs_profile": {"executor": "fake"}},
+            "agents": {
+                "docs": {
+                    "aliases": ["writer"],
+                    "runtime_profile": "docs_profile",
+                    "capabilities": ["docs"],
+                }
+            },
+        }
+    )
+    taskflow = TaskflowService(runtime_control_plane=runtime)
+    service = IssueAssignmentService(taskflow_service=taskflow)
+    issue = service.create_issue(title="Docs", description="Write docs", peer_id="p1")
+    tool = MentionAgentTool(service, peer_id="p1")
+
+    result = json.loads(
+        tool.execute(
+            "create_mention",
+            raw_text="@writer please help",
+            issue_id=issue.id,
+            prompt="Write docs",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["mention"]["resolved_agent_id"] == "docs"
+    assert result["mention"]["assignment_id"]
+    assert runtime.list_tasks() == []

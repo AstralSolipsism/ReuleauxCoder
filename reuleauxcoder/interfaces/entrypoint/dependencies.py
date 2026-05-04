@@ -25,8 +25,10 @@ from reuleauxcoder.interfaces.events import UIEventBus, UIEventKind
 from reuleauxcoder.interfaces.interactions import UIInteractor
 from reuleauxcoder.infrastructure.persistence.session_store import SessionStore
 from reuleauxcoder.infrastructure.persistence.factory import (
+    create_issue_assignment_service,
     create_runtime_control_plane,
     create_session_store as create_configured_session_store,
+    create_taskflow_service,
 )
 from reuleauxcoder.services.config.loader import ConfigLoader
 from reuleauxcoder.services.agent_runtime.control_plane import AgentRuntimeControlPlane
@@ -191,6 +193,13 @@ def _default_create_remote_http_service(
         return None
     if not config.remote_exec.host_mode:
         return None
+    runtime_control_plane = create_runtime_control_plane(config)
+    taskflow_service = create_taskflow_service(
+        config, runtime_control_plane=runtime_control_plane
+    )
+    issue_assignment_service = create_issue_assignment_service(
+        config, taskflow_service=taskflow_service
+    )
     return RemoteRelayHTTPService(
         relay_server=relay_server,
         bind=config.remote_exec.relay_bind,
@@ -204,7 +213,9 @@ def _default_create_remote_http_service(
         environment_cli_tools=config.environment.cli_tools,
         environment_skills=config.environment.skills,
         admin_config_path=getattr(config, "_source_path", None),
-        runtime_control_plane=create_runtime_control_plane(config),
+        runtime_control_plane=runtime_control_plane,
+        taskflow_service=taskflow_service,
+        issue_assignment_service=issue_assignment_service,
     )
 
 

@@ -14,6 +14,16 @@ from reuleauxcoder.infrastructure.persistence.postgres_session_store import (
 from reuleauxcoder.infrastructure.persistence.session_store import SessionStore
 from reuleauxcoder.services.agent_runtime.control_plane import AgentRuntimeControlPlane
 from reuleauxcoder.services.agent_runtime.postgres_store import PostgresRuntimeStore
+from reuleauxcoder.services.issue_assignment.in_memory_store import (
+    InMemoryIssueAssignmentStore,
+)
+from reuleauxcoder.services.issue_assignment.postgres_store import (
+    PostgresIssueAssignmentStore,
+)
+from reuleauxcoder.services.issue_assignment.service import IssueAssignmentService
+from reuleauxcoder.services.taskflow.in_memory_store import InMemoryTaskflowStore
+from reuleauxcoder.services.taskflow.postgres_store import PostgresTaskflowStore
+from reuleauxcoder.services.taskflow.service import TaskflowService
 
 
 def should_use_postgres(persistence: PersistenceConfig) -> bool:
@@ -52,6 +62,26 @@ def create_runtime_control_plane(config: Config) -> AgentRuntimeControlPlane:
         runtime_snapshot=config.agent_runtime.to_runtime_snapshot(),
         store=store,
     )
+
+
+def create_taskflow_service(
+    config: Config, *, runtime_control_plane: AgentRuntimeControlPlane | None = None
+) -> TaskflowService:
+    engine = _engine_for(config)
+    store = PostgresTaskflowStore(engine) if engine is not None else InMemoryTaskflowStore()
+    return TaskflowService(store, runtime_control_plane=runtime_control_plane)
+
+
+def create_issue_assignment_service(
+    config: Config, *, taskflow_service: TaskflowService
+) -> IssueAssignmentService:
+    engine = _engine_for(config)
+    store = (
+        PostgresIssueAssignmentStore(engine)
+        if engine is not None
+        else InMemoryIssueAssignmentStore()
+    )
+    return IssueAssignmentService(store, taskflow_service=taskflow_service)
 
 
 def create_session_store(config: Config, sessions_dir: Path | None) -> Any:

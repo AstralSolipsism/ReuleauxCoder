@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from reuleauxcoder.extensions.remote_exec.bootstrap import (
     generate_bootstrap_script,
@@ -70,6 +70,8 @@ from reuleauxcoder.services.agent_runtime.executor_backend import (
     ExecutorRunResult,
 )
 from reuleauxcoder.services.agent_runtime.control_plane import RuntimeTaskRequest
+from reuleauxcoder.services.issue_assignment.service import IssueAssignmentService
+from reuleauxcoder.services.taskflow.service import TaskflowService
 
 
 def _optional_payload_str(payload: dict[str, Any], key: str) -> str | None:
@@ -85,6 +87,8 @@ class _RemoteChatSession:
     chat_id: str
     peer_id: str
     session_hint: str | None = None
+    workflow_mode: str | None = None
+    taskflow_goal_id: str | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
     done: bool = False
     running: bool = False
@@ -249,6 +253,8 @@ class RemoteRelayHTTPService:
         admin_provider_test_handler: ProviderTestHandler | None = None,
         admin_provider_models_handler: ProviderModelsHandler | None = None,
         runtime_control_plane: Any | None = None,
+        taskflow_service: TaskflowService | None = None,
+        issue_assignment_service: IssueAssignmentService | None = None,
     ) -> None:
         self.relay_server = relay_server
         self.bind = bind
@@ -271,6 +277,13 @@ class RemoteRelayHTTPService:
             provider_models_handler=admin_provider_models_handler,
         )
         self.runtime_control_plane = runtime_control_plane
+        self.taskflow_service = taskflow_service or TaskflowService(
+            runtime_control_plane=runtime_control_plane
+        )
+        self.issue_assignment_service = (
+            issue_assignment_service
+            or IssueAssignmentService(taskflow_service=self.taskflow_service)
+        )
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._queues: dict[str, queue.Queue[RelayEnvelope]] = {}
@@ -364,11 +377,20 @@ class RemoteRelayHTTPService:
         self.session_handler = handler
 
     def _create_chat_session(
-        self, peer_id: str, session_hint: str | None = None
+        self,
+        peer_id: str,
+        session_hint: str | None = None,
+        *,
+        workflow_mode: str | None = None,
+        taskflow_goal_id: str | None = None,
     ) -> _RemoteChatSession:
         self._gc_chat_sessions()
         session = _RemoteChatSession(
-            chat_id=str(uuid.uuid4()), peer_id=peer_id, session_hint=session_hint
+            chat_id=str(uuid.uuid4()),
+            peer_id=peer_id,
+            session_hint=session_hint,
+            workflow_mode=workflow_mode,
+            taskflow_goal_id=taskflow_goal_id,
         )
         with self._chat_sessions_lock:
             self._chat_sessions[session.chat_id] = session
@@ -432,6 +454,21 @@ class RemoteRelayHTTPService:
                 parsed = urlparse(self.path)
                 if parsed.path == "/remote/capabilities":
                     self._handle_capabilities()
+                    return
+                if parsed.path.startswith("/remote/taskflow/"):
+                    self._handle_taskflow_get(parsed)
+                    return
+                if parsed.path.startswith("/remote/issues/"):
+                    self._handle_issue_assignment_get(parsed)
+                    return
+                if parsed.path.startswith("/remote/assignments/"):
+                    self._handle_issue_assignment_get(parsed)
+                    return
+                if parsed.path.startswith("/remote/mentions/"):
+                    self._handle_issue_assignment_get(parsed)
+                    return
+                if parsed.path.startswith("/remote/agent-runtime/tasks/"):
+                    self._handle_runtime_events_get(parsed)
                     return
                 if parsed.path == "/remote/bootstrap.sh":
                     self._handle_bootstrap(parsed, "sh")
@@ -506,6 +543,18 @@ class RemoteRelayHTTPService:
                 if parsed.path.startswith("/remote/sessions/"):
                     self._handle_sessions(parsed.path)
                     return
+                if parsed.path.startswith("/remote/taskflow/"):
+                    self._handle_taskflow_post(parsed.path)
+                    return
+                if (
+                    parsed.path == "/remote/issues"
+                    or parsed.path.startswith("/remote/issues/")
+                    or parsed.path.startswith("/remote/assignments/")
+                    or parsed.path == "/remote/mentions/parse"
+                    or parsed.path == "/remote/mentions"
+                ):
+                    self._handle_issue_assignment_post(parsed.path)
+                    return
                 if parsed.path.startswith("/remote/admin/"):
                     self._handle_admin(parsed.path)
                     return
@@ -558,6 +607,15 @@ class RemoteRelayHTTPService:
                     return None
                 return service.relay_server.token_manager.verify_peer_token(peer_token)
 
+            def _query_value(self, parsed: Any, key: str, default: str = "") -> str:
+                values = parse_qs(parsed.query).get(key, [])
+                if not values:
+                    return default
+                return values[0]
+
+            def _verify_query_peer(self, parsed: Any) -> str | None:
+                return self._verify_peer_token(self._query_value(parsed, "peer_token"))
+
             def _handle_capabilities(self) -> None:
                 self._send_json(
                     HTTPStatus.OK,
@@ -568,6 +626,9 @@ class RemoteRelayHTTPService:
                         "capabilities": {
                             "sessions": service.session_handler is not None,
                             "chat_stream": service.stream_chat_handler is not None,
+                            "taskflow": service.taskflow_service is not None,
+                            "issue_assignment": service.issue_assignment_service
+                            is not None,
                             "fresh_session_without_session_hint": service.stream_chat_handler
                             is not None,
                             "peer_token_heartbeat_refresh": True,
@@ -1018,6 +1079,625 @@ class RemoteRelayHTTPService:
                 )
                 self._send_json(HTTPStatus.OK, response.to_dict())
 
+            def _handle_taskflow_get(self, parsed: Any) -> None:
+                peer_id = self._verify_query_peer(parsed)
+                if peer_id is None:
+                    self._send_json(
+                        HTTPStatus.UNAUTHORIZED, {"error": "invalid_peer_token"}
+                    )
+                    return
+                service.relay_server.registry.update_heartbeat(peer_id)
+                parts = [
+                    unquote(part)
+                    for part in parsed.path.strip("/").split("/")
+                    if part
+                ]
+                try:
+                    if len(parts) == 4 and parts[:3] == ["remote", "taskflow", "goals"]:
+                        detail = service.taskflow_service.load_goal_detail(
+                            parts[3], peer_id=peer_id
+                        )
+                        self._send_json(HTTPStatus.OK, {"ok": True, **detail})
+                        return
+                    if (
+                        len(parts) == 5
+                        and parts[:3] == ["remote", "taskflow", "goals"]
+                        and parts[4] == "events"
+                    ):
+                        events = service.taskflow_service.list_events(
+                            parts[3],
+                            after_seq=int(self._query_value(parsed, "after_seq", "0") or 0),
+                            timeout_sec=float(
+                                self._query_value(parsed, "timeout_sec", "0") or 0
+                            ),
+                            peer_id=peer_id,
+                        )
+                        self._send_json(HTTPStatus.OK, {"ok": True, "events": events})
+                        return
+                    if (
+                        len(parts) == 5
+                        and parts[:3] == ["remote", "taskflow", "task-drafts"]
+                        and parts[4] == "dispatch-decisions"
+                    ):
+                        decisions = [
+                            decision.to_dict()
+                            for decision in service.taskflow_service.list_dispatch_decisions(
+                                parts[3], peer_id=peer_id
+                            )
+                        ]
+                        self._send_json(
+                            HTTPStatus.OK, {"ok": True, "decisions": decisions}
+                        )
+                        return
+                except KeyError as exc:
+                    self._send_json(
+                        HTTPStatus.NOT_FOUND,
+                        {"error": "taskflow_not_found", "message": str(exc)},
+                    )
+                    return
+                except PermissionError as exc:
+                    self._send_json(
+                        HTTPStatus.FORBIDDEN,
+                        {"error": "taskflow_forbidden", "message": str(exc)},
+                    )
+                    return
+                except Exception as exc:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "taskflow_request_failed", "message": str(exc)},
+                    )
+                    return
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+
+            def _handle_taskflow_post(self, path: str) -> None:
+                payload = self._read_json()
+                peer_id = self._verify_peer_token(payload.get("peer_token"))
+                if peer_id is None:
+                    self._send_json(
+                        HTTPStatus.UNAUTHORIZED, {"error": "invalid_peer_token"}
+                    )
+                    return
+                service.relay_server.registry.update_heartbeat(peer_id)
+                parts = [
+                    unquote(part)
+                    for part in path.strip("/").split("/")
+                    if part
+                ]
+                try:
+                    if parts == ["remote", "taskflow", "goals"]:
+                        goal = service.taskflow_service.create_goal(
+                            title=str(payload.get("title") or ""),
+                            prompt=str(payload.get("prompt") or ""),
+                            session_id=(
+                                str(payload["session_id"])
+                                if payload.get("session_id") is not None
+                                else None
+                            ),
+                            peer_id=peer_id,
+                            metadata=(
+                                dict(payload.get("metadata"))
+                                if isinstance(payload.get("metadata"), dict)
+                                else {}
+                            ),
+                            goal_id=(
+                                str(payload["goal_id"])
+                                if payload.get("goal_id") is not None
+                                else None
+                            ),
+                        )
+                        self._send_json(
+                            HTTPStatus.OK, {"ok": True, "goal": goal.to_dict()}
+                        )
+                        return
+                    if len(parts) == 5 and parts[:3] == ["remote", "taskflow", "goals"]:
+                        goal_id = parts[3]
+                        action = parts[4]
+                        if action == "brief":
+                            brief = service.taskflow_service.record_brief(
+                                goal_id,
+                                summary=str(payload.get("summary") or ""),
+                                decision_points=(
+                                    list(payload.get("decision_points"))
+                                    if isinstance(payload.get("decision_points"), list)
+                                    else []
+                                ),
+                                issue_drafts=(
+                                    list(payload.get("issue_drafts"))
+                                    if isinstance(payload.get("issue_drafts"), list)
+                                    else []
+                                ),
+                                task_drafts=(
+                                    list(payload.get("task_drafts"))
+                                    if isinstance(payload.get("task_drafts"), list)
+                                    else []
+                                ),
+                                ready=bool(payload.get("ready", False)),
+                                metadata=(
+                                    dict(payload.get("metadata"))
+                                    if isinstance(payload.get("metadata"), dict)
+                                    else {}
+                                ),
+                                peer_id=peer_id,
+                            )
+                            detail = service.taskflow_service.load_goal_detail(
+                                goal_id, peer_id=peer_id
+                            )
+                            self._send_json(
+                                HTTPStatus.OK,
+                                {"ok": True, "brief": brief.to_dict(), **detail},
+                            )
+                            return
+                        if action == "confirm":
+                            goal = service.taskflow_service.confirm_goal(
+                                goal_id, peer_id=peer_id, confirmed_by="user"
+                            )
+                            detail = service.taskflow_service.load_goal_detail(
+                                goal_id, peer_id=peer_id
+                            )
+                            self._send_json(
+                                HTTPStatus.OK,
+                                {"ok": True, "goal": goal.to_dict(), **detail},
+                            )
+                            return
+                        if action == "cancel":
+                            goal = service.taskflow_service.cancel_goal(
+                                goal_id,
+                                reason=str(payload.get("reason") or "user_cancelled"),
+                                peer_id=peer_id,
+                            )
+                            self._send_json(
+                                HTTPStatus.OK, {"ok": True, "goal": goal.to_dict()}
+                            )
+                            return
+                    if (
+                        len(parts) == 5
+                        and parts[:3] == ["remote", "taskflow", "task-drafts"]
+                    ):
+                        draft_id = parts[3]
+                        action = parts[4]
+                        if action == "dispatch":
+                            decision = service.taskflow_service.dispatch_task_draft(
+                                draft_id,
+                                manual_agent_id=(
+                                    str(payload["manual_agent_id"])
+                                    if payload.get("manual_agent_id") is not None
+                                    else None
+                                ),
+                                peer_id=peer_id,
+                            )
+                            self._send_json(
+                                HTTPStatus.OK,
+                                {"ok": True, "decision": decision.to_dict()},
+                            )
+                            return
+                        if action == "assign":
+                            agent_id = str(payload.get("agent_id") or "")
+                            if not agent_id:
+                                self._send_json(
+                                    HTTPStatus.BAD_REQUEST,
+                                    {"error": "agent_id_required"},
+                                )
+                                return
+                            decision = service.taskflow_service.assign_task_draft(
+                                draft_id, agent_id=agent_id, peer_id=peer_id
+                            )
+                            self._send_json(
+                                HTTPStatus.OK,
+                                {"ok": True, "decision": decision.to_dict()},
+                            )
+                            return
+                except KeyError as exc:
+                    self._send_json(
+                        HTTPStatus.NOT_FOUND,
+                        {"error": "taskflow_not_found", "message": str(exc)},
+                    )
+                    return
+                except ValueError as exc:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "taskflow_invalid_state", "message": str(exc)},
+                    )
+                    return
+                except PermissionError as exc:
+                    self._send_json(
+                        HTTPStatus.FORBIDDEN,
+                        {"error": "taskflow_forbidden", "message": str(exc)},
+                    )
+                    return
+                except RuntimeError as exc:
+                    self._send_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "taskflow_unavailable", "message": str(exc)},
+                    )
+                    return
+                except Exception as exc:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "taskflow_request_failed", "message": str(exc)},
+                    )
+                    return
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+
+            def _handle_issue_assignment_get(self, parsed: Any) -> None:
+                peer_id = self._verify_query_peer(parsed)
+                if peer_id is None:
+                    self._send_json(
+                        HTTPStatus.UNAUTHORIZED, {"error": "invalid_peer_token"}
+                    )
+                    return
+                service.relay_server.registry.update_heartbeat(peer_id)
+                parts = [
+                    unquote(part)
+                    for part in parsed.path.strip("/").split("/")
+                    if part
+                ]
+                try:
+                    if len(parts) == 3 and parts[:2] == ["remote", "issues"]:
+                        detail = service.issue_assignment_service.load_issue_detail(
+                            parts[2], peer_id=peer_id
+                        )
+                        self._send_json(HTTPStatus.OK, {"ok": True, **detail})
+                        return
+                    if (
+                        len(parts) == 4
+                        and parts[:2] == ["remote", "issues"]
+                        and parts[3] == "assignments"
+                    ):
+                        assignments = [
+                            assignment.to_dict()
+                            for assignment in service.issue_assignment_service.list_assignments(
+                                parts[2], peer_id=peer_id
+                            )
+                        ]
+                        self._send_json(
+                            HTTPStatus.OK, {"ok": True, "assignments": assignments}
+                        )
+                        return
+                    if (
+                        len(parts) == 4
+                        and parts[:2] == ["remote", "issues"]
+                        and parts[3] == "events"
+                    ):
+                        events = service.issue_assignment_service.list_events(
+                            "issue",
+                            parts[2],
+                            after_seq=int(
+                                self._query_value(parsed, "after_seq", "0") or 0
+                            ),
+                            timeout_sec=float(
+                                self._query_value(parsed, "timeout_sec", "0") or 0
+                            ),
+                            peer_id=peer_id,
+                        )
+                        self._send_json(HTTPStatus.OK, {"ok": True, "events": events})
+                        return
+                    if len(parts) == 3 and parts[:2] == ["remote", "assignments"]:
+                        detail = (
+                            service.issue_assignment_service.load_assignment_detail(
+                                parts[2], peer_id=peer_id
+                            )
+                        )
+                        self._send_json(HTTPStatus.OK, {"ok": True, **detail})
+                        return
+                    if (
+                        len(parts) == 4
+                        and parts[:2] == ["remote", "assignments"]
+                        and parts[3] == "events"
+                    ):
+                        events = service.issue_assignment_service.list_events(
+                            "assignment",
+                            parts[2],
+                            after_seq=int(
+                                self._query_value(parsed, "after_seq", "0") or 0
+                            ),
+                            timeout_sec=float(
+                                self._query_value(parsed, "timeout_sec", "0") or 0
+                            ),
+                            peer_id=peer_id,
+                        )
+                        self._send_json(HTTPStatus.OK, {"ok": True, "events": events})
+                        return
+                    if len(parts) == 3 and parts[:2] == ["remote", "mentions"]:
+                        mention = service.issue_assignment_service.get_mention(
+                            parts[2], peer_id=peer_id
+                        )
+                        self._send_json(
+                            HTTPStatus.OK,
+                            {"ok": True, "mention": mention.to_dict()},
+                        )
+                        return
+                    if (
+                        len(parts) == 4
+                        and parts[:2] == ["remote", "mentions"]
+                        and parts[3] == "events"
+                    ):
+                        events = service.issue_assignment_service.list_events(
+                            "mention",
+                            parts[2],
+                            after_seq=int(
+                                self._query_value(parsed, "after_seq", "0") or 0
+                            ),
+                            timeout_sec=float(
+                                self._query_value(parsed, "timeout_sec", "0") or 0
+                            ),
+                            peer_id=peer_id,
+                        )
+                        self._send_json(HTTPStatus.OK, {"ok": True, "events": events})
+                        return
+                except KeyError as exc:
+                    self._send_json(
+                        HTTPStatus.NOT_FOUND,
+                        {"error": "assignment_not_found", "message": str(exc)},
+                    )
+                    return
+                except PermissionError as exc:
+                    self._send_json(
+                        HTTPStatus.FORBIDDEN,
+                        {"error": "assignment_forbidden", "message": str(exc)},
+                    )
+                    return
+                except Exception as exc:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "assignment_request_failed", "message": str(exc)},
+                    )
+                    return
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+
+            def _handle_issue_assignment_post(self, path: str) -> None:
+                payload = self._read_json()
+                peer_id = self._verify_peer_token(payload.get("peer_token"))
+                if peer_id is None:
+                    self._send_json(
+                        HTTPStatus.UNAUTHORIZED, {"error": "invalid_peer_token"}
+                    )
+                    return
+                service.relay_server.registry.update_heartbeat(peer_id)
+                parts = [
+                    unquote(part)
+                    for part in path.strip("/").split("/")
+                    if part
+                ]
+                try:
+                    if parts == ["remote", "issues"]:
+                        issue = service.issue_assignment_service.create_issue(
+                            title=str(payload.get("title") or ""),
+                            description=str(payload.get("description") or ""),
+                            peer_id=peer_id,
+                            source=str(payload.get("source") or "manual"),
+                            taskflow_goal_id=_optional_payload_str(
+                                payload, "taskflow_goal_id"
+                            ),
+                            taskflow_issue_draft_id=_optional_payload_str(
+                                payload, "taskflow_issue_draft_id"
+                            ),
+                            metadata=(
+                                dict(payload.get("metadata"))
+                                if isinstance(payload.get("metadata"), dict)
+                                else {}
+                            ),
+                            issue_id=_optional_payload_str(payload, "issue_id"),
+                        )
+                        self._send_json(
+                            HTTPStatus.OK, {"ok": True, "issue": issue.to_dict()}
+                        )
+                        return
+                    if (
+                        len(parts) == 4
+                        and parts[:2] == ["remote", "issues"]
+                        and parts[3] == "assignments"
+                    ):
+                        assignment = (
+                            service.issue_assignment_service.create_assignment(
+                                parts[2],
+                                peer_id=peer_id,
+                                target_agent_id=_optional_payload_str(
+                                    payload, "target_agent_id"
+                                )
+                                or _optional_payload_str(payload, "agent_id"),
+                                title=_optional_payload_str(payload, "title"),
+                                prompt=_optional_payload_str(payload, "prompt"),
+                                required_capabilities=(
+                                    list(payload.get("required_capabilities"))
+                                    if isinstance(
+                                        payload.get("required_capabilities"), list
+                                    )
+                                    else []
+                                ),
+                                preferred_capabilities=(
+                                    list(payload.get("preferred_capabilities"))
+                                    if isinstance(
+                                        payload.get("preferred_capabilities"), list
+                                    )
+                                    else []
+                                ),
+                                task_type=_optional_payload_str(payload, "task_type"),
+                                workspace_root=_optional_payload_str(
+                                    payload, "workspace_root"
+                                ),
+                                repo_url=_optional_payload_str(payload, "repo_url"),
+                                execution_location=_optional_payload_str(
+                                    payload, "execution_location"
+                                ),
+                                reason=str(payload.get("reason") or ""),
+                                source=str(payload.get("source") or "manual"),
+                                metadata=(
+                                    dict(payload.get("metadata"))
+                                    if isinstance(payload.get("metadata"), dict)
+                                    else {}
+                                ),
+                                assignment_id=_optional_payload_str(
+                                    payload, "assignment_id"
+                                ),
+                            )
+                        )
+                        self._send_json(
+                            HTTPStatus.OK,
+                            {"ok": True, "assignment": assignment.to_dict()},
+                        )
+                        return
+                    if (
+                        len(parts) == 4
+                        and parts[:2] == ["remote", "assignments"]
+                        and parts[3] == "dispatch"
+                    ):
+                        assignment = (
+                            service.issue_assignment_service.dispatch_assignment(
+                                parts[2], peer_id=peer_id
+                            )
+                        )
+                        self._send_json(
+                            HTTPStatus.OK,
+                            {"ok": True, "assignment": assignment.to_dict()},
+                        )
+                        return
+                    if (
+                        len(parts) == 4
+                        and parts[:2] == ["remote", "assignments"]
+                        and parts[3] == "cancel"
+                    ):
+                        assignment = service.issue_assignment_service.cancel_assignment(
+                            parts[2],
+                            peer_id=peer_id,
+                            reason=str(payload.get("reason") or "user_cancelled"),
+                        )
+                        self._send_json(
+                            HTTPStatus.OK,
+                            {"ok": True, "assignment": assignment.to_dict()},
+                        )
+                        return
+                    if (
+                        len(parts) == 4
+                        and parts[:2] == ["remote", "assignments"]
+                        and parts[3] == "assign"
+                    ):
+                        agent_id = _optional_payload_str(payload, "agent_id")
+                        if not agent_id:
+                            self._send_json(
+                                HTTPStatus.BAD_REQUEST,
+                                {"error": "agent_id_required"},
+                            )
+                            return
+                        assignment = service.issue_assignment_service.reassign_assignment(
+                            parts[2],
+                            agent_id=agent_id,
+                            peer_id=peer_id,
+                            reason=str(payload.get("reason") or "manual_reassign"),
+                        )
+                        self._send_json(
+                            HTTPStatus.OK,
+                            {"ok": True, "assignment": assignment.to_dict()},
+                        )
+                        return
+                    if parts == ["remote", "mentions", "parse"]:
+                        mention = service.issue_assignment_service.parse_mention(
+                            raw_text=str(payload.get("raw_text") or ""),
+                            agent_ref=_optional_payload_str(payload, "agent_ref"),
+                            peer_id=peer_id,
+                        )
+                        self._send_json(
+                            HTTPStatus.OK,
+                            {"ok": True, "mention": mention.to_dict()},
+                        )
+                        return
+                    if parts == ["remote", "mentions"]:
+                        mention = service.issue_assignment_service.create_mention(
+                            raw_text=str(payload.get("raw_text") or ""),
+                            peer_id=peer_id,
+                            agent_ref=_optional_payload_str(payload, "agent_ref"),
+                            issue_id=_optional_payload_str(payload, "issue_id"),
+                            title=_optional_payload_str(payload, "title"),
+                            prompt=_optional_payload_str(payload, "prompt"),
+                            context_type=str(payload.get("context_type") or "chat"),
+                            context_id=_optional_payload_str(payload, "context_id"),
+                            source=str(payload.get("source") or "manual"),
+                            metadata=(
+                                dict(payload.get("metadata"))
+                                if isinstance(payload.get("metadata"), dict)
+                                else {}
+                            ),
+                        )
+                        self._send_json(
+                            HTTPStatus.OK,
+                            {"ok": True, "mention": mention.to_dict()},
+                        )
+                        return
+                except KeyError as exc:
+                    self._send_json(
+                        HTTPStatus.NOT_FOUND,
+                        {"error": "assignment_not_found", "message": str(exc)},
+                    )
+                    return
+                except PermissionError as exc:
+                    self._send_json(
+                        HTTPStatus.FORBIDDEN,
+                        {"error": "assignment_forbidden", "message": str(exc)},
+                    )
+                    return
+                except ValueError as exc:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "assignment_invalid_state", "message": str(exc)},
+                    )
+                    return
+                except RuntimeError as exc:
+                    self._send_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "assignment_unavailable", "message": str(exc)},
+                    )
+                    return
+                except Exception as exc:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "assignment_request_failed", "message": str(exc)},
+                    )
+                    return
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+
+            def _handle_runtime_events_get(self, parsed: Any) -> None:
+                peer_id = self._verify_query_peer(parsed)
+                if peer_id is None:
+                    self._send_json(
+                        HTTPStatus.UNAUTHORIZED, {"error": "invalid_peer_token"}
+                    )
+                    return
+                if service.runtime_control_plane is None:
+                    self._send_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "agent_runtime_unavailable"},
+                    )
+                    return
+                parts = [
+                    unquote(part)
+                    for part in parsed.path.strip("/").split("/")
+                    if part
+                ]
+                if (
+                    len(parts) != 5
+                    or parts[:3] != ["remote", "agent-runtime", "tasks"]
+                    or parts[4] != "events"
+                ):
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                    return
+                service.relay_server.registry.update_heartbeat(peer_id)
+                task_id = parts[3]
+                after_seq = int(self._query_value(parsed, "after_seq", "0") or 0)
+                timeout_sec = float(
+                    self._query_value(parsed, "timeout_sec", "0") or 0
+                )
+                try:
+                    events = service.runtime_control_plane.wait_events(
+                        task_id, after_seq=after_seq, timeout_sec=timeout_sec
+                    )
+                except AttributeError:
+                    events = service.runtime_control_plane.list_events(
+                        task_id, after_seq=after_seq
+                    )
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"ok": True, "events": [event.to_dict() for event in events]},
+                )
+
             def _handle_runtime_claim(self) -> None:
                 payload = self._read_json()
                 peer_token = payload.get("peer_token")
@@ -1046,6 +1726,7 @@ class RemoteRelayHTTPService:
                     peer_id=peer_id,
                     peer_capabilities=peer_capabilities,
                     workspace_root=workspace_root,
+                    wait_sec=float(payload.get("wait_sec") or 0),
                 )
                 self._send_json(
                     HTTPStatus.OK,
@@ -1439,6 +2120,60 @@ class RemoteRelayHTTPService:
                     )
                     return
 
+                workflow_mode = (
+                    str(req.workflow_mode).strip().lower()
+                    if req.workflow_mode is not None
+                    else None
+                )
+                if workflow_mode == "taskflow":
+                    if service.stream_chat_handler is None:
+                        self._send_json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            ChatResponse(
+                                response="", error="chat_stream_unavailable"
+                            ).to_dict(),
+                        )
+                        return
+                    session = service._create_chat_session(
+                        peer_id,
+                        workflow_mode=workflow_mode,
+                        taskflow_goal_id=req.taskflow_goal_id,
+                    )
+                    session.append_event(
+                        "chat_start",
+                        {
+                            "prompt": req.prompt,
+                            "workflow_mode": workflow_mode,
+                            "taskflow_goal_id": req.taskflow_goal_id,
+                        },
+                    )
+                    session.mark_running()
+                    with service._get_peer_chat_lock(peer_id):
+                        try:
+                            service.stream_chat_handler(peer_id, req.prompt, session)
+                        except Exception as exc:
+                            session.append_event("error", {"message": str(exc)})
+                        finally:
+                            session.mark_done()
+                    response_text = ""
+                    error_text = None
+                    for event in session.events:
+                        if event["type"] == "chat_end":
+                            response_text = str(
+                                event.get("payload", {}).get("response") or ""
+                            )
+                        if event["type"] == "error":
+                            error_text = str(
+                                event.get("payload", {}).get("message") or "error"
+                            )
+                    self._send_json(
+                        HTTPStatus.OK,
+                        ChatResponse(
+                            response=response_text, error=error_text
+                        ).to_dict(),
+                    )
+                    return
+
                 if service.chat_handler is None:
                     self._send_json(
                         HTTPStatus.SERVICE_UNAVAILABLE,
@@ -1481,8 +2216,25 @@ class RemoteRelayHTTPService:
                     )
                     return
 
-                session = service._create_chat_session(peer_id, req.session_hint)
-                session.append_event("chat_start", {"prompt": req.prompt})
+                workflow_mode = (
+                    str(req.workflow_mode).strip().lower()
+                    if req.workflow_mode is not None
+                    else None
+                )
+                session = service._create_chat_session(
+                    peer_id,
+                    req.session_hint,
+                    workflow_mode=workflow_mode,
+                    taskflow_goal_id=req.taskflow_goal_id,
+                )
+                session.append_event(
+                    "chat_start",
+                    {
+                        "prompt": req.prompt,
+                        "workflow_mode": workflow_mode,
+                        "taskflow_goal_id": req.taskflow_goal_id,
+                    },
+                )
                 session.mark_running()
 
                 def _run_chat() -> None:
