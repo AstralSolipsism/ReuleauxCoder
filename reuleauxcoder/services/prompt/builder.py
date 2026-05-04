@@ -155,6 +155,25 @@ def _mode_block(mode_name: str | None, mode_prompt_append: str) -> PromptBlock |
     )
 
 
+def _workflow_block(
+    workflow_mode: str | None, workflow_prompt_append: str
+) -> PromptBlock | None:
+    if not workflow_mode and not workflow_prompt_append:
+        return None
+    lines = []
+    if workflow_mode:
+        lines.append(f"- {workflow_mode}")
+    if workflow_prompt_append:
+        lines.extend(["", "# Workflow Instructions", workflow_prompt_append])
+    return PromptBlock(
+        key="active_workflow",
+        title="Active Workflow",
+        zone=PromptZone.SEMI_STATIC,
+        order=125,
+        body="\n".join(lines),
+    )
+
+
 def _blocked_tools_block(blocked_tools: list[str] | None) -> PromptBlock | None:
     if not blocked_tools:
         return None
@@ -226,6 +245,8 @@ def system_prompt(
     mode_switch_hints: list[str] | None = None,
     available_modes: list[tuple[str, str]] | None = None,
     skills_catalog: str = "",
+    workflow_mode: str | None = None,
+    workflow_prompt_append: str = "",
 ) -> str:
     """Generate the system prompt for the agent."""
     assembler = PromptAssembler()
@@ -239,6 +260,10 @@ def system_prompt(
     mode_block = _mode_block(mode_name, mode_prompt_append)
     if mode_block is not None:
         assembler.add(mode_block)
+
+    workflow_block = _workflow_block(workflow_mode, workflow_prompt_append)
+    if workflow_block is not None:
+        assembler.add(workflow_block)
 
     blocked_tools_block = _blocked_tools_block(blocked_tools)
     if blocked_tools_block is not None:

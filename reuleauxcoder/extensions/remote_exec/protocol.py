@@ -726,13 +726,25 @@ class EnvironmentManifestResponse:
 class ChatRequest:
     peer_token: str
     prompt: str
+    workflow_mode: str | None = None
+    taskflow_goal_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"peer_token": self.peer_token, "prompt": self.prompt}
+        payload = {"peer_token": self.peer_token, "prompt": self.prompt}
+        if self.workflow_mode is not None:
+            payload["workflow_mode"] = self.workflow_mode
+        if self.taskflow_goal_id is not None:
+            payload["taskflow_goal_id"] = self.taskflow_goal_id
+        return payload
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ChatRequest":
-        return cls(peer_token=d["peer_token"], prompt=d["prompt"])
+        return cls(
+            peer_token=d["peer_token"],
+            prompt=d["prompt"],
+            workflow_mode=d.get("workflow_mode"),
+            taskflow_goal_id=d.get("taskflow_goal_id") or d.get("goal_id"),
+        )
 
 
 @dataclass
@@ -753,13 +765,20 @@ class ChatStartRequest:
     peer_token: str
     prompt: str
     session_hint: str | None = None
+    workflow_mode: str | None = None
+    taskflow_goal_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "peer_token": self.peer_token,
             "prompt": self.prompt,
             "session_hint": self.session_hint,
         }
+        if self.workflow_mode is not None:
+            payload["workflow_mode"] = self.workflow_mode
+        if self.taskflow_goal_id is not None:
+            payload["taskflow_goal_id"] = self.taskflow_goal_id
+        return payload
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ChatStartRequest":
@@ -767,6 +786,8 @@ class ChatStartRequest:
             peer_token=d["peer_token"],
             prompt=d["prompt"],
             session_hint=d.get("session_hint"),
+            workflow_mode=d.get("workflow_mode"),
+            taskflow_goal_id=d.get("taskflow_goal_id") or d.get("goal_id"),
         )
 
 

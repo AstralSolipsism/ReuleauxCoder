@@ -76,3 +76,16 @@ def test_agent_loop_runtime_working_directory_override() -> None:
     messages = loop._full_messages()
 
     assert "- Working directory: /tmp/remote-workspace" in messages[-1]["content"]
+
+
+def test_system_prompt_includes_taskflow_only_when_workflow_is_active() -> None:
+    normal = system_prompt([_Tool("read_file", "Read file")])
+    taskflow = system_prompt(
+        [_Tool("taskflow_update", "Update Taskflow")],
+        workflow_mode="taskflow",
+        workflow_prompt_append="Current Taskflow goal_id: `goal-1`.",
+    )
+
+    assert "Active Workflow" not in normal
+    assert "taskflow" in taskflow
+    assert "goal-1" in taskflow
