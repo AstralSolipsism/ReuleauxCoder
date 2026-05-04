@@ -245,6 +245,7 @@ func (r *Runner) runAgentRuntimeLoop(ctx context.Context, peerToken string, poll
 			PeerToken: peerToken,
 			WorkerID:  workerID,
 			Executors: runtimeExecutors(),
+			WaitSec:   20,
 		})
 		cancelClaim()
 		if err != nil {

@@ -59,8 +59,10 @@ type DisconnectRequest struct {
 }
 
 type ChatRequest struct {
-	PeerToken string `json:"peer_token"`
-	Prompt    string `json:"prompt"`
+	PeerToken      string `json:"peer_token"`
+	Prompt         string `json:"prompt"`
+	WorkflowMode   string `json:"workflow_mode,omitempty"`
+	TaskflowGoalID string `json:"taskflow_goal_id,omitempty"`
 }
 
 type ChatResponse struct {
@@ -69,9 +71,11 @@ type ChatResponse struct {
 }
 
 type ChatStartRequest struct {
-	PeerToken   string `json:"peer_token"`
-	Prompt      string `json:"prompt"`
-	SessionHint string `json:"session_hint,omitempty"`
+	PeerToken      string `json:"peer_token"`
+	Prompt         string `json:"prompt"`
+	SessionHint    string `json:"session_hint,omitempty"`
+	WorkflowMode   string `json:"workflow_mode,omitempty"`
+	TaskflowGoalID string `json:"taskflow_goal_id,omitempty"`
 }
 
 type ChatStartResponse struct {
@@ -263,6 +267,7 @@ type AgentRuntimeClaimRequest struct {
 	PeerToken string   `json:"peer_token"`
 	WorkerID  string   `json:"worker_id,omitempty"`
 	Executors []string `json:"executors,omitempty"`
+	WaitSec   int      `json:"wait_sec,omitempty"`
 }
 
 type AgentRuntimeClaimResponse struct {

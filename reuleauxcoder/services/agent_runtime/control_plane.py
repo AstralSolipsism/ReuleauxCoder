@@ -248,6 +248,7 @@ class AgentRuntimeControlPlane:
         self._claims: dict[str, RuntimeTaskClaim] = {}
         self._claim_leases: dict[str, dict[str, Any]] = {}
         self._cancel_requests: dict[str, str] = {}
+        self._wakeup = threading.Condition()
 
     def configure(
         self,
@@ -275,7 +276,9 @@ class AgentRuntimeControlPlane:
         self, request: RuntimeTaskRequest, *, task_id: str | None = None
     ) -> TaskRecord:
         if self._store is not None:
-            return self._store.submit_task(request, task_id=task_id)
+            task = self._store.submit_task(request, task_id=task_id)
+            self.notify_task_available()
+            return task
         with self._lock:
             request = self._resolve_request_locked(request)
             metadata = dict(request.metadata)
@@ -301,7 +304,14 @@ class AgentRuntimeControlPlane:
             self._states[task.id] = TaskLifecycleState(task=task)
             self._events[task.id] = []
             self._append_event_locked(task.id, "queued", {"task": _task_to_dict(task)})
-            return task
+        self.notify_task_available()
+        return task
+
+    def notify_task_available(self) -> None:
+        """Wake workers waiting for queued runtime tasks or event changes."""
+
+        with self._wakeup:
+            self._wakeup.notify_all()
 
     def _resolve_request_locked(self, request: RuntimeTaskRequest) -> RuntimeTaskRequest:
         snapshot = self.runtime_snapshot
@@ -331,6 +341,35 @@ class AgentRuntimeControlPlane:
         return request
 
     def claim_task(
+        self,
+        *,
+        worker_id: str,
+        executors: list[ExecutorType | str] | None = None,
+        peer_id: str | None = None,
+        peer_capabilities: list[str] | None = None,
+        workspace_root: str | None = None,
+        lease_sec: int = 15,
+        wait_sec: float = 0.0,
+    ) -> RuntimeTaskClaim | None:
+        deadline = time.time() + max(0.0, float(wait_sec or 0.0))
+        while True:
+            claim = self._claim_task_once(
+                worker_id=worker_id,
+                executors=executors,
+                peer_id=peer_id,
+                peer_capabilities=peer_capabilities,
+                workspace_root=workspace_root,
+                lease_sec=lease_sec,
+            )
+            if claim is not None or wait_sec <= 0:
+                return claim
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None
+            with self._wakeup:
+                self._wakeup.wait(timeout=min(remaining, 1.0))
+
+    def _claim_task_once(
         self,
         *,
         worker_id: str,
@@ -430,13 +469,15 @@ class AgentRuntimeControlPlane:
         lease_sec: int | None = None,
     ) -> dict[str, Any]:
         if self._store is not None:
-            return self._store.heartbeat_task(
+            result = self._store.heartbeat_task(
                 request_id=request_id,
                 task_id=task_id,
                 worker_id=worker_id,
                 peer_id=peer_id,
                 lease_sec=lease_sec,
             )
+            self.notify_task_available()
+            return result
         with self._lock:
             state = self._states.get(task_id)
             if state is None:
@@ -508,7 +549,10 @@ class AgentRuntimeControlPlane:
 
     def recover_stale_tasks(self, *, now: float | None = None) -> list[str]:
         if self._store is not None:
-            return self._store.recover_stale_tasks(now=now)
+            recovered = self._store.recover_stale_tasks(now=now)
+            if recovered:
+                self.notify_task_available()
+            return recovered
         current = time.time() if now is None else now
         recovered: list[str] = []
         with self._lock:
@@ -624,6 +668,7 @@ class AgentRuntimeControlPlane:
     def pin_session(self, task_id: str, session: TaskSessionRef) -> None:
         if self._store is not None:
             self._store.pin_session(task_id, session)
+            self.notify_task_available()
             return
         with self._lock:
             task = self._task_locked(task_id)
@@ -668,7 +713,7 @@ class AgentRuntimeControlPlane:
         metadata: dict[str, Any] | None = None,
     ) -> tuple[bool, str]:
         if self._store is not None:
-            return self._store.pin_claimed_session(
+            result = self._store.pin_claimed_session(
                 request_id=request_id,
                 task_id=task_id,
                 worker_id=worker_id,
@@ -678,6 +723,8 @@ class AgentRuntimeControlPlane:
                 executor_session_id=executor_session_id,
                 metadata=metadata,
             )
+            self.notify_task_available()
+            return result
         with self._lock:
             ok, reason = self._validate_claim_owner_locked(
                 request_id=request_id,
@@ -721,13 +768,15 @@ class AgentRuntimeControlPlane:
         peer_id: str | None = None,
     ) -> tuple[bool, str]:
         if self._store is not None:
-            return self._store.append_executor_event(
+            result = self._store.append_executor_event(
                 task_id,
                 event,
                 request_id=request_id,
                 worker_id=worker_id,
                 peer_id=peer_id,
             )
+            self.notify_task_available()
+            return result
         with self._lock:
             if request_id or worker_id or peer_id:
                 ok, reason = self._validate_claim_owner_locked(
@@ -760,7 +809,7 @@ class AgentRuntimeControlPlane:
         artifacts: list[dict[str, Any]] | None = None,
     ) -> tuple[bool, str, TaskRecord | None]:
         if self._store is not None:
-            return self._store.complete_claimed_task(
+            result_value = self._store.complete_claimed_task(
                 task_id,
                 result,
                 request_id=request_id,
@@ -768,6 +817,8 @@ class AgentRuntimeControlPlane:
                 peer_id=peer_id,
                 artifacts=artifacts,
             )
+            self.notify_task_available()
+            return result_value
         with self._lock:
             ok, reason = self._validate_claim_owner_locked(
                 request_id=request_id,
@@ -787,7 +838,9 @@ class AgentRuntimeControlPlane:
         artifacts: list[dict[str, Any]] | None = None,
     ) -> TaskRecord:
         if self._store is not None:
-            return self._store.complete_task(task_id, result, artifacts=artifacts)
+            task = self._store.complete_task(task_id, result, artifacts=artifacts)
+            self.notify_task_available()
+            return task
         with self._lock:
             task = self._task_locked(task_id)
             if result.succeeded:
@@ -822,7 +875,9 @@ class AgentRuntimeControlPlane:
         new_task_id: str | None = None,
     ) -> TaskRecord:
         if self._store is not None:
-            return self._store.retry_task(task_id, new_task_id=new_task_id)
+            task = self._store.retry_task(task_id, new_task_id=new_task_id)
+            self.notify_task_available()
+            return task
         with self._lock:
             task = self._task_locked(task_id)
             if not task.is_terminal:
@@ -853,7 +908,9 @@ class AgentRuntimeControlPlane:
 
     def fail_task(self, task_id: str, *, error: str) -> TaskRecord:
         if self._store is not None:
-            return self._store.fail_task(task_id, error=error)
+            task = self._store.fail_task(task_id, error=error)
+            self.notify_task_available()
+            return task
         with self._lock:
             task = self._task_locked(task_id)
             task.status = TaskStatus.FAILED
@@ -865,7 +922,9 @@ class AgentRuntimeControlPlane:
 
     def cancel_task(self, task_id: str, *, reason: str = "user_cancelled") -> bool:
         if self._store is not None:
-            return self._store.cancel_task(task_id, reason=reason)
+            ok = self._store.cancel_task(task_id, reason=reason)
+            self.notify_task_available()
+            return ok
         with self._lock:
             task = self._task_locked(task_id)
             if task.is_terminal:
@@ -901,7 +960,7 @@ class AgentRuntimeControlPlane:
         metadata: dict[str, Any] | None = None,
     ) -> TaskArtifact:
         if self._store is not None:
-            return self._store.attach_artifact(
+            artifact = self._store.attach_artifact(
                 task_id,
                 type=type,
                 status=status,
@@ -912,6 +971,8 @@ class AgentRuntimeControlPlane:
                 path=path,
                 metadata=metadata,
             )
+            self.notify_task_available()
+            return artifact
         with self._lock:
             state = self._states[task_id]
             artifact = state.attach_artifact(
@@ -939,7 +1000,9 @@ class AgentRuntimeControlPlane:
 
     def create_or_update_pr(self, task_id: str, *, diff: str = "") -> TaskArtifact:
         if self._store is not None:
-            return self._store.create_or_update_pr(task_id, diff=diff)
+            artifact = self._store.create_or_update_pr(task_id, diff=diff)
+            self.notify_task_available()
+            return artifact
         with self._lock:
             task = self._task_locked(task_id)
             pr = self.pr_flow.create_or_update(task, diff=diff)
@@ -964,6 +1027,20 @@ class AgentRuntimeControlPlane:
                 for event in list(self._events.get(task_id, []))
                 if event.seq > after_seq
             ]
+
+    def wait_events(
+        self, task_id: str, *, after_seq: int = 0, timeout_sec: float = 0.0
+    ) -> list[RuntimeTaskEvent]:
+        deadline = time.time() + max(0.0, float(timeout_sec or 0.0))
+        while True:
+            events = self.list_events(task_id, after_seq=after_seq)
+            if events or timeout_sec <= 0:
+                return events
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return []
+            with self._wakeup:
+                self._wakeup.wait(timeout=min(remaining, 1.0))
 
     def list_artifacts(self, task_id: str) -> list[TaskArtifact]:
         if self._store is not None:
@@ -1092,6 +1169,7 @@ class AgentRuntimeControlPlane:
             payload=payload,
         )
         events.append(event)
+        self.notify_task_available()
         return event
 
 

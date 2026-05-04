@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
@@ -91,6 +93,37 @@ def test_task_queue_claim_pin_complete_and_pr_artifact() -> None:
     assert artifacts[0]["type"] == "pull_request"
     assert artifacts[0]["merge_status"] == "pending_user"
     assert control.list_events(task.id, after_seq=0)[0].type == "queued"
+
+
+def test_claim_task_waits_for_wakeup_when_task_is_submitted() -> None:
+    control = AgentRuntimeControlPlane()
+    claims = []
+
+    def wait_for_claim() -> None:
+        claims.append(
+            control.claim_task(
+                worker_id="worker-wait",
+                executors=["fake"],
+                wait_sec=2,
+            )
+        )
+
+    thread = threading.Thread(target=wait_for_claim)
+    thread.start()
+    time.sleep(0.1)
+    control.submit_task(
+        RuntimeTaskRequest(
+            issue_id="issue-1",
+            agent_id="agent",
+            prompt="run",
+            executor=ExecutorType.FAKE,
+        ),
+        task_id="task-wakeup",
+    )
+    thread.join(timeout=2)
+
+    assert claims[0] is not None
+    assert claims[0].task.id == "task-wakeup"
 
 
 def test_claim_includes_rendered_prompt_files_from_runtime_snapshot() -> None:
