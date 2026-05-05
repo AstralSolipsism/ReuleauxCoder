@@ -19,6 +19,7 @@ from reuleauxcoder.domain.config.models import (
     ProviderConfig,
     infer_provider_compat,
 )
+from reuleauxcoder.domain.config.schema import BUILTIN_MODES, DEFAULT_ACTIVE_MODE
 from reuleauxcoder.infrastructure.yaml.loader import load_yaml_config, save_yaml_config
 from reuleauxcoder.services.config.loader import ConfigLoader
 from reuleauxcoder.services.providers.manager import ProviderManager
@@ -54,14 +55,63 @@ class RemoteAdminConfigManager:
         self._lock = threading.Lock()
 
     def status(self) -> dict[str, Any]:
+        modes = self.list_modes()
+        data = self._load_data()
+        agents = self._agent_profile_views(data, modes["active_mode"])
         return {
             "providers": self.list_providers()["providers"],
+            "provider_model_catalog": self.list_provider_model_catalog(data)["models"],
+            "agent_profiles": agents,
+            "active_agent_model": self._active_agent_model(agents, modes["active_mode"]),
             "model_profiles": self.list_model_profiles()["model_profiles"],
             "active_main": self._models_data().get("active_main"),
             "active_sub": self._models_data().get("active_sub"),
+            "modes": modes["modes"],
+            "active_mode": modes["active_mode"],
             "server_settings": self.read_server_settings()["settings"],
             "agent_runtime": get_agent_runtime_limiter().snapshot(),
         }
+
+    def list_modes(self) -> dict[str, Any]:
+        data = self._load_data()
+        raw_modes = data.get("modes", {})
+        modes_data = raw_modes if isinstance(raw_modes, dict) else {}
+        profiles = modes_data.get("profiles", {})
+        custom_profiles = profiles if isinstance(profiles, dict) else {}
+        profile_items = deepcopy(BUILTIN_MODES)
+        for name, value in custom_profiles.items():
+            base = profile_items.get(name)
+            if isinstance(base, dict) and isinstance(value, dict):
+                merged = deepcopy(base)
+                merged.update(value)
+                profile_items[name] = merged
+            else:
+                profile_items[name] = value
+        modes: list[dict[str, Any]] = []
+        for name in sorted(profile_items):
+            item = profile_items.get(name)
+            mode = item if isinstance(item, dict) else {}
+            tools = mode.get("tools", [])
+            allowed_subagent_modes = mode.get("allowed_subagent_modes", [])
+            modes.append(
+                {
+                    "name": str(name),
+                    "description": str(mode.get("description") or ""),
+                    "tools": [str(tool) for tool in tools] if isinstance(tools, list) else [],
+                    "allowed_subagent_modes": (
+                        [str(item) for item in allowed_subagent_modes]
+                        if isinstance(allowed_subagent_modes, list)
+                        else []
+                    ),
+                    "prompt_append": str(mode.get("prompt_append") or ""),
+                }
+            )
+        active_mode = str(modes_data.get("active") or "")
+        if not active_mode and DEFAULT_ACTIVE_MODE in profile_items:
+            active_mode = DEFAULT_ACTIVE_MODE
+        if active_mode and active_mode not in profile_items:
+            active_mode = ""
+        return {"modes": modes, "active_mode": active_mode or None}
 
     def read_server_settings(self) -> dict[str, Any]:
         data = self._load_data()
@@ -284,12 +334,7 @@ class RemoteAdminConfigManager:
                 item = raw_items.get(provider_id)
                 if not isinstance(item, dict):
                     continue
-                provider = ProviderConfig.from_dict(str(provider_id), item)
-                provider_dict = provider.to_dict()
-                provider_dict.pop("api_key", None)
-                provider_dict["api_key_hint"] = _mask(str(item.get("api_key", "") or ""))
-                provider_dict["id"] = provider.id
-                providers.append(provider_dict)
+                providers.append(self._provider_view(str(provider_id), item))
         return {"providers": providers}
 
     def record_provider(self, payload: dict[str, Any]) -> AdminConfigResult:
@@ -331,7 +376,11 @@ class RemoteAdminConfigManager:
                 "extra": _dict_field(payload, "extra", previous),
             }
             provider = ProviderConfig.from_dict(provider_id, provider_data)
-            items[provider_id] = provider.to_dict()
+            normalized_provider = provider.to_dict()
+            previous_models = previous.get("models")
+            if isinstance(previous_models, list):
+                normalized_provider["models"] = _normalize_provider_models(previous_models)
+            items[provider_id] = normalized_provider
             reload_error = self._commit_config(data, previous_data)
             if reload_error:
                 return reload_error
@@ -388,6 +437,7 @@ class RemoteAdminConfigManager:
             if provider_id not in items:
                 return AdminConfigResult(False, {"error": "provider_not_found"}, 404)
             blockers = self._provider_profile_blockers(data, provider_id)
+            blockers.extend(self._provider_agent_blockers(data, provider_id))
             if blockers:
                 return AdminConfigResult(
                     False,
@@ -479,6 +529,17 @@ class RemoteAdminConfigManager:
             return AdminConfigResult(
                 False, {"error": "provider_models_failed", "message": str(exc)}, 500
             )
+        models = result.get("models") if isinstance(result, dict) else None
+        if isinstance(models, list):
+            with self._lock:
+                previous_data = self._load_data()
+                data = deepcopy(previous_data)
+                provider_item = self._provider_items(data).get(provider_id)
+                if isinstance(provider_item, dict):
+                    provider_item["models"] = _normalize_provider_models(models)
+                    reload_error = self._commit_config(data, previous_data)
+                    if reload_error:
+                        return reload_error
         return AdminConfigResult(True, result)
 
     def list_model_profiles(self) -> dict[str, Any]:
@@ -637,6 +698,108 @@ class RemoteAdminConfigManager:
             providers["items"] = items
         return items
 
+    def list_provider_model_catalog(self, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        data = data or self._load_data()
+        models: list[dict[str, Any]] = []
+        for provider_id, item in sorted(self._provider_items(data).items()):
+            if not isinstance(item, dict):
+                continue
+            if item.get("enabled") is False:
+                continue
+            for model in _normalize_provider_models(item.get("models", [])):
+                model_id = str(model.get("id") or model.get("model") or "").strip()
+                if not model_id:
+                    continue
+                models.append(
+                    {
+                        **model,
+                        "id": model_id,
+                        "model_id": model_id,
+                        "provider_id": str(provider_id),
+                    }
+                )
+        return {"models": models}
+
+    def _agent_profile_views(
+        self, data: dict[str, Any], active_mode: str | None
+    ) -> dict[str, Any]:
+        raw_runtime = data.get("agent_runtime", {})
+        runtime = raw_runtime if isinstance(raw_runtime, dict) else {}
+        raw_agents = runtime.get("agents", {})
+        agents = deepcopy(raw_agents) if isinstance(raw_agents, dict) else {}
+        legacy_model = self._legacy_agent_model(data)
+        mode_names = self._mode_names(data)
+        for agent_id in mode_names:
+            item = agents.get(agent_id)
+            if not isinstance(item, dict):
+                item = {"name": agent_id}
+                agents[agent_id] = item
+            if legacy_model and not isinstance(item.get("model"), dict):
+                item["model"] = deepcopy(legacy_model)
+        if active_mode and active_mode not in agents and legacy_model:
+            agents[active_mode] = {"name": active_mode, "model": deepcopy(legacy_model)}
+        return agents
+
+    def _active_agent_model(
+        self, agents: dict[str, Any], active_mode: str | None
+    ) -> dict[str, Any]:
+        if not active_mode:
+            return {}
+        agent = agents.get(active_mode)
+        if not isinstance(agent, dict):
+            return {}
+        model = agent.get("model")
+        if not isinstance(model, dict):
+            return {}
+        view = dict(model)
+        parameters = view.get("parameters")
+        view["parameters"] = parameters if isinstance(parameters, dict) else {}
+        return view
+
+    def _mode_names(self, data: dict[str, Any]) -> list[str]:
+        raw_modes = data.get("modes", {})
+        profiles = raw_modes.get("profiles", {}) if isinstance(raw_modes, dict) else {}
+        names = set(BUILTIN_MODES.keys())
+        if isinstance(profiles, dict):
+            names.update(str(name) for name in profiles.keys())
+        return sorted(names)
+
+    def _legacy_agent_model(self, data: dict[str, Any]) -> dict[str, Any]:
+        models = data.get("models", {})
+        if not isinstance(models, dict):
+            return {}
+        profiles = models.get("profiles", {})
+        if not isinstance(profiles, dict) or not profiles:
+            return {}
+        profile_id = models.get("active_main") or models.get("active") or next(iter(profiles.keys()), "")
+        profile = profiles.get(profile_id)
+        if not isinstance(profile, dict):
+            return {}
+        provider = str(profile.get("provider") or "").strip()
+        model = str(profile.get("model") or "").strip()
+        if not provider or not model:
+            return {}
+        return {
+            "provider": provider,
+            "model": model,
+            "display_name": str(profile_id),
+            "parameters": {
+                key: profile[key]
+                for key in (
+                    "max_tokens",
+                    "temperature",
+                    "max_context_tokens",
+                    "preserve_reasoning_content",
+                    "backfill_reasoning_content_for_tool_calls",
+                    "reasoning_effort",
+                    "thinking_enabled",
+                    "reasoning_replay_mode",
+                    "reasoning_replay_placeholder",
+                )
+                if key in profile
+            },
+        }
+
     def _provider_profile_blockers(
         self, data: dict[str, Any], provider_id: str
     ) -> list[dict[str, Any]]:
@@ -659,6 +822,27 @@ class RemoteAdminConfigManager:
                     "profile_id": str(profile_id),
                     "active_main": profile_id == active_main,
                     "active_sub": profile_id == active_sub,
+                }
+            )
+        return blockers
+
+    def _provider_agent_blockers(
+        self, data: dict[str, Any], provider_id: str
+    ) -> list[dict[str, Any]]:
+        agents = self._agent_profile_views(data, None)
+        blockers: list[dict[str, Any]] = []
+        for agent_id, agent_data in sorted(agents.items()):
+            if not isinstance(agent_data, dict):
+                continue
+            model = agent_data.get("model")
+            if not isinstance(model, dict):
+                continue
+            if str(model.get("provider") or model.get("provider_id") or "") != provider_id:
+                continue
+            blockers.append(
+                {
+                    "agent_id": str(agent_id),
+                    "model": str(model.get("model") or model.get("model_id") or ""),
                 }
             )
         return blockers
@@ -803,6 +987,7 @@ class RemoteAdminConfigManager:
         view.pop("api_key", None)
         view["api_key_hint"] = _mask(str(item.get("api_key", "") or ""))
         view["id"] = provider_id
+        view["models"] = _normalize_provider_models(item.get("models", []))
         return view
 
     def _profile_view(self, profile_id: str, item: dict[str, Any]) -> dict[str, Any]:
@@ -853,6 +1038,37 @@ def _toolchain_payload(payload: dict[str, Any]) -> tuple[str | None, dict[str, A
     raw_payload = payload.get("payload")
     item_payload = dict(raw_payload) if isinstance(raw_payload, dict) else dict(payload)
     return kind, item_payload
+
+
+def _normalize_provider_models(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    models: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value:
+        if isinstance(item, str):
+            model_id = item.strip()
+            model = {"id": model_id}
+        elif isinstance(item, dict):
+            model_id = str(
+                item.get("id") or item.get("model_id") or item.get("model") or ""
+            ).strip()
+            model = {
+                "id": model_id,
+                **{
+                    str(key): val
+                    for key, val in item.items()
+                    if key not in {"api_key", "secret", "token"}
+                },
+            }
+        else:
+            continue
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        models.append(model)
+    models.sort(key=lambda item: str(item.get("id") or ""))
+    return models
 
 
 def _looks_like_url(value: Any) -> bool:

@@ -266,6 +266,61 @@ def test_admin_server_settings_update_preserves_runtime_profiles_and_agents() ->
     assert runtime["agents"]["reviewer"]["runtime_profile"] == "codex_remote"
 
 
+def test_admin_status_exposes_provider_model_catalog_and_agent_default() -> None:
+    class MemoryAdminManager(RemoteAdminConfigManager):
+        def __init__(self) -> None:
+            super().__init__(config_path=None)
+            self.data = {
+                "providers": {
+                    "items": {
+                        "deepseek": {
+                            "type": "openai_chat",
+                            "api_key": "sk-ds",
+                            "models": [
+                                {"id": "V4FLASH", "display_name": "V4 Flash"},
+                                {"id": "V4PRO", "display_name": "V4 Pro"},
+                            ],
+                        }
+                    }
+                },
+                "modes": {"active": "coder", "profiles": {"coder": {}}},
+                "agent_runtime": {
+                    "agents": {
+                        "coder": {
+                            "name": "Coder",
+                            "model": {
+                                "provider": "deepseek",
+                                "model": "V4PRO",
+                                "display_name": "V4 Pro",
+                            },
+                        }
+                    }
+                },
+            }
+
+        def _load_data(self) -> dict:
+            return deepcopy(self.data)
+
+    status = MemoryAdminManager().status()
+
+    models = {
+        (item["provider_id"], item["model_id"])
+        for item in status["provider_model_catalog"]
+    }
+    assert ("deepseek", "V4FLASH") in models
+    assert ("deepseek", "V4PRO") in models
+    assert status["providers"][0]["models"] == [
+        {"id": "V4FLASH", "display_name": "V4 Flash"},
+        {"id": "V4PRO", "display_name": "V4 Pro"},
+    ]
+    assert status["active_agent_model"] == {
+        "provider": "deepseek",
+        "model": "V4PRO",
+        "display_name": "V4 Pro",
+        "parameters": {},
+    }
+
+
 def test_admin_server_settings_update_replace_removes_runtime_profiles_and_agents() -> None:
     class MemoryAdminManager(RemoteAdminConfigManager):
         def __init__(self) -> None:
