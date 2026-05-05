@@ -20,9 +20,13 @@ from reuleauxcoder.domain.config.models import (
     Config,
     ContextConfig,
     MCPServerConfig,
+    ModelProfileConfig,
     ModeConfig,
+    ProviderConfig,
+    ProvidersConfig,
     RemoteExecConfig,
 )
+from reuleauxcoder.domain.session.models import Session, SessionRuntimeState
 from reuleauxcoder.domain.approval import ApprovalRequest
 from reuleauxcoder.domain.hooks.registry import HookRegistry
 from reuleauxcoder.domain.llm.models import LLMResponse, ToolCall
@@ -40,6 +44,7 @@ from reuleauxcoder.interfaces.entrypoint.runner import (
 from reuleauxcoder.interfaces.entrypoint.remote_relay import (
     _structured_ui_event_payload,
     _structured_ui_event_type,
+    switch_session_model,
 )
 from reuleauxcoder.interfaces.events import UIEvent, UIEventKind
 
@@ -80,6 +85,97 @@ class FakeLLM:
     def reconfigure(self, **kwargs) -> None:
         for key, value in kwargs.items():
             setattr(self, key, value)
+
+
+class MemorySessionStore:
+    def __init__(self) -> None:
+        self.sessions: dict[str, Session] = {}
+        self._next_id = 0
+
+    def generate_session_id(self) -> str:
+        self._next_id += 1
+        return f"memory-session-{self._next_id}"
+
+    def load(self, session_id: str) -> Session | None:
+        return self.sessions.get(session_id)
+
+    def save(
+        self,
+        messages: list[dict],
+        model: str,
+        session_id: str | None = None,
+        total_prompt_tokens: int = 0,
+        total_completion_tokens: int = 0,
+        active_mode: str | None = None,
+        runtime_state: SessionRuntimeState | None = None,
+        fingerprint: str = "local",
+        **_kwargs,
+    ) -> str:
+        session_id = session_id or self.generate_session_id()
+        effective_runtime = runtime_state or SessionRuntimeState(
+            model=model, active_mode=active_mode
+        )
+        self.sessions[session_id] = Session(
+            id=session_id,
+            model=effective_runtime.model or model,
+            saved_at="memory",
+            fingerprint=fingerprint,
+            messages=[dict(message) for message in messages],
+            active_mode=effective_runtime.active_mode or active_mode,
+            total_prompt_tokens=total_prompt_tokens,
+            total_completion_tokens=total_completion_tokens,
+            runtime_state=effective_runtime,
+        )
+        return session_id
+
+    def save_runtime_state(
+        self,
+        session_id: str,
+        model: str,
+        runtime_state: SessionRuntimeState,
+        *,
+        messages: list[dict] | None = None,
+        total_prompt_tokens: int = 0,
+        total_completion_tokens: int = 0,
+        active_mode: str | None = None,
+        fingerprint: str = "local",
+    ) -> str:
+        return self.save(
+            messages or [],
+            model,
+            session_id=session_id,
+            total_prompt_tokens=total_prompt_tokens,
+            total_completion_tokens=total_completion_tokens,
+            active_mode=active_mode,
+            runtime_state=runtime_state,
+            fingerprint=fingerprint,
+        )
+
+    def list(self, limit: int = 20, fingerprint: str | None = None) -> list[Session]:
+        items = [
+            session
+            for session in self.sessions.values()
+            if fingerprint is None or session.fingerprint == fingerprint
+        ]
+        items = [
+            session
+            for session in items
+            if SessionStore.has_history_content(session.messages)
+        ]
+        return items[:limit]
+
+    def get_latest(self, fingerprint: str | None = None) -> Session | None:
+        items = self.list(limit=1, fingerprint=fingerprint)
+        return items[0] if items else None
+
+    def load_snapshot(self, _session_id: str) -> tuple[dict | None, str | None]:
+        return None, None
+
+    def delete_snapshot(self, _session_id: str) -> None:
+        return None
+
+    def delete(self, session_id: str) -> bool:
+        return self.sessions.pop(session_id, None) is not None
 
 
 class FakeContext:
@@ -148,6 +244,10 @@ def _build_runner_with_fake_agent(
     load_tools=None,
     session_dir: str | None = None,
     session_auto_save: bool = True,
+    model_profiles: dict[str, ModelProfileConfig] | None = None,
+    active_main_model_profile: str | None = None,
+    providers: ProvidersConfig | None = None,
+    session_store=None,
 ) -> AppRunner:
     config = Config(
         api_key="key",
@@ -161,6 +261,9 @@ def _build_runner_with_fake_agent(
         active_mode="coder",
         session_dir=session_dir,
         session_auto_save=session_auto_save,
+        model_profiles=model_profiles or {},
+        active_main_model_profile=active_main_model_profile,
+        providers=providers or ProvidersConfig(),
     )
     config.skills.enabled = False
     return AppRunner(
@@ -171,6 +274,11 @@ def _build_runner_with_fake_agent(
             load_tools=load_tools or (lambda _backend: []),
             create_agent=lambda llm, _tools, _config: FakeAgent(
                 llm, tools=_tools, chat_behavior=chat_behavior
+            ),
+            create_configured_session_store=(
+                (lambda _config, _sessions_dir: session_store)
+                if session_store is not None
+                else AppDependencies().create_configured_session_store
             ),
         ),
     )
@@ -240,6 +348,89 @@ def test_remote_relay_maps_all_ui_event_kinds_to_structured_events() -> None:
         assert payload["message"] == "hello"
         assert payload["kind"] == kind.value
         assert payload["detail"] == "value"
+
+
+def test_switch_session_model_updates_runtime_without_transcript_pollution() -> None:
+    store = MemorySessionStore()
+    config = Config(
+        model="old-model",
+        active_mode="coder",
+        providers=ProvidersConfig(
+            items={
+                "deepseek": ProviderConfig(
+                    id="deepseek",
+                    api_key="key",
+                    base_url="https://api.deepseek.test",
+                )
+            }
+        ),
+    )
+    store.save(
+        [{"role": "user", "content": "hello"}],
+        "old-model",
+        session_id="session-model",
+        fingerprint="fp",
+    )
+
+    result = switch_session_model(
+        config,
+        store,
+        "fp",
+        {
+            "session_id": "session-model",
+            "provider_id": "deepseek",
+            "model_id": "V4PRO",
+            "parameters": {"max_tokens": 4096},
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["active_model"]["provider_id"] == "deepseek"
+    assert result["active_model"]["model_id"] == "V4PRO"
+    assert result["runtime_state"]["active_model_provider"] == "deepseek"
+    assert result["runtime_state"]["active_model"] == "V4PRO"
+    assert len(result["messages"]) == 1
+    assert result["messages"][0]["role"] == "user"
+    assert result["messages"][0]["content"] == "hello"
+    saved = store.load("session-model")
+    assert saved is not None
+    assert len(saved.messages) == 1
+    assert saved.messages[0]["role"] == "user"
+    assert saved.messages[0]["content"] == "hello"
+    assert saved.runtime_state.active_model == "V4PRO"
+
+
+def test_switch_session_model_rejects_unknown_or_disabled_provider() -> None:
+    store = MemorySessionStore()
+    config = Config(
+        providers=ProvidersConfig(
+            items={
+                "disabled": ProviderConfig(
+                    id="disabled",
+                    api_key="key",
+                    enabled=False,
+                )
+            }
+        )
+    )
+
+    missing = switch_session_model(
+        config,
+        store,
+        "fp",
+        {"provider_id": "missing", "model_id": "V4PRO"},
+    )
+    disabled = switch_session_model(
+        config,
+        store,
+        "fp",
+        {"provider_id": "disabled", "model_id": "V4PRO"},
+    )
+
+    assert missing["_status"] == 404
+    assert missing["error"] == "provider_not_found"
+    assert disabled["_status"] == 409
+    assert disabled["error"] == "provider_disabled"
 
 
 class TestRunnerRemoteExec:
@@ -864,6 +1055,122 @@ class TestRunnerRemoteExec:
                 raise AssertionError("expected deleted session to fail")
             except HTTPError as exc:
                 assert exc.code == 404
+        finally:
+            runner.cleanup(ctx.agent)
+
+    def test_runner_remote_session_model_switch_updates_session_runtime(self) -> None:
+        workspace = Path(__file__).resolve().parent
+        port = _free_port()
+        session_store = MemorySessionStore()
+
+        def chat_behavior(agent: FakeAgent, prompt: str) -> str:
+            return f"{prompt}|model={agent.llm.model}|sid={getattr(agent, 'current_session_id', '-')}"
+
+        runner = _build_runner_with_fake_agent(
+            f"127.0.0.1:{port}",
+            chat_behavior=chat_behavior,
+            session_store=session_store,
+            providers=ProvidersConfig(
+                items={
+                    "deepseek": ProviderConfig(
+                        id="deepseek",
+                        api_key="key",
+                        base_url="https://api.deepseek.test",
+                    )
+                }
+            ),
+            model_profiles={
+                "main-fast": ModelProfileConfig(
+                    name="main-fast",
+                    model="fast-model",
+                    api_key="key",
+                    provider="deepseek",
+                    max_tokens=1111,
+                    max_context_tokens=2222,
+                ),
+                "main-deep": ModelProfileConfig(
+                    name="main-deep",
+                    model="deep-model",
+                    api_key="key",
+                    provider="deepseek",
+                    max_tokens=3333,
+                    max_context_tokens=4444,
+                ),
+            },
+            active_main_model_profile="main-fast",
+        )
+        ctx = runner.initialize()
+        try:
+            assert runner._relay_server is not None
+            assert runner._relay_http_service is not None
+            _, peer_token = _register_peer(
+                runner._relay_http_service.base_url,
+                runner._relay_server.issue_bootstrap_token(ttl_sec=60),
+                str(workspace),
+            )
+
+            try:
+                _json_request(
+                    "POST",
+                    f"{runner._relay_http_service.base_url}/remote/sessions/model",
+                    {
+                        "peer_token": peer_token,
+                        "session_id": "session-model",
+                        "provider_id": "missing-provider",
+                        "model_id": "deep-model",
+                    },
+                )
+                raise AssertionError("expected unknown provider to fail")
+            except HTTPError as exc:
+                assert exc.code == 404
+
+            _, switched = _json_request(
+                "POST",
+                f"{runner._relay_http_service.base_url}/remote/sessions/model",
+                {
+                        "peer_token": peer_token,
+                        "session_id": "session-model",
+                        "provider_id": "deepseek",
+                        "model_id": "deep-model",
+                        "parameters": {"max_tokens": 3333, "max_context_tokens": 4444},
+                    },
+                )
+
+            assert switched["ok"] is True
+            assert switched["session_id"] == "session-model"
+            assert switched["active_model"]["provider_id"] == "deepseek"
+            assert switched["active_model"]["model_id"] == "deep-model"
+            assert switched["runtime_state"]["active_model_provider"] == "deepseek"
+            assert switched["runtime_state"]["active_model"] == "deep-model"
+            assert switched["runtime_state"]["model"] == "deep-model"
+
+            stored = session_store.load("session-model")
+            assert stored is not None
+            assert stored.messages == []
+            assert stored.runtime_state.active_model_provider == "deepseek"
+            assert stored.runtime_state.active_model == "deep-model"
+            assert session_store.list(limit=10, fingerprint=None) == []
+
+            _, start_body = _json_request(
+                "POST",
+                f"{runner._relay_http_service.base_url}/remote/chat/start",
+                {
+                    "peer_token": peer_token,
+                    "prompt": "hello",
+                    "session_hint": "session-model",
+                },
+            )
+            events = _collect_stream_events(
+                runner._relay_http_service.base_url, peer_token, start_body["chat_id"]
+            )
+            ready = [
+                event["payload"]
+                for event in events
+                if event["type"] == "remote_peer_ready"
+            ][0]
+            end = [event for event in events if event["type"] == "chat_end"][-1]
+            assert ready["model"] == "deep-model"
+            assert "hello|model=deep-model|sid=session-model" in end["payload"]["response"]
         finally:
             runner.cleanup(ctx.agent)
 
