@@ -13,6 +13,7 @@ from reuleauxcoder.domain.config.models import (
     AgentRuntimeConfig,
     EnvironmentCLIToolConfig,
     EnvironmentSkillConfig,
+    GitHubConfig,
     MCPServerConfig,
     ModelProfileConfig,
     ProviderCapabilities,
@@ -119,18 +120,26 @@ class RemoteAdminConfigManager:
         runtime = AgentRuntimeConfig.from_dict(
             raw_runtime if isinstance(raw_runtime, dict) else {}
         )
+        raw_github = data.get("github", {})
+        github = GitHubConfig.from_dict(raw_github if isinstance(raw_github, dict) else {})
         return {
-            "settings": {"agent_runtime": runtime.to_dict()},
+            "settings": {
+                "agent_runtime": runtime.to_dict(),
+                "github": github.to_dict(mask_secret=True),
+            },
             "runtime": get_agent_runtime_limiter().snapshot(),
         }
 
     def update_server_settings(self, payload: dict[str, Any]) -> AdminConfigResult:
         raw_settings = payload.get("settings")
         raw_runtime = payload.get("agent_runtime")
+        raw_github = payload.get("github")
         if isinstance(raw_settings, dict) and raw_runtime is None:
             raw_runtime = raw_settings.get("agent_runtime")
-        if not isinstance(raw_runtime, dict):
-            return AdminConfigResult(False, {"error": "agent_runtime_required"}, 400)
+        if isinstance(raw_settings, dict) and raw_github is None:
+            raw_github = raw_settings.get("github")
+        if not isinstance(raw_runtime, dict) and not isinstance(raw_github, dict):
+            return AdminConfigResult(False, {"error": "server_settings_required"}, 400)
         update_mode = str(payload.get("agent_runtime_update_mode") or "merge").lower()
         if update_mode not in {"merge", "replace"}:
             return AdminConfigResult(
@@ -149,7 +158,7 @@ class RemoteAdminConfigManager:
                 if isinstance(previous_data.get("agent_runtime"), dict)
                 else {}
             )
-            if update_mode == "replace":
+            if isinstance(raw_runtime, dict) and update_mode == "replace":
                 for key in ("runtime_profiles", "agents"):
                     if key in raw_runtime and not isinstance(raw_runtime.get(key), dict):
                         return AdminConfigResult(
@@ -168,58 +177,107 @@ class RemoteAdminConfigManager:
                     if key in raw_runtime:
                         merged_runtime[key] = deepcopy(raw_runtime[key])
                 merged = {"agent_runtime": merged_runtime}
-            else:
+                try:
+                    runtime = AgentRuntimeConfig.from_dict(merged["agent_runtime"])
+                except Exception as exc:
+                    return AdminConfigResult(
+                        False,
+                        {"error": "invalid_agent_runtime", "message": str(exc)},
+                        400,
+                    )
+                invalid_runtime = self._validate_agent_runtime(runtime)
+                if invalid_runtime is not None:
+                    return invalid_runtime
+                data["agent_runtime"] = runtime.to_dict()
+            elif isinstance(raw_runtime, dict):
                 merged = ConfigLoader()._merge_dicts(
                     {"agent_runtime": previous_runtime},
                     {"agent_runtime": raw_runtime},
                 )
-            try:
-                runtime = AgentRuntimeConfig.from_dict(merged["agent_runtime"])
-            except Exception as exc:
-                return AdminConfigResult(
-                    False,
-                    {"error": "invalid_agent_runtime", "message": str(exc)},
-                    400,
+                try:
+                    runtime = AgentRuntimeConfig.from_dict(merged["agent_runtime"])
+                except Exception as exc:
+                    return AdminConfigResult(
+                        False,
+                        {"error": "invalid_agent_runtime", "message": str(exc)},
+                        400,
+                    )
+                invalid_runtime = self._validate_agent_runtime(runtime)
+                if invalid_runtime is not None:
+                    return invalid_runtime
+                data["agent_runtime"] = runtime.to_dict()
+            if isinstance(raw_github, dict):
+                previous_github = (
+                    previous_data.get("github", {})
+                    if isinstance(previous_data.get("github"), dict)
+                    else {}
                 )
-            if runtime.max_running_agents < 1 or runtime.max_shells_per_agent < 1:
-                return AdminConfigResult(
-                    False,
-                    {
-                        "error": "invalid_agent_runtime",
-                        "message": "agent_runtime limits must be positive integers",
-                    },
-                    400,
+                merged_github = ConfigLoader()._merge_dicts(
+                    previous_github,
+                    raw_github,
                 )
-            missing_profiles = [
-                agent_id
-                for agent_id, agent in runtime.agents.items()
-                if agent.runtime_profile
-                and agent.runtime_profile not in runtime.runtime_profiles
-            ]
-            if missing_profiles:
-                return AdminConfigResult(
-                    False,
-                    {
-                        "error": "invalid_agent_runtime",
-                        "message": (
-                            "agent runtime profile references must exist: "
-                            + ", ".join(sorted(missing_profiles))
-                        ),
-                    },
-                    400,
-                )
-            data["agent_runtime"] = runtime.to_dict()
+                try:
+                    github = GitHubConfig.from_dict(merged_github)
+                except Exception as exc:
+                    return AdminConfigResult(
+                        False,
+                        {"error": "invalid_github", "message": str(exc)},
+                        400,
+                    )
+                if github.reconcile_interval_sec < 1:
+                    return AdminConfigResult(
+                        False,
+                        {
+                            "error": "invalid_github",
+                            "message": "github.reconcile_interval_sec must be positive",
+                        },
+                        400,
+                    )
+                data["github"] = github.to_dict()
             reload_error = self._commit_config(data, previous_data)
             if reload_error:
                 return reload_error
-            get_agent_runtime_limiter().configure(
-                max_running_agents=runtime.max_running_agents,
-                max_shells_per_agent=runtime.max_shells_per_agent,
-            )
+            if isinstance(raw_runtime, dict):
+                get_agent_runtime_limiter().configure(
+                    max_running_agents=runtime.max_running_agents,
+                    max_shells_per_agent=runtime.max_shells_per_agent,
+                )
             return AdminConfigResult(
                 True,
                 {"ok": True, **self.read_server_settings()},
             )
+
+    def _validate_agent_runtime(
+        self, runtime: AgentRuntimeConfig
+    ) -> AdminConfigResult | None:
+        if runtime.max_running_agents < 1 or runtime.max_shells_per_agent < 1:
+            return AdminConfigResult(
+                False,
+                {
+                    "error": "invalid_agent_runtime",
+                    "message": "agent_runtime limits must be positive integers",
+                },
+                400,
+            )
+        missing_profiles = [
+            agent_id
+            for agent_id, agent in runtime.agents.items()
+            if agent.runtime_profile
+            and agent.runtime_profile not in runtime.runtime_profiles
+        ]
+        if missing_profiles:
+            return AdminConfigResult(
+                False,
+                {
+                    "error": "invalid_agent_runtime",
+                    "message": (
+                        "agent runtime profile references must exist: "
+                        + ", ".join(sorted(missing_profiles))
+                    ),
+                },
+                400,
+            )
+        return None
 
     def list_toolchains(self) -> dict[str, Any]:
         data = self._load_data()
