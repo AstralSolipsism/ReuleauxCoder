@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -103,13 +104,30 @@ func (b FakeBackend) Execute(ctx context.Context, req RunRequest, opts RunOption
 	}
 	events := []Event{
 		{Type: EventStatus, Data: map[string]any{"status": "running"}},
-		{Type: EventText, Text: output},
 	}
+	emitEvent(opts, events[0])
+	if delay := metadataDurationSeconds(req.Metadata, "fake_sleep_sec"); delay > 0 {
+		select {
+		case <-ctx.Done():
+			event := Event{Type: EventStatus, Data: map[string]any{"status": "cancelled"}}
+			events = append(events, event)
+			emitEvent(opts, event)
+			return RunResult{
+				TaskID: req.TaskID,
+				Status: "cancelled",
+				Output: output,
+				Error:  ctx.Err().Error(),
+				Events: events,
+			}, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	textEvent := Event{Type: EventText, Text: output}
+	events = append(events, textEvent)
+	emitEvent(opts, textEvent)
 	if err := writeFakeFiles(req); err != nil {
 		events = append(events, Event{Type: EventStatus, Data: map[string]any{"status": "failed", "error": err.Error()}})
-		for _, event := range events {
-			emitEvent(opts, event)
-		}
+		emitEvent(opts, events[len(events)-1])
 		return RunResult{
 			TaskID: req.TaskID,
 			Status: "failed",
@@ -119,9 +137,7 @@ func (b FakeBackend) Execute(ctx context.Context, req RunRequest, opts RunOption
 		}, err
 	}
 	events = append(events, Event{Type: EventStatus, Data: map[string]any{"status": "completed"}})
-	for _, event := range events {
-		emitEvent(opts, event)
-	}
+	emitEvent(opts, events[len(events)-1])
 	return RunResult{
 		TaskID: req.TaskID,
 		Status: "completed",
@@ -166,6 +182,41 @@ func writeFakeFiles(req RunRequest) error {
 		}
 	}
 	return nil
+}
+
+func metadataDurationSeconds(metadata map[string]any, key string) time.Duration {
+	if len(metadata) == 0 {
+		return 0
+	}
+	value, ok := metadata[key]
+	if !ok || value == nil {
+		return 0
+	}
+	var seconds float64
+	switch typed := value.(type) {
+	case int:
+		seconds = float64(typed)
+	case int64:
+		seconds = float64(typed)
+	case float64:
+		seconds = typed
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+		if err != nil {
+			return 0
+		}
+		seconds = parsed
+	default:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(fmt.Sprint(value)), 64)
+		if err != nil {
+			return 0
+		}
+		seconds = parsed
+	}
+	if seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds * float64(time.Second))
 }
 
 func emitEvent(opts RunOptions, event Event) {

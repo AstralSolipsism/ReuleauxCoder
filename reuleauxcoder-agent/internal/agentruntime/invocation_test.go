@@ -156,6 +156,31 @@ func TestFakeBackendStartStreamsSessionEvents(t *testing.T) {
 	}
 }
 
+func TestFakeBackendSleepCanBeCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	session, err := FakeBackend{Output: "ok"}.Start(
+		ctx,
+		RunRequest{
+			TaskID:   "task-sleep",
+			Prompt:   "ignored",
+			Metadata: map[string]any{"fake_sleep_sec": 5},
+		},
+		RunOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := <-session.Events
+	if first.Type != EventStatus || first.Data["status"] != "running" {
+		t.Fatalf("first event = %#v", first)
+	}
+	cancel()
+	result := <-session.Result
+	if result.Status != "cancelled" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestSubprocessBackendStreamsEventsToSink(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {

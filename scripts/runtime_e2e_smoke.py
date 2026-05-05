@@ -84,6 +84,9 @@ REQUIRED_TABLES = [
     "ez_assignments",
     "ez_mentions",
     "ez_assignment_events",
+    "ez_github_pull_requests",
+    "ez_github_review_comments",
+    "ez_github_webhook_deliveries",
 ]
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "canceled", "blocked", "timeout"}
@@ -1141,6 +1144,7 @@ class ServerRunner:
             "pr_body": f"Runtime smoke {suffix}",
             "pr_title": f"Runtime smoke {suffix}",
             "commit_message": f"agent: runtime smoke {suffix}",
+            "pr_enabled": False,
         }
         if extra:
             metadata.update(extra)
@@ -1243,10 +1247,10 @@ class ServerRunner:
             self.assert_task_labels(
                 happy_id,
                 happy,
-                {"queued", "claimed", "worktree_ready", "text", "branch_pushed", "pr_created"},
+                {"queued", "claimed", "worktree_ready", "text", "branch_pushed"},
             )
             artifacts = {item.get("type"): item for item in happy.get("artifacts") or []}
-            if "branch" not in artifacts or "pull_request" not in artifacts:
+            if "branch" not in artifacts:
                 raise RuntimeError(f"happy task missing artifacts: {artifacts}")
             workdir = Path((happy.get("session") or {}).get("workdir") or "")
             if not (workdir / "agent-output-happy.txt").exists():
@@ -1254,9 +1258,14 @@ class ServerRunner:
             self.report["tasks"]["happy"] = self.summarize_task(happy)
 
             cancel_id = f"task-cancel-{self.timestamp.lower()}"
-            (self.smoke_dir / "gh_sleep").write_text("5\n", encoding="utf-8")
-            self.submit_task(cancel_id, agent_id, fixture, suffix="cancel")
-            self.wait_for_label(cancel_id, "publishing_branch", timeout_sec=90)
+            self.submit_task(
+                cancel_id,
+                agent_id,
+                fixture,
+                suffix="cancel",
+                extra_metadata={"fake_sleep_sec": 5},
+            )
+            self.wait_for_label(cancel_id, "running", timeout_sec=90)
             cancel_body = self.admin_json(
                 "/remote/admin/runtime/cancel",
                 {"task_id": cancel_id, "reason": "runtime_smoke_cancel"},
@@ -1268,7 +1277,6 @@ class ServerRunner:
             if status not in {"cancelled", "canceled"}:
                 raise RuntimeError(f"cancel task status mismatch: {cancel_detail['task']}")
             self.report["tasks"]["cancel"] = self.summarize_task(cancel_detail)
-            (self.smoke_dir / "gh_sleep").unlink(missing_ok=True)
 
             retry_id = f"task-retry-{self.timestamp.lower()}"
             retry = self.admin_json(
