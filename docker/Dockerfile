@@ -42,6 +42,7 @@ RUN set -eux; \
 
 COPY pyproject.toml README.md README_CN.md /app/
 COPY reuleauxcoder /app/reuleauxcoder
+COPY ezcode_server /app/ezcode_server
 COPY docker/entrypoint.sh /app/docker/entrypoint.sh
 COPY docker/config.host.yaml /app/docker/config.host.yaml.template
 COPY --from=peer-builder /out /app/artifacts/remote

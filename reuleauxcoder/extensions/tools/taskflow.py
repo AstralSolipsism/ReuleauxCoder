@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from reuleauxcoder.extensions.tools.base import Tool
-from reuleauxcoder.services.taskflow.service import TaskflowService
+from ezcode_server.services.taskflow.service import TaskflowService
 
 
 class TaskflowPlanningTool(Tool):

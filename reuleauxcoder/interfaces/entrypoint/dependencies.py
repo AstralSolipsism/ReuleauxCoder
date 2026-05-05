@@ -16,22 +16,22 @@ from reuleauxcoder.app.commands.registry import ActionRegistry
 from reuleauxcoder.domain.agent.agent import Agent
 from reuleauxcoder.domain.config.models import Config
 from reuleauxcoder.extensions.mcp.manager import MCPManager
-from reuleauxcoder.extensions.remote_exec.http_service import RemoteRelayHTTPService
-from reuleauxcoder.extensions.remote_exec.server import RelayServer
+from ezcode_server.interfaces.http.remote.service import RemoteRelayHTTPService
+from ezcode_server.relay.server import RelayServer
 from reuleauxcoder.extensions.tools.backend import LocalToolBackend, ToolBackend
 from reuleauxcoder.extensions.tools.registry import build_tools
 from reuleauxcoder.extensions.skills.service import SkillsService
 from reuleauxcoder.interfaces.events import UIEventBus, UIEventKind
 from reuleauxcoder.interfaces.interactions import UIInteractor
 from reuleauxcoder.infrastructure.persistence.session_store import SessionStore
-from reuleauxcoder.infrastructure.persistence.factory import (
+from ezcode_server.infrastructure.persistence.factory import (
     create_issue_assignment_service,
     create_runtime_control_plane,
     create_session_store as create_configured_session_store,
     create_taskflow_service,
 )
 from reuleauxcoder.services.config.loader import ConfigLoader
-from reuleauxcoder.services.agent_runtime.control_plane import AgentRuntimeControlPlane
+from ezcode_server.services.agent_runtime.control_plane import AgentRuntimeControlPlane
 from reuleauxcoder.services.llm.client import LLM
 from reuleauxcoder.services.llm.factory import build_llm_from_settings
 

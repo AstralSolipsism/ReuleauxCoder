@@ -35,7 +35,7 @@ dependencies = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["reuleauxcoder"]
+packages = ["reuleauxcoder", "ezcode_server"]
 
 [dependency-groups]
 dev = [

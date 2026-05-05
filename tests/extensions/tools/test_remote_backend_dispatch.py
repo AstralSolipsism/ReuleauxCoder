@@ -4,18 +4,18 @@ from __future__ import annotations
 
 import pytest
 
-from reuleauxcoder.extensions.remote_exec.backend import RemoteRelayToolBackend
-from reuleauxcoder.extensions.remote_exec.errors import (
+from ezcode_server.adapters.reuleauxcoder.remote_backend import RemoteRelayToolBackend
+from ezcode_server.relay.errors import (
     PeerDisconnectedError,
     PeerNotFoundError,
 )
-from reuleauxcoder.extensions.remote_exec.protocol import (
+from ezcode_server.interfaces.http.remote.protocol import (
     ExecToolRequest,
     ExecToolResult,
     RemoteMCPToolInfo,
 )
-from reuleauxcoder.extensions.remote_exec.server import RelayServer
-from reuleauxcoder.extensions.remote_exec.mcp_tools import RemotePeerMCPTool
+from ezcode_server.relay.server import RelayServer
+from ezcode_server.adapters.reuleauxcoder.mcp_tools import RemotePeerMCPTool
 from reuleauxcoder.extensions.tools.builtin.edit import EditFileTool
 from reuleauxcoder.extensions.tools.builtin.glob import GlobTool
 from reuleauxcoder.extensions.tools.builtin.grep import GrepTool
@@ -147,7 +147,7 @@ class TestRemoteBackendDispatch:
         try:
             # register peer
             bt = srv.issue_bootstrap_token(ttl_sec=60)
-            from reuleauxcoder.extensions.remote_exec.protocol import RegisterRequest
+            from ezcode_server.interfaces.http.remote.protocol import RegisterRequest
 
             resp = srv._on_register(RegisterRequest(bootstrap_token=bt, cwd="/tmp"))
 
@@ -171,7 +171,7 @@ class TestRemoteBackendDispatch:
             # inject tool result
             assert len(received) == 1
             req_id = received[0][1].request_id
-            from reuleauxcoder.extensions.remote_exec.protocol import RelayEnvelope
+            from ezcode_server.interfaces.http.remote.protocol import RelayEnvelope
 
             env = RelayEnvelope(
                 type="tool_result",
@@ -196,7 +196,7 @@ class TestRemoteBackendDispatch:
         srv._send_fn = mock_send
         srv.start()
         try:
-            from reuleauxcoder.extensions.remote_exec.protocol import RegisterRequest
+            from ezcode_server.interfaces.http.remote.protocol import RegisterRequest
 
             resp = srv._on_register(
                 RegisterRequest(
@@ -218,7 +218,7 @@ class TestRemoteBackendDispatch:
 
             import threading
             import time
-            from reuleauxcoder.extensions.remote_exec.protocol import RelayEnvelope
+            from ezcode_server.interfaces.http.remote.protocol import RelayEnvelope
 
             holder: dict[str, object] = {}
 
@@ -260,13 +260,13 @@ class TestRemoteBackendDispatch:
         srv.start()
         try:
             bt = srv.issue_bootstrap_token(ttl_sec=60)
-            from reuleauxcoder.extensions.remote_exec.protocol import RegisterRequest
+            from ezcode_server.interfaces.http.remote.protocol import RegisterRequest
 
             resp = srv._on_register(RegisterRequest(bootstrap_token=bt, cwd="/tmp"))
 
             import threading
             import time
-            from reuleauxcoder.extensions.remote_exec.protocol import RelayEnvelope
+            from ezcode_server.interfaces.http.remote.protocol import RelayEnvelope
 
             result_holder: dict[str, object] = {}
 

@@ -14,6 +14,11 @@ reuleauxcoder/
 ├── app/             # Application layer (use case orchestration)
 └── compat/          # Compatibility handling
 
+ezcode_server/       # EZCode/Dogcode server-side control plane
+├── services/        # Multi-executor runtime, taskflow, collaboration, admin
+├── infrastructure/  # Server persistence and store wiring
+└── interfaces/      # Server-facing HTTP adapters and relay protocol
+
 reuleauxcoder-agent/  # Go binary for remote peer execution
 ├── cmd/reuleauxcoder-agent/main.go    # CLI entrypoint
 ├── internal/
@@ -55,6 +60,10 @@ Pure business logic with no external dependencies. Contains core abstractions an
 
 ### Services Layer (`services/`)
 Coordinates domain objects and handles external interactions.
+
+`ezcode_server/services/agent_runtime`, `ezcode_server/services/taskflow`, and
+`ezcode_server/services/collaboration` own the server control plane. `reuleauxcoder/services`
+stays focused on executor-local services such as LLM, prompt, provider, and config loading.
 
 - **llm/**: LLM client and related services
   - `client.py` — `LLM`: provider-backed facade that keeps the legacy API stable while routing calls through `services/providers` adapters. Constructor params: `model`, `api_key`, `base_url`, `temperature`, `max_tokens`, `preserve_reasoning_content`, `backfill_reasoning_content_for_tool_calls`, `reasoning_effort`, `thinking_enabled`, `reasoning_replay_mode`, `reasoning_replay_placeholder`, `debug_trace`, `ui_bus`, `provider`, `provider_config`. Key methods: `chat(messages, tools, on_token, hook_registry, session_id, trace_id, metadata) → LLMResponse` — sanitizes messages, builds a provider request, runs `BEFORE_LLM_REQUEST` guards/transforms/observers, delegates streaming/tool-call parsing to the provider adapter, then runs `AFTER_LLM_RESPONSE` transforms/observers. `reconfigure(**kwargs)` hot-swaps model/provider settings at runtime. Debug trace writes `llm_trace_{ts}_{session}_{trace}.json` to diagnostics dir. On exception calls `persist_llm_error_diagnostic()` and attaches `llm_diagnostic_path` to the exception.
@@ -128,7 +137,7 @@ Pluggable extension system.
 - **mcp/**: MCP server integration — `MCPManager` (independent asyncio loop in background thread), `MCPClient` (stdio JSON-RPC with reconnect-once), `MCPTool` (schema translation wrapping remote tools). Config per-server: `command`, `args`, `env`.
 - **skills/**: Skills system — `SkillsService` discovers skills from `SKILL.md` files, builds catalog with `Skill` objects (`name`, `description`, `location`). Supports enable/disable with persistence via `SkillsConfigStore`.
 - **subagent/**: `SubagentManager` — `_VALID_SUBAGENT_MODES = frozenset({"explore", "execute", "verify"})`, `_DEFAULT_MAX_ROUNDS = 50`, `_DEFAULT_TIMEOUT_SECONDS = 300`, `_MAX_TIMEOUT_SECONDS = 3600`. `SubagentJob` dataclass tracks `job_id`, `status` (PENDING/RUNNING/COMPLETED/FAILED), `start_time`/`end_time`, `result`/`error`. Approval for sub-agents uses a judge-middleware pattern: `build_subagent_approval_provider()` returns `SharedApprovalProvider(handler=..., judges=[ParentLLMJudge(...)])` where `ParentLLMJudge` (a callable `ApprovalJudge`) delegates to the parent LLM first, and only escalates to the human handler if the judge returns `None`. Approval lock (RLock) wraps the handler to serialise terminal access across sub-agents. Manager takes `default_timeout_seconds` and `max_timeout_seconds` as injectable params.
-- **remote_exec/**: `RemoteExecService` — HTTP relay server with `POST /remote/chat/start`, `POST /remote/chat/stream` (long-poll event stream), `POST /remote/approval/reply`. Stream events: `chat_start`, `output`, `approval_request`, `approval_resolved`, `chat_end`, `error`. Bootstrap via `sh -c 'curl -fsSL ... | sh'` with one-time token.
+- **ezcode_server.interfaces.http.remote/**: Remote relay HTTP control plane with `POST /remote/chat/start`, `POST /remote/chat/stream` (long-poll event stream), `POST /remote/approval/reply`, peer registration, manifests, runtime, Taskflow, collaboration, admin, and artifact routes. Bootstrap uses one-time tokens.
 
 ### Application Layer (`app/`)
 Use-case orchestration and shared runtime utilities.
@@ -332,7 +341,7 @@ Application initialization and dependency injection.
 - Manual resume by explicit session id is allowed to cross fingerprints with warning
 
 ### Remote Exec Relay (host/peer)
-Current remote execution flow is event-stream based and keeps rendering ownership on the host runtime.
+Current remote execution flow is event-stream based and keeps rendering ownership on the host runtime. The HTTP relay host lives under `ezcode_server.interfaces.http.remote`; server-side relay primitives live under `ezcode_server.relay`; ReuleauxCoder-specific remote tool adapters live under `ezcode_server.adapters.reuleauxcoder`.
 
 - Transport endpoints (host HTTP service):
   - `POST /remote/chat/start`: create chat session and enqueue `chat_start`

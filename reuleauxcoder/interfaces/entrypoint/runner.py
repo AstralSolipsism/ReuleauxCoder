@@ -33,9 +33,9 @@ from reuleauxcoder.domain.hooks import (
     instantiate_hooks,
 )
 from reuleauxcoder.extensions.mcp.manager import MCPManager
-from reuleauxcoder.extensions.remote_exec.backend import RemoteRelayToolBackend
-from reuleauxcoder.extensions.remote_exec.http_service import RemoteRelayHTTPService
-from reuleauxcoder.extensions.remote_exec.server import RelayServer
+from ezcode_server.adapters.reuleauxcoder.remote_backend import RemoteRelayToolBackend
+from ezcode_server.interfaces.http.remote.service import RemoteRelayHTTPService
+from ezcode_server.relay.server import RelayServer
 from reuleauxcoder.extensions.skills.service import SkillsService
 from reuleauxcoder.interfaces.entrypoint.dependencies import (
     AppContext,

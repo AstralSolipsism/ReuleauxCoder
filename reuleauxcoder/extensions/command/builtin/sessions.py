@@ -26,7 +26,7 @@ from reuleauxcoder.app.runtime.session_state import (
     restore_config_runtime_defaults,
 )
 from reuleauxcoder.domain.hooks import HookPoint, SessionSaveContext
-from reuleauxcoder.infrastructure.persistence.factory import (
+from ezcode_server.infrastructure.persistence.factory import (
     create_session_store as create_configured_session_store,
 )
 from reuleauxcoder.interfaces.cli.views.common import stop_stream_and_clear

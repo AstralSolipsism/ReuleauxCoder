@@ -269,7 +269,7 @@ rcoder mcp artifact build-node|import|list|verify ...
 Python 相关测试：
 
 ```powershell
-uv run pytest tests/domain/agent_runtime tests/services/agent_runtime tests/services/config/test_agent_runtime_config_loader.py tests/extensions/remote_exec tests/interfaces/entrypoint/test_runner_remote_exec.py tests/services/config/test_loader.py
+uv run pytest tests/domain/agent_runtime tests/ezcode_server/services/agent_runtime tests/services/config/test_agent_runtime_config_loader.py tests/ezcode_server/http tests/ezcode_server/relay tests/interfaces/entrypoint/test_runner_remote_exec.py tests/services/config/test_loader.py
 ```
 
 Go agent 测试：

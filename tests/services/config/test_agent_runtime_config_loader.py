@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import os
 
-from reuleauxcoder.extensions.remote_exec.admin import RemoteAdminConfigManager
+from ezcode_server.services.admin.service import RemoteAdminConfigManager
 from reuleauxcoder.services.config.loader import ConfigLoader
 
 

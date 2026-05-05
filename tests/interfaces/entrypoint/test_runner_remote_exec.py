@@ -30,10 +30,10 @@ from reuleauxcoder.domain.session.models import Session, SessionRuntimeState
 from reuleauxcoder.domain.approval import ApprovalRequest
 from reuleauxcoder.domain.hooks.registry import HookRegistry
 from reuleauxcoder.domain.llm.models import LLMResponse, ToolCall
-from reuleauxcoder.extensions.remote_exec.backend import RemoteRelayToolBackend
-from reuleauxcoder.extensions.remote_exec.http_service import RemoteRelayHTTPService
-from reuleauxcoder.extensions.remote_exec.protocol import ToolPreviewResult
-from reuleauxcoder.extensions.remote_exec.server import RelayServer
+from ezcode_server.adapters.reuleauxcoder.remote_backend import RemoteRelayToolBackend
+from ezcode_server.interfaces.http.remote.service import RemoteRelayHTTPService
+from ezcode_server.interfaces.http.remote.protocol import ToolPreviewResult
+from ezcode_server.relay.server import RelayServer
 from reuleauxcoder.infrastructure.yaml.loader import load_yaml_config, save_yaml_config
 from reuleauxcoder.infrastructure.persistence.session_store import SessionStore
 from reuleauxcoder.interfaces.entrypoint.runner import (
@@ -1015,6 +1015,18 @@ class TestRunnerRemoteExec:
                 {"peer_token": peer_token},
             )
             assert any(item["id"] == session_id for item in listed["sessions"])
+            assert listed["list_etag"]
+            _, unchanged_list = _json_request(
+                "POST",
+                f"{runner._relay_http_service.base_url}/remote/sessions/list",
+                {
+                    "peer_token": peer_token,
+                    "if_list_etag": listed["list_etag"],
+                },
+            )
+            assert unchanged_list["sessions_unchanged"] is True
+            assert unchanged_list["list_etag"] == listed["list_etag"]
+            assert "sessions" not in unchanged_list
 
             snapshot = {
                 "version": 1,
@@ -1031,6 +1043,20 @@ class TestRunnerRemoteExec:
                 },
             )
             assert saved["ok"] is True
+            assert saved["snapshot_digest"]
+            _, saved_again = _json_request(
+                "POST",
+                f"{runner._relay_http_service.base_url}/remote/sessions/snapshot",
+                {
+                    "peer_token": peer_token,
+                    "session_id": session_id,
+                    "snapshot": snapshot,
+                    "snapshot_digest": saved["snapshot_digest"],
+                },
+            )
+            assert saved_again["ok"] is True
+            assert saved_again["unchanged"] is True
+            assert saved_again["snapshot_digest"] == saved["snapshot_digest"]
 
             _, loaded = _json_request(
                 "POST",

@@ -206,6 +206,7 @@ class RuntimeProfileConfig:
     id: str
     executor: ExecutorType = ExecutorType.REULEAUXCODER
     execution_location: ExecutionLocation = ExecutionLocation.REMOTE_SERVER
+    model: str = ""
     command: str | None = None
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
@@ -228,6 +229,7 @@ class RuntimeProfileConfig:
             execution_location=ExecutionLocation(
                 str(data.get("execution_location", "remote_server"))
             ),
+            model=str(data.get("model", "") or ""),
             command=str(data["command"]) if data.get("command") is not None else None,
             args=_string_list(data.get("args", [])),
             env=_string_dict(data.get("env", {})),
@@ -245,6 +247,8 @@ class RuntimeProfileConfig:
         }
         if self.command is not None:
             result["command"] = self.command
+        if self.model:
+            result["model"] = self.model
         if self.args:
             result["args"] = list(self.args)
         if self.env:

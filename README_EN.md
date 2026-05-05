@@ -114,7 +114,7 @@ uv run rcoder --server
 Run targeted Python tests:
 
 ```powershell
-uv run pytest tests/domain/agent_runtime tests/services/agent_runtime tests/services/config/test_agent_runtime_config_loader.py tests/extensions/remote_exec tests/interfaces/entrypoint/test_runner_remote_exec.py tests/services/config/test_loader.py
+uv run pytest tests/domain/agent_runtime tests/ezcode_server tests/services/config/test_agent_runtime_config_loader.py tests/interfaces/entrypoint/test_runner_remote_exec.py tests/services/config/test_loader.py
 ```
 
 Run Go agent tests:

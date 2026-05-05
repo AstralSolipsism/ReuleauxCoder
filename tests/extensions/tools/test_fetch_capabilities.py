@@ -7,8 +7,8 @@ import json
 import socket
 from urllib.error import HTTPError
 
-from reuleauxcoder.extensions.remote_exec.backend import RemoteRelayToolBackend
-from reuleauxcoder.extensions.remote_exec.server import RelayServer
+from ezcode_server.adapters.reuleauxcoder.remote_backend import RemoteRelayToolBackend
+from ezcode_server.relay.server import RelayServer
 from reuleauxcoder.extensions.tools.builtin import fetch_capabilities as fetch_module
 from reuleauxcoder.extensions.tools.builtin.fetch_capabilities import (
     FetchCapabilitiesTool,

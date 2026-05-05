@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 
 from reuleauxcoder.extensions.tools.mention import MentionAgentTool
-from reuleauxcoder.services.agent_runtime.control_plane import AgentRuntimeControlPlane
-from reuleauxcoder.services.issue_assignment.service import IssueAssignmentService
-from reuleauxcoder.services.taskflow.service import TaskflowService
+from ezcode_server.services.agent_runtime.control_plane import AgentRuntimeControlPlane
+from ezcode_server.services.collaboration.service import IssueAssignmentService
+from ezcode_server.services.taskflow.service import TaskflowService
 
 
 def test_mention_agent_tool_creates_record_without_dispatching_runtime_task() -> None:

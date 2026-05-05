@@ -186,7 +186,9 @@ class ToolExecutor:
                 shell_context = get_agent_runtime_limiter().shell_slot(
                     agent_id,
                     tool_call_id=tool_call.id,
-                    is_cancelled=self.agent.stop_requested,
+                    is_cancelled=getattr(
+                        self.agent, "stop_requested", lambda: False
+                    ),
                     on_wait=_emit_shell_runtime,
                 )
             with shell_context:

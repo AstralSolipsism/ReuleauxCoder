@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import inspect
 from pathlib import Path
@@ -30,10 +31,10 @@ from reuleauxcoder.domain.approval import (
 )
 from reuleauxcoder.domain.config.models import Config
 from reuleauxcoder.domain.session.models import Session, SessionMetadata, SessionRuntimeState
-from reuleauxcoder.extensions.remote_exec.backend import RemoteRelayToolBackend
-from reuleauxcoder.extensions.remote_exec.mcp_tools import RemotePeerMCPTool
-from reuleauxcoder.extensions.remote_exec.protocol import ChatResponse, ToolPreviewResult
-from reuleauxcoder.extensions.remote_exec.server import RelayServer
+from ezcode_server.adapters.reuleauxcoder.remote_backend import RemoteRelayToolBackend
+from ezcode_server.adapters.reuleauxcoder.mcp_tools import RemotePeerMCPTool
+from ezcode_server.interfaces.http.remote.protocol import ChatResponse, ToolPreviewResult
+from ezcode_server.relay.server import RelayServer
 from reuleauxcoder.extensions.skills.service import SkillsService
 from reuleauxcoder.extensions.tools.backend import ExecutionContext
 from reuleauxcoder.extensions.tools.taskflow import TaskflowPlanningTool
@@ -42,10 +43,27 @@ from reuleauxcoder.interfaces.cli.registration import CLI_PROFILE
 from reuleauxcoder.interfaces.cli.render import CLIRenderer
 from reuleauxcoder.interfaces.entrypoint.dependencies import AppDependencies
 from reuleauxcoder.interfaces.events import UIEventBus, UIEventKind
-from reuleauxcoder.services.taskflow.service import (
+from ezcode_server.services.taskflow.service import (
     TASKFLOW_SYSTEM_PROMPT,
     TASKFLOW_WORKFLOW_MODE,
 )
+
+
+def _stable_digest(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256-{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _snapshot_digest(snapshot: dict[str, Any]) -> str:
+    normalized = dict(snapshot)
+    normalized.pop("updatedAt", None)
+    normalized.pop("updated_at", None)
+    return _stable_digest(normalized)
 
 
 def init_remote_relay(runner, config: Config, ui_bus: UIEventBus) -> None:
@@ -435,10 +453,23 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
         if action == "list":
             limit = max(1, min(100, int(payload.get("limit", 20) or 20)))
             sessions = session_store.list(limit=limit, fingerprint=fingerprint)
+            session_payloads = [
+                _session_metadata_payload(session) for session in sessions
+            ]
+            list_etag = _stable_digest(session_payloads)
+            if payload.get("if_list_etag") == list_etag:
+                return {
+                    "ok": True,
+                    "fingerprint": fingerprint,
+                    "list_etag": list_etag,
+                    "sessions_unchanged": True,
+                }
             return {
                 "ok": True,
                 "fingerprint": fingerprint,
-                "sessions": [_session_metadata_payload(session) for session in sessions],
+                "list_etag": list_etag,
+                "sessions_unchanged": False,
+                "sessions": session_payloads,
             }
 
         if action == "load":
@@ -556,8 +587,25 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                     "error": "session_fingerprint_mismatch",
                     "_status": 403,
                 }
+            digest = _snapshot_digest(snapshot)
+            latest_snapshot, _snapshot_error = _load_session_snapshot(session_id)
+            if (
+                isinstance(latest_snapshot, dict)
+                and _snapshot_digest(latest_snapshot) == digest
+            ):
+                return {
+                    "ok": True,
+                    "session_id": session_id,
+                    "snapshot_digest": digest,
+                    "unchanged": True,
+                }
             session_store.save_snapshot(session_id, snapshot)
-            return {"ok": True, "session_id": session_id}
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "snapshot_digest": digest,
+                "unchanged": False,
+            }
 
         return {"ok": False, "error": "unknown_session_action", "_status": 404}
 
