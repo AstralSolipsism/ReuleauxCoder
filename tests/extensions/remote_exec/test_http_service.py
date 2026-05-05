@@ -24,6 +24,7 @@ _URLOPEN = request.build_opener(request.ProxyHandler({})).open
 _GO_AVAILABLE = shutil.which("go") is not None
 
 from reuleauxcoder.extensions.remote_exec.http_service import RemoteRelayHTTPService
+from reuleauxcoder.extensions.remote_exec.admin import RemoteAdminConfigManager
 from reuleauxcoder.domain.config.models import (
     EnvironmentCLIToolConfig,
     AgentRuntimeConfig,
@@ -393,7 +394,7 @@ class TestRemoteRelayHTTPService:
                 headers=admin_headers,
             )
             assert deleted == {"ok": True, "provider_id": "deepseek-copy"}
-            assert len(reloads) == 7
+            assert len(reloads) == 8
             raw = config_path.read_text(encoding="utf-8")
             assert "sk-secret-value" in raw
             assert "active_main: deepseek-main" in raw
@@ -401,6 +402,61 @@ class TestRemoteRelayHTTPService:
         finally:
             service.stop()
             relay.stop()
+
+    def test_admin_status_returns_chat_modes(self) -> None:
+        config_data = {
+            "modes": {
+                "active": "planner",
+                "profiles": {
+                    "coder": {"description": "Code changes"},
+                    "planner": {
+                        "description": "Plan first",
+                        "tools": ["read_file"],
+                    },
+                },
+            }
+        }
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            admin_access_secret="admin-secret",
+            admin_config_path=Path("unused-config.yaml"),
+        )
+        service.start()
+        try:
+            with patch.object(RemoteAdminConfigManager, "_load_data", return_value=config_data):
+                status, body = _json_request(
+                    "POST",
+                    f"{service.base_url}/remote/admin/status",
+                    {},
+                    headers={"X-RC-Admin-Secret": "admin-secret"},
+                )
+
+            assert status == 200
+            assert body["active_mode"] == "planner"
+            modes = {mode["name"]: mode for mode in body["modes"]}
+            assert set(modes) >= {"coder", "planner", "debugger", "taskflow"}
+            assert modes["coder"]["description"] == "Code changes"
+            assert modes["planner"]["description"] == "Plan first"
+            assert modes["planner"]["tools"] == ["read_file"]
+        finally:
+            service.stop()
+            relay.stop()
+
+    def test_admin_status_falls_back_to_builtin_chat_modes(self) -> None:
+        manager = RemoteAdminConfigManager(Path("unused-config.yaml"))
+        with patch.object(manager, "_load_data", return_value={}):
+            status = manager.status()
+
+        assert status["active_mode"] == "coder"
+        assert {mode["name"] for mode in status["modes"]} >= {
+            "coder",
+            "planner",
+            "debugger",
+        }
 
     def test_admin_toolchain_endpoints_manage_manifest(
         self, tmp_path: Path
@@ -1385,6 +1441,7 @@ class TestRemoteRelayHTTPService:
         def stream_chat_handler(peer_id: str, prompt: str, session) -> None:
             seen["peer_id"] = peer_id
             seen["prompt"] = prompt
+            seen["mode"] = session.mode
             seen["workflow_mode"] = session.workflow_mode
             seen["taskflow_goal_id"] = session.taskflow_goal_id
             session.append_event("chat_end", {"response": "taskflow ok"})
@@ -1412,6 +1469,7 @@ class TestRemoteRelayHTTPService:
                 {
                     "peer_token": peer_token,
                     "prompt": "turn this into a taskflow",
+                    "mode": "taskflow",
                     "workflow_mode": "taskflow",
                     "taskflow_goal_id": "goal-1",
                 },
@@ -1422,6 +1480,7 @@ class TestRemoteRelayHTTPService:
             assert seen == {
                 "peer_id": register_body["payload"]["peer_id"],
                 "prompt": "turn this into a taskflow",
+                "mode": "taskflow",
                 "workflow_mode": "taskflow",
                 "taskflow_goal_id": "goal-1",
             }
@@ -1546,6 +1605,61 @@ class TestRemoteRelayHTTPService:
             event_types = [event["type"] for event in stream_body["events"]]
             assert "chat_start" in event_types
             assert "error" in event_types
+        finally:
+            service.stop()
+            relay.stop()
+
+    def test_chat_start_preserves_requested_mode_on_stream_session(self) -> None:
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        seen: dict[str, str | None] = {}
+
+        def stream_chat_handler(_peer_id: str, _prompt: str, session) -> None:
+            seen["mode"] = session.mode
+            session.append_event("chat_end", {"response": "ok"})
+
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            stream_chat_handler=stream_chat_handler,
+        )
+        service.start()
+        try:
+            _, register_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/register",
+                {
+                    "bootstrap_token": relay.issue_bootstrap_token(ttl_sec=60),
+                    "cwd": "/tmp/peer",
+                },
+            )
+            peer_token = register_body["payload"]["peer_token"]
+
+            _, start_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/chat/start",
+                {
+                    "peer_token": peer_token,
+                    "prompt": "use planner mode",
+                    "mode": "planner",
+                },
+            )
+            chat_id = start_body["chat_id"]
+
+            _, stream_body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/chat/stream",
+                {
+                    "peer_token": peer_token,
+                    "chat_id": chat_id,
+                    "cursor": 0,
+                    "timeout_sec": 1,
+                },
+            )
+
+            assert stream_body["done"] is True
+            assert seen["mode"] == "planner"
         finally:
             service.stop()
             relay.stop()
@@ -1699,16 +1813,19 @@ class TestRemoteRelayHTTPService:
                 "peer_token": "peer-token",
                 "prompt": "hello",
                 "session_hint": "session-1",
+                "mode": "planner",
             }
         ).to_dict() == {
             "peer_token": "peer-token",
             "prompt": "hello",
             "session_hint": "session-1",
+            "mode": "planner",
         }
         assert ChatStartRequest.from_dict(
             {
                 "peer_token": "peer-token",
                 "prompt": "hello",
+                "mode": "taskflow",
                 "workflow_mode": "taskflow",
                 "taskflow_goal_id": "goal-1",
             }
@@ -1716,6 +1833,7 @@ class TestRemoteRelayHTTPService:
             "peer_token": "peer-token",
             "prompt": "hello",
             "session_hint": None,
+            "mode": "taskflow",
             "workflow_mode": "taskflow",
             "taskflow_goal_id": "goal-1",
         }
