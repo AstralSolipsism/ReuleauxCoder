@@ -3,8 +3,6 @@ package agentruntime
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/exec"
 	"strings"
 )
 
@@ -116,6 +114,23 @@ func (p *worktreePublisher) run() PublishResult {
 		repoURL, _ = gitOutput(p.ctx, workdir, "remote", "get-url", "origin")
 		repoURL = strings.TrimSpace(repoURL)
 	}
+	headSHA, _ := gitOutput(p.ctx, workdir, "rev-parse", "HEAD")
+	headSHA = strings.TrimSpace(headSHA)
+	baseRef := metadataString(p.req.Metadata, "pr_base")
+	if baseRef == "" {
+		if resolved, err := remoteDefaultBranchFromWorktree(p.ctx, workdir); err == nil {
+			baseRef = resolved
+		}
+	}
+	prEnabled := metadataBoolDefault(p.req.Metadata, "pr_enabled", true)
+	prTitle := metadataString(p.req.Metadata, "pr_title")
+	if prTitle == "" {
+		prTitle = "Agent task " + p.req.TaskID
+	}
+	prBody := metadataString(p.req.Metadata, "pr_body")
+	if prBody == "" {
+		prBody = defaultPRBody(p.req, workdir, branch)
+	}
 	p.emit(Event{
 		Type: EventStatus,
 		Data: map[string]any{
@@ -130,12 +145,20 @@ func (p *worktreePublisher) run() PublishResult {
 		"branch_name": branch,
 		"path":        workdir,
 		"metadata": map[string]any{
-			"repo_url": repoURL,
-			"workdir":  workdir,
+			"repo_url":       repoURL,
+			"workdir":        workdir,
+			"branch":         branch,
+			"head_sha":       headSHA,
+			"base_ref":       baseRef,
+			"commit_message": message,
+			"pr_enabled":     prEnabled,
+			"pr_title":       prTitle,
+			"pr_body":        prBody,
+			"pr_base":        baseRef,
 		},
 	})
 
-	if !metadataBoolDefault(p.req.Metadata, "pr_enabled", true) {
+	if !prEnabled {
 		p.emit(Event{
 			Type: EventStatus,
 			Data: map[string]any{
@@ -144,83 +167,8 @@ func (p *worktreePublisher) run() PublishResult {
 				"pr_enabled": false,
 			},
 		})
-		return p.result
-	}
-	if err := p.publishPR(workdir, branch); err != nil {
-		p.fail("pr_create", err.Error())
 	}
 	return p.result
-}
-
-func (p *worktreePublisher) publishPR(workdir, branch string) error {
-	provider := metadataString(p.req.Metadata, "pr_provider")
-	if provider == "" {
-		provider = "github_gh"
-	}
-	if provider != "github_gh" {
-		return fmt.Errorf("unsupported pr_provider: %s", provider)
-	}
-	base := metadataString(p.req.Metadata, "pr_base")
-	if base == "" {
-		resolved, err := remoteDefaultBranchFromWorktree(p.ctx, workdir)
-		if err != nil {
-			return err
-		}
-		base = resolved
-	}
-	title := metadataString(p.req.Metadata, "pr_title")
-	if title == "" {
-		title = "Agent task " + p.req.TaskID
-	}
-	body := metadataString(p.req.Metadata, "pr_body")
-	if body == "" {
-		body = defaultPRBody(p.req, workdir, branch)
-	}
-
-	if url, err := ghOutput(p.ctx, workdir, "pr", "view", branch, "--json", "url", "--jq", ".url"); err == nil {
-		prURL := strings.TrimSpace(url)
-		if prURL != "" {
-			p.emit(Event{
-				Type: EventStatus,
-				Data: map[string]any{
-					"status": "pr_created",
-					"branch": branch,
-					"pr_url": prURL,
-					"reused": true,
-				},
-			})
-			p.result.Artifacts = append(p.result.Artifacts, pullRequestArtifact(branch, prURL, provider, base, true))
-			return nil
-		}
-	}
-
-	url, err := ghOutput(
-		p.ctx,
-		workdir,
-		"pr", "create",
-		"--head", branch,
-		"--base", base,
-		"--title", title,
-		"--body", body,
-	)
-	if err != nil {
-		return err
-	}
-	prURL := strings.TrimSpace(url)
-	if prURL == "" {
-		return fmt.Errorf("gh pr create returned empty URL")
-	}
-	p.emit(Event{
-		Type: EventStatus,
-		Data: map[string]any{
-			"status": "pr_created",
-			"branch": branch,
-			"pr_url": prURL,
-			"reused": false,
-		},
-	})
-	p.result.Artifacts = append(p.result.Artifacts, pullRequestArtifact(branch, prURL, provider, base, false))
-	return nil
 }
 
 func (p *worktreePublisher) emit(event Event) {
@@ -247,20 +195,6 @@ func (p *worktreePublisher) fail(stage, message string) {
 			"stage": stage,
 		},
 	})
-}
-
-func pullRequestArtifact(branch, prURL, provider, base string, reused bool) map[string]any {
-	return map[string]any{
-		"type":        "pull_request",
-		"status":      "pr_created",
-		"branch_name": branch,
-		"pr_url":      prURL,
-		"metadata": map[string]any{
-			"provider": provider,
-			"base":     base,
-			"reused":   reused,
-		},
-	}
 }
 
 func defaultPRBody(req RunRequest, workdir, branch string) string {
@@ -295,21 +229,6 @@ func remoteDefaultBranchFromWorktree(ctx context.Context, workdir string) (strin
 		}
 	}
 	return "", fmt.Errorf("unable to determine remote default branch for %s", workdir)
-}
-
-func ghOutput(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "gh", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		text := strings.TrimSpace(string(out))
-		if text != "" {
-			return string(out), fmt.Errorf("gh %s failed: %w: %s", strings.Join(args, " "), err, text)
-		}
-		return string(out), fmt.Errorf("gh %s failed: %w", strings.Join(args, " "), err)
-	}
-	return string(out), nil
 }
 
 func metadataString(metadata map[string]any, key string) string {

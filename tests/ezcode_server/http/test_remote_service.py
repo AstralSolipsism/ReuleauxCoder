@@ -3104,9 +3104,8 @@ class TestRemoteRelayHTTPService:
             artifacts = control.artifacts_to_dict("task-go-runtime-worktree")
             artifact_types = {artifact["type"]: artifact for artifact in artifacts}
             assert artifact_types["branch"]["status"] == "pushed"
-            assert artifact_types["pull_request"]["status"] == "pr_created"
-            assert artifact_types["pull_request"]["pr_url"] == "https://example.test/pr/fake"
-            assert task.pr_url == "https://example.test/pr/fake"
+            assert "pull_request" not in artifact_types
+            assert task.pr_url is None
             pushed = subprocess.run(
                 ["git", "ls-remote", "--heads", "origin", task.branch_name],
                 cwd=workdir,
@@ -3116,7 +3115,7 @@ class TestRemoteRelayHTTPService:
                 text=True,
             )
             assert task.branch_name in pushed.stdout
-            assert "pr create" in gh_log.read_text(encoding="utf-8")
+            assert not gh_log.exists() or gh_log.read_text(encoding="utf-8") == ""
             events = control.list_events("task-go-runtime-worktree")
             assert any(event.type == "session_pinned" for event in events)
             assert any(
@@ -3133,7 +3132,7 @@ class TestRemoteRelayHTTPService:
                 and event.payload.get("data", {}).get("status") == "branch_pushed"
                 for event in events
             )
-            assert any(
+            assert not any(
                 event.type == "status"
                 and event.payload.get("data", {}).get("status") == "pr_created"
                 for event in events

@@ -4,18 +4,15 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
 
-func TestPublishWorktreeCommitsPushesAndCreatesPR(t *testing.T) {
+func TestPublishWorktreeCommitsPushesAndReportsBranchArtifact(t *testing.T) {
 	requireGit(t)
 	origin := createGitRepo(t)
 	worktree := createPublishWorktree(t, origin, "task-publish-create")
 	writeWorktreeFile(t, worktree.Path, "feature.txt", "created by agent\n")
-	installFakeGH(t)
-	t.Setenv("EZCODE_FAKE_GH_CREATE_URL", "https://example.test/pr/new")
 
 	result := PublishWorktree(context.Background(), RunRequest{
 		TaskID:   "task-publish-create",
@@ -26,14 +23,22 @@ func TestPublishWorktreeCommitsPushesAndCreatesPR(t *testing.T) {
 		Metadata: map[string]any{"repo_url": origin, "pr_body": "body"},
 	}, PublishOptions{})
 
-	assertArtifact(t, result.Artifacts, "branch", "pushed")
-	assertArtifact(t, result.Artifacts, "pull_request", "pr_created")
+	branchArtifact := assertArtifact(t, result.Artifacts, "branch", "pushed")
+	if artifactOfType(result.Artifacts, "pull_request") != nil {
+		t.Fatalf("worker must not create pull_request artifacts: %#v", result.Artifacts)
+	}
+	metadata, _ := branchArtifact["metadata"].(map[string]any)
+	for _, key := range []string{"repo_url", "branch", "head_sha", "base_ref", "commit_message", "pr_enabled", "pr_title", "pr_body", "pr_base"} {
+		if _, ok := metadata[key]; !ok {
+			t.Fatalf("branch metadata missing %s: %#v", key, metadata)
+		}
+	}
 	assertRemoteBranch(t, worktree.Path, worktree.BranchName)
 	author := strings.TrimSpace(runGitOutput(t, worktree.Path, "log", "-1", "--format=%an <%ae>"))
 	if author != "EZCode Agent <agent@ezcode.local>" {
 		t.Fatalf("commit author = %q", author)
 	}
-	if !hasPublishStatus(result.Events, "branch_pushed") || !hasPublishStatus(result.Events, "pr_created") {
+	if !hasPublishStatus(result.Events, "branch_pushed") || hasPublishStatus(result.Events, "pr_created") {
 		t.Fatalf("publish events missing: %#v", result.Events)
 	}
 }
@@ -61,13 +66,12 @@ func TestPublishWorktreeReportsNoChanges(t *testing.T) {
 	}
 }
 
-func TestPublishWorktreeReusesExistingPR(t *testing.T) {
+func TestPublishWorktreeDoesNotCallGH(t *testing.T) {
 	requireGit(t)
 	origin := createGitRepo(t)
 	worktree := createPublishWorktree(t, origin, "task-publish-existing")
 	writeWorktreeFile(t, worktree.Path, "existing.txt", "change\n")
-	installFakeGH(t)
-	t.Setenv("EZCODE_FAKE_GH_EXISTING_URL", "https://example.test/pr/existing")
+	logPath := installFakeGH(t)
 
 	result := PublishWorktree(context.Background(), RunRequest{
 		TaskID:   "task-publish-existing",
@@ -77,13 +81,9 @@ func TestPublishWorktreeReusesExistingPR(t *testing.T) {
 		Metadata: map[string]any{"repo_url": origin, "pr_body": "body"},
 	}, PublishOptions{})
 
-	artifact := assertArtifact(t, result.Artifacts, "pull_request", "pr_created")
-	if artifact["pr_url"] != "https://example.test/pr/existing" {
-		t.Fatalf("unexpected PR artifact: %#v", artifact)
-	}
-	metadata, _ := artifact["metadata"].(map[string]any)
-	if metadata["reused"] != true {
-		t.Fatalf("expected reused PR metadata: %#v", artifact)
+	assertArtifact(t, result.Artifacts, "branch", "pushed")
+	if content, _ := os.ReadFile(logPath); len(content) > 0 {
+		t.Fatalf("gh should not be called by PublishWorktree: %s", content)
 	}
 }
 
@@ -114,7 +114,7 @@ func TestPublishWorktreeCanDisablePR(t *testing.T) {
 	}
 }
 
-func TestPublishWorktreePushAndGHFailuresBecomeArtifacts(t *testing.T) {
+func TestPublishWorktreePushFailuresBecomeArtifacts(t *testing.T) {
 	requireGit(t)
 	origin := createGitRepo(t)
 	worktree := createPublishWorktree(t, origin, "task-publish-push-fail")
@@ -133,25 +133,6 @@ func TestPublishWorktreePushAndGHFailuresBecomeArtifacts(t *testing.T) {
 	metadata, _ := failed["metadata"].(map[string]any)
 	if metadata["stage"] != "push" {
 		t.Fatalf("expected push failure metadata: %#v", failed)
-	}
-
-	worktree = createPublishWorktree(t, origin, "task-publish-gh-fail")
-	writeWorktreeFile(t, worktree.Path, "gh-fail.txt", "change\n")
-	installFakeGH(t)
-	t.Setenv("EZCODE_FAKE_GH_FAIL_CREATE", "1")
-	ghFailed := PublishWorktree(context.Background(), RunRequest{
-		TaskID:   "task-publish-gh-fail",
-		AgentID:  "coder",
-		Workdir:  worktree.Path,
-		Branch:   worktree.BranchName,
-		Metadata: map[string]any{"repo_url": origin},
-	}, PublishOptions{})
-
-	assertArtifact(t, ghFailed.Artifacts, "branch", "pushed")
-	failed = assertArtifact(t, ghFailed.Artifacts, "log", "failed")
-	metadata, _ = failed["metadata"].(map[string]any)
-	if metadata["stage"] != "pr_create" {
-		t.Fatalf("expected pr_create failure metadata: %#v", failed)
 	}
 }
 
@@ -250,7 +231,7 @@ func installFakeGH(t *testing.T) string {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "gh.log")
 	t.Setenv("EZCODE_FAKE_GH_LOG", logPath)
-	if runtime.GOOS == "windows" {
+	if os.PathSeparator == '\\' {
 		path := filepath.Join(dir, "gh.bat")
 		content := "@echo off\r\n" +
 			"if \"%1\"==\"pr\" if \"%2\"==\"view\" goto view\r\n" +
