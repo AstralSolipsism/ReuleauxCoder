@@ -7,6 +7,8 @@ import pytest
 from reuleauxcoder.extensions.remote_exec.protocol import (
     CleanupRequest,
     CleanupResult,
+    ChatRequest,
+    ChatStartRequest,
     DisconnectNotice,
     EnvironmentCLIToolManifest,
     EnvironmentMCPServerManifest,
@@ -28,6 +30,7 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     RegisterRequest,
     RegisterResponse,
     RelayEnvelope,
+    SessionModelSwitchRequest,
     ToolPreviewRequest,
     ToolPreviewResult,
     ToolStreamChunk,
@@ -93,6 +96,65 @@ class TestHeartbeat:
         restored = Heartbeat.from_dict(d)
         assert restored.peer_token == "pt_tok"
         assert restored.ts == 1234.5
+
+
+class TestChatRequest:
+    def test_roundtrip_preserves_mode_and_workflow(self) -> None:
+        req = ChatRequest(
+            peer_token="pt_1",
+            prompt="plan this",
+            mode="taskflow",
+            workflow_mode="taskflow",
+            taskflow_goal_id="goal-1",
+        )
+
+        restored = ChatRequest.from_dict(req.to_dict())
+
+        assert restored.peer_token == "pt_1"
+        assert restored.prompt == "plan this"
+        assert restored.mode == "taskflow"
+        assert restored.workflow_mode == "taskflow"
+        assert restored.taskflow_goal_id == "goal-1"
+
+
+class TestChatStartRequest:
+    def test_roundtrip_preserves_mode_and_workflow(self) -> None:
+        req = ChatStartRequest(
+            peer_token="pt_1",
+            prompt="plan this",
+            session_hint="session-1",
+            mode="taskflow",
+            workflow_mode="taskflow",
+            taskflow_goal_id="goal-1",
+        )
+
+        restored = ChatStartRequest.from_dict(req.to_dict())
+
+        assert restored.peer_token == "pt_1"
+        assert restored.prompt == "plan this"
+        assert restored.session_hint == "session-1"
+        assert restored.mode == "taskflow"
+        assert restored.workflow_mode == "taskflow"
+        assert restored.taskflow_goal_id == "goal-1"
+
+
+class TestSessionModelSwitchRequest:
+    def test_roundtrip(self) -> None:
+        req = SessionModelSwitchRequest(
+            peer_token="pt_1",
+            session_id="session-1",
+            provider_id="deepseek",
+            model_id="V4PRO",
+            parameters={"max_tokens": 2048},
+        )
+
+        restored = SessionModelSwitchRequest.from_dict(req.to_dict())
+
+        assert restored.peer_token == "pt_1"
+        assert restored.session_id == "session-1"
+        assert restored.provider_id == "deepseek"
+        assert restored.model_id == "V4PRO"
+        assert restored.parameters["max_tokens"] == 2048
 
 
 class TestMCPManifest:
