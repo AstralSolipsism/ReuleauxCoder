@@ -59,6 +59,7 @@ from reuleauxcoder.extensions.remote_exec.protocol import (
     SessionDeleteRequest,
     SessionListRequest,
     SessionLoadRequest,
+    SessionModelSwitchRequest,
     SessionNewRequest,
     SessionSnapshotRequest,
     ToolPreviewResult,
@@ -87,6 +88,7 @@ class _RemoteChatSession:
     chat_id: str
     peer_id: str
     session_hint: str | None = None
+    mode: str | None = None
     workflow_mode: str | None = None
     taskflow_goal_id: str | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
@@ -381,6 +383,7 @@ class RemoteRelayHTTPService:
         peer_id: str,
         session_hint: str | None = None,
         *,
+        mode: str | None = None,
         workflow_mode: str | None = None,
         taskflow_goal_id: str | None = None,
     ) -> _RemoteChatSession:
@@ -389,6 +392,7 @@ class RemoteRelayHTTPService:
             chat_id=str(uuid.uuid4()),
             peer_id=peer_id,
             session_hint=session_hint,
+            mode=mode,
             workflow_mode=workflow_mode,
             taskflow_goal_id=taskflow_goal_id,
         )
@@ -2136,6 +2140,7 @@ class RemoteRelayHTTPService:
                         return
                     session = service._create_chat_session(
                         peer_id,
+                        mode=req.mode,
                         workflow_mode=workflow_mode,
                         taskflow_goal_id=req.taskflow_goal_id,
                     )
@@ -2143,6 +2148,7 @@ class RemoteRelayHTTPService:
                         "chat_start",
                         {
                             "prompt": req.prompt,
+                            "mode": req.mode,
                             "workflow_mode": workflow_mode,
                             "taskflow_goal_id": req.taskflow_goal_id,
                         },
@@ -2224,6 +2230,7 @@ class RemoteRelayHTTPService:
                 session = service._create_chat_session(
                     peer_id,
                     req.session_hint,
+                    mode=req.mode,
                     workflow_mode=workflow_mode,
                     taskflow_goal_id=req.taskflow_goal_id,
                 )
@@ -2231,6 +2238,7 @@ class RemoteRelayHTTPService:
                     "chat_start",
                     {
                         "prompt": req.prompt,
+                        "mode": req.mode,
                         "workflow_mode": workflow_mode,
                         "taskflow_goal_id": req.taskflow_goal_id,
                     },
@@ -2341,6 +2349,9 @@ class RemoteRelayHTTPService:
                         peer_token = req.peer_token
                     elif action == "snapshot":
                         req = SessionSnapshotRequest.from_dict(payload)
+                        peer_token = req.peer_token
+                    elif action == "model":
+                        req = SessionModelSwitchRequest.from_dict(payload)
                         peer_token = req.peer_token
                     else:
                         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})

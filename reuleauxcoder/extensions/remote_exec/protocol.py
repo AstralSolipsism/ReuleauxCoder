@@ -726,11 +726,14 @@ class EnvironmentManifestResponse:
 class ChatRequest:
     peer_token: str
     prompt: str
+    mode: str | None = None
     workflow_mode: str | None = None
     taskflow_goal_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = {"peer_token": self.peer_token, "prompt": self.prompt}
+        if self.mode is not None:
+            payload["mode"] = self.mode
         if self.workflow_mode is not None:
             payload["workflow_mode"] = self.workflow_mode
         if self.taskflow_goal_id is not None:
@@ -742,6 +745,7 @@ class ChatRequest:
         return cls(
             peer_token=d["peer_token"],
             prompt=d["prompt"],
+            mode=d.get("mode"),
             workflow_mode=d.get("workflow_mode"),
             taskflow_goal_id=d.get("taskflow_goal_id") or d.get("goal_id"),
         )
@@ -765,6 +769,7 @@ class ChatStartRequest:
     peer_token: str
     prompt: str
     session_hint: str | None = None
+    mode: str | None = None
     workflow_mode: str | None = None
     taskflow_goal_id: str | None = None
 
@@ -774,6 +779,8 @@ class ChatStartRequest:
             "prompt": self.prompt,
             "session_hint": self.session_hint,
         }
+        if self.mode is not None:
+            payload["mode"] = self.mode
         if self.workflow_mode is not None:
             payload["workflow_mode"] = self.workflow_mode
         if self.taskflow_goal_id is not None:
@@ -786,6 +793,7 @@ class ChatStartRequest:
             peer_token=d["peer_token"],
             prompt=d["prompt"],
             session_hint=d.get("session_hint"),
+            mode=d.get("mode"),
             workflow_mode=d.get("workflow_mode"),
             taskflow_goal_id=d.get("taskflow_goal_id") or d.get("goal_id"),
         )
@@ -962,6 +970,40 @@ class SessionSnapshotRequest:
             peer_token=d["peer_token"],
             session_id=d["session_id"],
             snapshot=snapshot,
+        )
+
+
+@dataclass
+class SessionModelSwitchRequest:
+    peer_token: str
+    provider_id: str
+    model_id: str
+    session_id: str | None = None
+    parameters: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "peer_token": self.peer_token,
+            "provider_id": self.provider_id,
+            "model_id": self.model_id,
+        }
+        if self.session_id is not None:
+            payload["session_id"] = self.session_id
+        if self.parameters:
+            payload["parameters"] = self.parameters
+        return payload
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "SessionModelSwitchRequest":
+        parameters = d.get("parameters")
+        if not isinstance(parameters, dict):
+            parameters = {}
+        return cls(
+            peer_token=d["peer_token"],
+            provider_id=str(d.get("provider_id") or d.get("provider") or ""),
+            model_id=str(d.get("model_id") or d.get("model") or ""),
+            session_id=str(d["session_id"]) if d.get("session_id") is not None else None,
+            parameters=dict(parameters),
         )
 
 

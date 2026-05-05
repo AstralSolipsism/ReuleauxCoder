@@ -11,6 +11,7 @@ from typing import Any, Callable
 from rich.console import Console
 
 from reuleauxcoder.app.runtime.session_state import (
+    apply_agent_default_model,
     apply_session_runtime_state,
     build_session_runtime_state,
     restore_config_runtime_defaults,
@@ -102,6 +103,226 @@ def init_remote_relay(runner, config: Config, ui_bus: UIEventBus) -> None:
         if runner._relay_http_service
         else None,
     )
+
+
+def remote_session_metadata_payload(
+    session: Session | SessionMetadata,
+) -> dict[str, Any]:
+    preview = (
+        session.preview
+        if isinstance(session, SessionMetadata)
+        else session.get_preview()
+    )
+    return {
+        "id": session.id,
+        "model": session.model,
+        "saved_at": session.saved_at,
+        "preview": preview,
+        "fingerprint": session.fingerprint,
+    }
+
+
+def active_model_payload(
+    provider_id: str,
+    model_id: str,
+    parameters: dict[str, Any] | None = None,
+    display_name: str = "",
+) -> dict[str, Any]:
+    return {
+        "provider_id": provider_id,
+        "provider": provider_id,
+        "model_id": model_id,
+        "model": model_id,
+        "display_name": display_name or model_id,
+        **dict(parameters or {}),
+    }
+
+
+def switch_session_model(
+    config: Config | None,
+    session_store: Any,
+    fingerprint: str,
+    payload: dict[str, Any],
+    *,
+    snapshot_loader: Callable[[str], tuple[dict[str, Any] | None, str | None]]
+    | None = None,
+) -> dict[str, Any]:
+    if config is None:
+        return {"ok": False, "error": "config_unavailable", "_status": 503}
+    provider_id = str(payload.get("provider_id") or payload.get("provider") or "").strip()
+    model_id = str(payload.get("model_id") or payload.get("model") or "").strip()
+    parameters = payload.get("parameters")
+    if not isinstance(parameters, dict):
+        parameters = {}
+    display_name = str(payload.get("display_name") or "").strip()
+    legacy_profile_id = str(payload.get("profile_id") or payload.get("id") or "").strip()
+    if legacy_profile_id and (not provider_id or not model_id):
+        legacy_profile = (getattr(config, "model_profiles", {}) or {}).get(
+            legacy_profile_id
+        )
+        if legacy_profile is None:
+            return {
+                "ok": False,
+                "error": "model_profile_not_found",
+                "profile_id": legacy_profile_id,
+                "_status": 404,
+            }
+        provider_id = getattr(legacy_profile, "provider", None) or ""
+        model_id = getattr(legacy_profile, "model", None) or ""
+        display_name = legacy_profile_id
+        parameters = {
+            "max_tokens": getattr(legacy_profile, "max_tokens", None),
+            "temperature": getattr(legacy_profile, "temperature", None),
+            "max_context_tokens": getattr(legacy_profile, "max_context_tokens", None),
+            "preserve_reasoning_content": getattr(
+                legacy_profile, "preserve_reasoning_content", None
+            ),
+            "backfill_reasoning_content_for_tool_calls": getattr(
+                legacy_profile,
+                "backfill_reasoning_content_for_tool_calls",
+                None,
+            ),
+            "reasoning_effort": getattr(legacy_profile, "reasoning_effort", None),
+            "thinking_enabled": getattr(legacy_profile, "thinking_enabled", None),
+            "reasoning_replay_mode": getattr(
+                legacy_profile, "reasoning_replay_mode", None
+            ),
+            "reasoning_replay_placeholder": getattr(
+                legacy_profile, "reasoning_replay_placeholder", None
+            ),
+        }
+    if not provider_id or not model_id:
+        return {"ok": False, "error": "provider_model_required", "_status": 400}
+    provider = getattr(config, "providers", None)
+    provider_item = (
+        (getattr(provider, "items", {}) or {}).get(provider_id)
+        if provider is not None
+        else None
+    )
+    if provider_item is None:
+        return {
+            "ok": False,
+            "error": "provider_not_found",
+            "provider_id": provider_id,
+            "_status": 404,
+        }
+    if getattr(provider_item, "enabled", True) is False:
+        return {
+            "ok": False,
+            "error": "provider_disabled",
+            "provider_id": provider_id,
+            "_status": 409,
+        }
+
+    session_id = str(payload.get("session_id") or "").strip()
+    loaded: Session | None = None
+    if session_id:
+        loaded = session_store.load(session_id)
+        if loaded is not None and loaded.fingerprint != fingerprint:
+            return {
+                "ok": False,
+                "error": "session_fingerprint_mismatch",
+                "fingerprint": loaded.fingerprint,
+                "current_fingerprint": fingerprint,
+                "_status": 403,
+            }
+    else:
+        latest = session_store.get_latest(fingerprint=fingerprint)
+        if latest is not None:
+            loaded = session_store.load(latest.id)
+            session_id = latest.id
+        else:
+            session_id = session_store.generate_session_id()
+
+    runtime_state = (
+        SessionRuntimeState.from_dict(loaded.runtime_state.to_dict())
+        if loaded is not None
+        else SessionRuntimeState(
+            model=getattr(config, "model", None),
+            active_mode=getattr(config, "active_mode", None),
+            llm_debug_trace=getattr(config, "llm_debug_trace", None),
+            active_main_model_profile=getattr(
+                config, "active_main_model_profile", None
+            )
+            or getattr(config, "active_model_profile", None),
+            active_sub_model_profile=getattr(config, "active_sub_model_profile", None),
+        )
+    )
+    runtime_state.active_model_provider = provider_id
+    runtime_state.active_model = model_id
+    runtime_state.active_model_display_name = display_name or model_id
+    runtime_state.active_model_parameters = dict(
+        {key: val for key, val in parameters.items() if val is not None}
+    )
+    runtime_state.active_main_model_profile = None
+    runtime_state.model = model_id
+    if runtime_state.active_sub_model_profile is None:
+        runtime_state.active_sub_model_profile = getattr(
+            config, "active_sub_model_profile", None
+        )
+    if runtime_state.active_mode is None:
+        runtime_state.active_mode = getattr(config, "active_mode", None)
+    if runtime_state.llm_debug_trace is None:
+        runtime_state.llm_debug_trace = getattr(config, "llm_debug_trace", None)
+
+    save_runtime_state = getattr(session_store, "save_runtime_state", None)
+    messages = list(loaded.messages) if loaded is not None else []
+    total_prompt_tokens = loaded.total_prompt_tokens if loaded is not None else 0
+    total_completion_tokens = (
+        loaded.total_completion_tokens if loaded is not None else 0
+    )
+    if callable(save_runtime_state):
+        save_runtime_state(
+            session_id,
+            runtime_state.model or getattr(config, "model", ""),
+            runtime_state,
+            messages=messages,
+            total_prompt_tokens=total_prompt_tokens,
+            total_completion_tokens=total_completion_tokens,
+            active_mode=runtime_state.active_mode,
+            fingerprint=fingerprint,
+        )
+    else:
+        session_store.save(
+            messages,
+            runtime_state.model or getattr(config, "model", ""),
+            session_id,
+            total_prompt_tokens=total_prompt_tokens,
+            total_completion_tokens=total_completion_tokens,
+            active_mode=runtime_state.active_mode,
+            runtime_state=runtime_state,
+            fingerprint=fingerprint,
+        )
+
+    saved = session_store.load(session_id)
+    snapshot: dict[str, Any] | None = None
+    snapshot_error: str | None = None
+    if snapshot_loader is not None:
+        snapshot, snapshot_error = snapshot_loader(session_id)
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "fingerprint": fingerprint,
+        "active_model": active_model_payload(
+            provider_id,
+            model_id,
+            runtime_state.active_model_parameters,
+            runtime_state.active_model_display_name or "",
+        ),
+        "runtime_state": runtime_state.to_dict(),
+        "metadata": remote_session_metadata_payload(saved)
+        if saved is not None
+        else {
+            "id": session_id,
+            "model": runtime_state.model or "",
+            "saved_at": "",
+            "preview": "",
+            "fingerprint": fingerprint,
+        },
+        "messages": list(saved.messages) if saved is not None else [],
+        "snapshot": snapshot,
+        "snapshot_error": snapshot_error,
+    }
 
 
 def bind_remote_chat_handler(runner, agent: Agent) -> None:
@@ -261,6 +482,17 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                     current_config, "active_sub_model_profile", None
                 ),
             )
+            active_mode = getattr(current_config, "active_mode", None)
+            agent_config = getattr(current_config.agent_runtime, "agents", {}).get(
+                active_mode
+            )
+            agent_model = getattr(agent_config, "model", None)
+            if getattr(agent_model, "configured", False):
+                runtime_state.active_model_provider = agent_model.provider
+                runtime_state.active_model = agent_model.model
+                runtime_state.active_model_display_name = agent_model.display_name
+                runtime_state.active_model_parameters = dict(agent_model.parameters)
+                runtime_state.model = agent_model.model
             return {
                 "ok": True,
                 "fingerprint": fingerprint,
@@ -275,6 +507,15 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
                 "runtime_state": runtime_state.to_dict(),
                 "snapshot": None,
             }
+
+        if action == "model":
+            return switch_session_model(
+                current_config,
+                session_store,
+                fingerprint,
+                payload,
+                snapshot_loader=_load_session_snapshot,
+            )
 
         if action == "delete":
             session_id = str(payload.get("session_id") or "")
@@ -448,6 +689,24 @@ def bind_remote_chat_handler(runner, agent: Agent) -> None:
             session_hint=getattr(remote_session, "session_hint", None),
             resume_latest=False,
         )
+        requested_mode = str(getattr(remote_session, "mode", "") or "").strip()
+        if requested_mode:
+            try:
+                peer_agent.set_mode(requested_mode)
+                if not getattr(peer_agent, "session_model_overridden", False):
+                    current_config = _current_config()
+                    if current_config is not None:
+                        apply_agent_default_model(current_config, peer_agent)
+            except ValueError as exc:
+                remote_session.append_event(
+                    "error",
+                    {
+                        "message": str(exc),
+                        "mode": requested_mode,
+                    },
+                )
+                remote_session.append_event("chat_end", {"response": ""})
+                return
         if getattr(remote_session, "workflow_mode", None) == TASKFLOW_WORKFLOW_MODE:
             taskflow_service = runner._relay_http_service.taskflow_service
             goal_id = getattr(remote_session, "taskflow_goal_id", None)
