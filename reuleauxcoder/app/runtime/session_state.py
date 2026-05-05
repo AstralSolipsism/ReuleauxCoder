@@ -16,7 +16,10 @@ from reuleauxcoder.domain.session.models import Session, SessionRuntimeState
 from reuleauxcoder.infrastructure.persistence.session_store import (
     DEFAULT_SESSION_FINGERPRINT,
 )
-from reuleauxcoder.services.llm.factory import reconfigure_llm_from_settings
+from reuleauxcoder.services.llm.factory import (
+    model_binding_settings,
+    reconfigure_llm_from_settings,
+)
 
 
 def get_session_fingerprint(config: Config, agent: Agent) -> str:
@@ -73,6 +76,65 @@ def get_runtime_approval_config(config: Config, agent: Agent) -> ApprovalConfig:
     return merge_approval_config(config.approval, session_rules)
 
 
+def _agent_model_binding(config: Config, agent_id: str | None):
+    if not agent_id:
+        return None
+    runtime = getattr(config, "agent_runtime", None)
+    agents = getattr(runtime, "agents", {}) if runtime is not None else {}
+    agent_config = agents.get(agent_id) if isinstance(agents, dict) else None
+    model = getattr(agent_config, "model", None)
+    return model if getattr(model, "configured", False) else None
+
+
+def _apply_model_binding(
+    config: Config,
+    agent: Agent,
+    *,
+    provider: str,
+    model: str,
+    display_name: str = "",
+    parameters: dict | None = None,
+) -> None:
+    settings = model_binding_settings(
+        provider=provider,
+        model=model,
+        parameters=parameters,
+        fallback=config,
+    )
+    reconfigure_llm_from_settings(
+        agent.llm,
+        settings,
+        debug_trace=getattr(agent.llm, "debug_trace", getattr(config, "llm_debug_trace", False)),
+        providers=getattr(config, "providers", None),
+    )
+    max_context = getattr(settings, "max_context_tokens", None)
+    if max_context:
+        agent.context.reconfigure(max_context)
+    setattr(agent, "active_model_provider", provider)
+    setattr(agent, "active_model", model)
+    setattr(agent, "active_model_display_name", display_name)
+    setattr(agent, "active_model_parameters", dict(parameters or {}))
+    setattr(agent, "active_main_model_profile", None)
+
+
+def apply_agent_default_model(config: Config, agent: Agent) -> bool:
+    """Apply the current Agent Profile default model to a live agent."""
+    agent_id = getattr(agent, "active_mode", None) or getattr(config, "active_mode", None)
+    binding = _agent_model_binding(config, agent_id)
+    if binding is None:
+        return False
+    _apply_model_binding(
+        config,
+        agent,
+        provider=binding.provider,
+        model=binding.model,
+        display_name=binding.display_name,
+        parameters=binding.parameters,
+    )
+    setattr(agent, "session_model_overridden", False)
+    return True
+
+
 def build_session_runtime_state(config: Config, agent: Agent) -> SessionRuntimeState:
     """Capture session-scoped runtime overrides from the live host runtime."""
     session_rules = getattr(agent, "session_approval_rules", None) or []
@@ -80,6 +142,10 @@ def build_session_runtime_state(config: Config, agent: Agent) -> SessionRuntimeS
         model=getattr(agent.llm, "model", None) or getattr(config, "model", None),
         active_mode=getattr(agent, "active_mode", None),
         llm_debug_trace=getattr(agent.llm, "debug_trace", None),
+        active_model_provider=getattr(agent, "active_model_provider", None),
+        active_model=getattr(agent, "active_model", None),
+        active_model_display_name=getattr(agent, "active_model_display_name", None),
+        active_model_parameters=dict(getattr(agent, "active_model_parameters", {}) or {}),
         active_main_model_profile=getattr(agent, "active_main_model_profile", None),
         active_sub_model_profile=getattr(agent, "active_sub_model_profile", None)
         or getattr(config, "active_sub_model_profile", None),
@@ -99,22 +165,34 @@ def build_session_runtime_state(config: Config, agent: Agent) -> SessionRuntimeS
 
 def restore_config_runtime_defaults(config: Config, agent: Agent) -> None:
     """Reset live runtime state back to config defaults for a fresh session."""
-    profiles = getattr(config, "model_profiles", {}) or {}
+    setattr(agent, "session_model_overridden", False)
+    setattr(agent, "active_model_provider", None)
+    setattr(agent, "active_model", None)
+    setattr(agent, "active_model_display_name", None)
+    setattr(agent, "active_model_parameters", {})
+    agent.llm.debug_trace = getattr(config, "llm_debug_trace", False)
+    if apply_agent_default_model(config, agent):
+        pass
+    else:
+        profiles = getattr(config, "model_profiles", {}) or {}
+        main_profile_name = getattr(config, "active_main_model_profile", None) or getattr(
+            config, "active_model_profile", None
+        )
+        if main_profile_name and main_profile_name in profiles:
+            profile = profiles[main_profile_name]
+            reconfigure_llm_from_settings(
+                agent.llm,
+                profile,
+                debug_trace=getattr(config, "llm_debug_trace", False),
+                providers=getattr(config, "providers", None),
+            )
+            agent.context.reconfigure(profile.max_context_tokens)
+        else:
+            agent.llm.debug_trace = getattr(config, "llm_debug_trace", False)
+        setattr(agent, "active_main_model_profile", main_profile_name)
     main_profile_name = getattr(config, "active_main_model_profile", None) or getattr(
         config, "active_model_profile", None
     )
-    if main_profile_name and main_profile_name in profiles:
-        profile = profiles[main_profile_name]
-        reconfigure_llm_from_settings(
-            agent.llm,
-            profile,
-            debug_trace=getattr(config, "llm_debug_trace", False),
-            providers=getattr(config, "providers", None),
-        )
-        agent.context.reconfigure(profile.max_context_tokens)
-    else:
-        agent.llm.debug_trace = getattr(config, "llm_debug_trace", False)
-    setattr(agent, "active_main_model_profile", main_profile_name)
     setattr(
         agent,
         "active_sub_model_profile",
@@ -143,6 +221,8 @@ def apply_session_runtime_state(session: Session, config: Config, agent: Agent) 
     loaded_mode = runtime.active_mode or session.active_mode
     if loaded_mode and loaded_mode in getattr(agent, "available_modes", {}):
         agent.set_mode(loaded_mode)
+        if not runtime.active_model_provider and not runtime.active_main_model_profile:
+            apply_agent_default_model(config, agent)
 
     loaded_debug = runtime.llm_debug_trace
     if loaded_debug is not None:
@@ -167,7 +247,17 @@ def apply_session_runtime_state(session: Session, config: Config, agent: Agent) 
 
     main_profile = runtime.active_main_model_profile
     profiles = getattr(config, "model_profiles", {}) or {}
-    if main_profile and main_profile in profiles:
+    if runtime.active_model_provider and runtime.active_model:
+        _apply_model_binding(
+            config,
+            agent,
+            provider=runtime.active_model_provider,
+            model=runtime.active_model,
+            display_name=runtime.active_model_display_name or "",
+            parameters=runtime.active_model_parameters,
+        )
+        setattr(agent, "session_model_overridden", True)
+    elif main_profile and main_profile in profiles:
         profile = profiles[main_profile]
         reconfigure_llm_from_settings(
             agent.llm,
@@ -177,6 +267,7 @@ def apply_session_runtime_state(session: Session, config: Config, agent: Agent) 
         )
         agent.context.reconfigure(profile.max_context_tokens)
         setattr(agent, "active_main_model_profile", main_profile)
+        setattr(agent, "session_model_overridden", True)
     elif runtime.model:
         agent.llm.model = runtime.model
         setattr(agent, "active_main_model_profile", None)

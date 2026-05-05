@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from types import SimpleNamespace
 
 from reuleauxcoder.domain.config.models import ProviderConfig, ProvidersConfig
 from reuleauxcoder.services.llm.client import LLM
@@ -82,3 +83,46 @@ def reconfigure_llm_from_settings(
         providers=providers,
     )
     llm.reconfigure(**kwargs)
+
+
+def model_binding_settings(
+    *,
+    provider: str,
+    model: str,
+    parameters: dict[str, Any] | None = None,
+    fallback: Any | None = None,
+) -> Any:
+    """Build a config/profile-like settings object from an Agent model binding."""
+    params = dict(parameters or {})
+    return SimpleNamespace(
+        model=model,
+        provider=provider,
+        api_key=params.get("api_key") or getattr(fallback, "api_key", ""),
+        base_url=params.get("base_url") or getattr(fallback, "base_url", None),
+        temperature=params.get("temperature", getattr(fallback, "temperature", 0.0)),
+        max_tokens=params.get("max_tokens", getattr(fallback, "max_tokens", 4096)),
+        max_context_tokens=params.get(
+            "max_context_tokens", getattr(fallback, "max_context_tokens", 128000)
+        ),
+        preserve_reasoning_content=params.get(
+            "preserve_reasoning_content",
+            getattr(fallback, "preserve_reasoning_content", True),
+        ),
+        backfill_reasoning_content_for_tool_calls=params.get(
+            "backfill_reasoning_content_for_tool_calls",
+            getattr(fallback, "backfill_reasoning_content_for_tool_calls", False),
+        ),
+        reasoning_effort=params.get(
+            "reasoning_effort", getattr(fallback, "reasoning_effort", None)
+        ),
+        thinking_enabled=params.get(
+            "thinking_enabled", getattr(fallback, "thinking_enabled", None)
+        ),
+        reasoning_replay_mode=params.get(
+            "reasoning_replay_mode", getattr(fallback, "reasoning_replay_mode", None)
+        ),
+        reasoning_replay_placeholder=params.get(
+            "reasoning_replay_placeholder",
+            getattr(fallback, "reasoning_replay_placeholder", None),
+        ),
+    )

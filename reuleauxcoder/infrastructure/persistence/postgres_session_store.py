@@ -159,6 +159,82 @@ class PostgresSessionStore:
             )
         return session_id
 
+    def save_runtime_state(
+        self,
+        session_id: str,
+        model: str,
+        runtime_state: SessionRuntimeState,
+        *,
+        messages: list[dict] | None = None,
+        total_prompt_tokens: int = 0,
+        total_completion_tokens: int = 0,
+        active_mode: str | None = None,
+        fingerprint: str = DEFAULT_SESSION_FINGERPRINT,
+    ) -> str:
+        saved_messages = [dict(message) for message in messages or []]
+        ensure_message_token_counts(saved_messages)
+        effective_runtime = runtime_state
+        if effective_runtime.model is None:
+            effective_runtime.model = model
+        if effective_runtime.active_mode is None:
+            effective_runtime.active_mode = active_mode
+        session = Session(
+            id=session_id,
+            model=effective_runtime.model or model,
+            saved_at=datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+            fingerprint=fingerprint or DEFAULT_SESSION_FINGERPRINT,
+            messages=saved_messages,
+            active_mode=effective_runtime.active_mode or active_mode,
+            total_prompt_tokens=total_prompt_tokens,
+            total_completion_tokens=total_completion_tokens,
+            runtime_state=effective_runtime,
+        )
+        has_history = SessionStore.has_history_content(saved_messages)
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO ez_sessions (
+                        id, fingerprint, model, saved_at, preview, messages,
+                        runtime_state, active_mode, total_prompt_tokens,
+                        total_completion_tokens, has_history_content, deleted_at
+                    ) VALUES (
+                        :id, :fingerprint, :model, :saved_at, :preview,
+                        CAST(:messages AS JSONB), CAST(:runtime_state AS JSONB),
+                        :active_mode, :total_prompt_tokens,
+                        :total_completion_tokens, :has_history_content, NULL
+                    )
+                    ON CONFLICT (id) DO UPDATE SET
+                        fingerprint=EXCLUDED.fingerprint,
+                        model=EXCLUDED.model,
+                        saved_at=EXCLUDED.saved_at,
+                        preview=EXCLUDED.preview,
+                        messages=EXCLUDED.messages,
+                        runtime_state=EXCLUDED.runtime_state,
+                        active_mode=EXCLUDED.active_mode,
+                        total_prompt_tokens=EXCLUDED.total_prompt_tokens,
+                        total_completion_tokens=EXCLUDED.total_completion_tokens,
+                        has_history_content=EXCLUDED.has_history_content,
+                        deleted_at=NULL,
+                        updated_at=now()
+                    """
+                ),
+                {
+                    "id": session.id,
+                    "fingerprint": session.fingerprint,
+                    "model": session.model,
+                    "saved_at": _saved_at_to_dt(session.saved_at),
+                    "preview": session.get_preview(),
+                    "messages": _json(session.messages),
+                    "runtime_state": _json(session.runtime_state.to_dict()),
+                    "active_mode": session.active_mode,
+                    "total_prompt_tokens": session.total_prompt_tokens,
+                    "total_completion_tokens": session.total_completion_tokens,
+                    "has_history_content": has_history,
+                },
+            )
+        return session_id
+
     def append_system_message(
         self,
         session_id: str,

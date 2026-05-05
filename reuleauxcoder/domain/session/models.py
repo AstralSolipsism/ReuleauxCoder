@@ -35,6 +35,10 @@ class SessionRuntimeState:
     model: str | None = None
     active_mode: str | None = None
     llm_debug_trace: bool | None = None
+    active_model_provider: str | None = None
+    active_model: str | None = None
+    active_model_display_name: str | None = None
+    active_model_parameters: dict[str, Any] = field(default_factory=dict)
     active_main_model_profile: str | None = None
     active_sub_model_profile: str | None = None
     approval_rules: list[dict[str, Any]] = field(default_factory=list)
@@ -51,10 +55,17 @@ class SessionRuntimeState:
         approval_rules = payload.get("approval_rules")
         if not isinstance(approval_rules, list):
             approval_rules = []
+        active_model_parameters = payload.get("active_model_parameters")
+        if not isinstance(active_model_parameters, dict):
+            active_model_parameters = {}
         return cls(
             model=payload.get("model"),
             active_mode=payload.get("active_mode"),
             llm_debug_trace=payload.get("llm_debug_trace"),
+            active_model_provider=payload.get("active_model_provider"),
+            active_model=payload.get("active_model"),
+            active_model_display_name=payload.get("active_model_display_name"),
+            active_model_parameters=dict(active_model_parameters),
             active_main_model_profile=payload.get("active_main_model_profile"),
             active_sub_model_profile=payload.get("active_sub_model_profile"),
             approval_rules=[

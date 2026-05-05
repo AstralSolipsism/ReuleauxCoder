@@ -105,6 +105,46 @@ class SessionStore:
             )
             return session_id
 
+    def save_runtime_state(
+        self,
+        session_id: str,
+        model: str,
+        runtime_state: SessionRuntimeState,
+        *,
+        messages: list[dict] | None = None,
+        total_prompt_tokens: int = 0,
+        total_completion_tokens: int = 0,
+        active_mode: str | None = None,
+        fingerprint: str = DEFAULT_SESSION_FINGERPRINT,
+    ) -> str:
+        """Persist session runtime overrides without adding transcript messages."""
+        with self._lock:
+            self._sessions_dir.mkdir(parents=True, exist_ok=True)
+            saved_messages = [dict(message) for message in messages or []]
+            ensure_message_token_counts(saved_messages)
+            effective_runtime = runtime_state
+            if effective_runtime.model is None:
+                effective_runtime.model = model
+            if effective_runtime.active_mode is None:
+                effective_runtime.active_mode = active_mode
+            session = Session(
+                id=session_id,
+                model=effective_runtime.model or model,
+                saved_at=datetime.now().isoformat(timespec="microseconds"),
+                fingerprint=fingerprint or DEFAULT_SESSION_FINGERPRINT,
+                messages=saved_messages,
+                active_mode=effective_runtime.active_mode or active_mode,
+                total_prompt_tokens=total_prompt_tokens,
+                total_completion_tokens=total_completion_tokens,
+                runtime_state=effective_runtime,
+            )
+            path = self._get_session_path(session_id)
+            path.write_text(
+                json.dumps(session.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            return session_id
+
     def append_system_message(
         self,
         session_id: str,
