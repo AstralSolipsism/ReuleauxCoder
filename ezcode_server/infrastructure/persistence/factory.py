@@ -21,6 +21,10 @@ from ezcode_server.services.collaboration.postgres_store import (
     PostgresIssueAssignmentStore,
 )
 from ezcode_server.services.collaboration.service import IssueAssignmentService
+from ezcode_server.services.github.auth import GitHubInstallationTokenProvider
+from ezcode_server.services.github.client import GitHubClient
+from ezcode_server.services.github.postgres_store import PostgresGitHubStore
+from ezcode_server.services.github.service import PullRequestService
 from ezcode_server.services.taskflow.in_memory_store import InMemoryTaskflowStore
 from ezcode_server.services.taskflow.postgres_store import PostgresTaskflowStore
 from ezcode_server.services.taskflow.service import TaskflowService
@@ -82,6 +86,28 @@ def create_issue_assignment_service(
         else InMemoryIssueAssignmentStore()
     )
     return IssueAssignmentService(store, taskflow_service=taskflow_service)
+
+
+def create_github_pull_request_service(
+    config: Config,
+    *,
+    runtime_control_plane: AgentRuntimeControlPlane,
+    issue_assignment_service: IssueAssignmentService | None = None,
+) -> PullRequestService | None:
+    if not config.github.enabled:
+        return None
+    engine = _engine_for(config)
+    if engine is None:
+        raise RuntimeError("github.enabled=true requires Postgres persistence")
+    token_provider = GitHubInstallationTokenProvider(config.github)
+    client = GitHubClient(config.github, token_provider=token_provider)
+    return PullRequestService(
+        config=config.github,
+        store=PostgresGitHubStore(engine),
+        client=client,
+        runtime_control_plane=runtime_control_plane,
+        issue_assignment_service=issue_assignment_service,
+    )
 
 
 def create_session_store(config: Config, sessions_dir: Path | None) -> Any:

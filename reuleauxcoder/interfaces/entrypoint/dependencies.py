@@ -25,6 +25,7 @@ from reuleauxcoder.interfaces.events import UIEventBus, UIEventKind
 from reuleauxcoder.interfaces.interactions import UIInteractor
 from reuleauxcoder.infrastructure.persistence.session_store import SessionStore
 from ezcode_server.infrastructure.persistence.factory import (
+    create_github_pull_request_service,
     create_issue_assignment_service,
     create_runtime_control_plane,
     create_session_store as create_configured_session_store,
@@ -200,6 +201,11 @@ def _default_create_remote_http_service(
     issue_assignment_service = create_issue_assignment_service(
         config, taskflow_service=taskflow_service
     )
+    github_pr_service = create_github_pull_request_service(
+        config,
+        runtime_control_plane=runtime_control_plane,
+        issue_assignment_service=issue_assignment_service,
+    )
     return RemoteRelayHTTPService(
         relay_server=relay_server,
         bind=config.remote_exec.relay_bind,
@@ -216,6 +222,7 @@ def _default_create_remote_http_service(
         runtime_control_plane=runtime_control_plane,
         taskflow_service=taskflow_service,
         issue_assignment_service=issue_assignment_service,
+        github_pr_service=github_pr_service,
     )
 
 

@@ -363,7 +363,7 @@ class RemoteRuntimeRoutes:
             ),
         )
         try:
-            ok, reason, _ = self.service.runtime_control_plane.complete_claimed_task(
+            ok, reason, completed = self.service.runtime_control_plane.complete_claimed_task(
                 task_id,
                 result,
                 request_id=request_id,
@@ -390,6 +390,17 @@ class RemoteRuntimeRoutes:
             )
             return
         self.service.relay_server.registry.update_heartbeat(peer_id)
-        self._send_json(HTTPStatus.OK, {"ok": True})
+        github: dict[str, Any] | None = None
+        github_pr_service = getattr(self.service, "github_pr_service", None)
+        if (
+            completed is not None
+            and result.status == "completed"
+            and github_pr_service is not None
+        ):
+            github = github_pr_service.ensure_pr_for_task(task_id).to_dict()
+        response: dict[str, Any] = {"ok": True}
+        if github is not None:
+            response["github"] = github
+        self._send_json(HTTPStatus.OK, response)
 
 

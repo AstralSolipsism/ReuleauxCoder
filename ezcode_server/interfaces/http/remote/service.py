@@ -64,12 +64,18 @@ from ezcode_server.interfaces.http.remote.routes.artifacts import RemoteArtifact
 from ezcode_server.interfaces.http.remote.routes.base import RemoteRelayBaseHandler
 from ezcode_server.interfaces.http.remote.routes.chat import RemoteChatRoutes
 from ezcode_server.interfaces.http.remote.routes.collaboration import RemoteCollaborationRoutes
+from ezcode_server.interfaces.http.remote.routes.github import RemoteGitHubRoutes
 from ezcode_server.interfaces.http.remote.routes.manifests import RemoteManifestRoutes
 from ezcode_server.interfaces.http.remote.routes.peer import RemotePeerRoutes
 from ezcode_server.interfaces.http.remote.routes.runtime import RemoteRuntimeRoutes
 from ezcode_server.interfaces.http.remote.routes.sessions import RemoteSessionRoutes
 from ezcode_server.interfaces.http.remote.routes.taskflow import RemoteTaskflowRoutes
 from ezcode_server.services.collaboration.service import IssueAssignmentService
+from ezcode_server.services.github.service import (
+    PullRequestService,
+    ReconcileService,
+    WebhookService,
+)
 from ezcode_server.services.taskflow.service import TaskflowService
 
 
@@ -247,6 +253,7 @@ class RemoteRelayHTTPService:
         runtime_control_plane: Any | None = None,
         taskflow_service: TaskflowService | None = None,
         issue_assignment_service: IssueAssignmentService | None = None,
+        github_pr_service: PullRequestService | None = None,
     ) -> None:
         self.relay_server = relay_server
         self.bind = bind
@@ -276,6 +283,17 @@ class RemoteRelayHTTPService:
             issue_assignment_service
             or IssueAssignmentService(taskflow_service=self.taskflow_service)
         )
+        self.github_pr_service = github_pr_service
+        self.github_webhook_service = (
+            WebhookService(config=github_pr_service.config, pr_service=github_pr_service)
+            if github_pr_service is not None
+            else None
+        )
+        self.github_reconcile_service = (
+            ReconcileService(github_pr_service)
+            if github_pr_service is not None
+            else None
+        )
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._queues: dict[str, queue.Queue[RelayEnvelope]] = {}
@@ -288,6 +306,8 @@ class RemoteRelayHTTPService:
         self._runtime_recovery_stop = threading.Event()
         self._runtime_recovery_thread: threading.Thread | None = None
         self._runtime_recovery_interval_sec = 2.0
+        self._github_reconcile_stop = threading.Event()
+        self._github_reconcile_thread: threading.Thread | None = None
         self.relay_server._send_fn = self._enqueue_outbound
 
     @property
@@ -306,6 +326,7 @@ class RemoteRelayHTTPService:
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         self._start_runtime_recovery()
+        self._start_github_reconcile()
         if self.ui_bus is not None:
             self.ui_bus.info(
                 f"Remote relay HTTP service listening on {self.base_url}",
@@ -313,6 +334,7 @@ class RemoteRelayHTTPService:
             )
 
     def stop(self) -> None:
+        self._stop_github_reconcile()
         self._stop_runtime_recovery()
         if self._server is None:
             return
@@ -347,6 +369,33 @@ class RemoteRelayHTTPService:
         if self._runtime_recovery_thread is not None:
             self._runtime_recovery_thread.join(timeout=3)
             self._runtime_recovery_thread = None
+
+    def _start_github_reconcile(self) -> None:
+        if self.github_pr_service is None or self.github_reconcile_service is None:
+            return
+        interval = max(
+            1,
+            int(getattr(self.github_pr_service.config, "reconcile_interval_sec", 300) or 300),
+        )
+        if self._github_reconcile_thread is not None:
+            return
+        self._github_reconcile_stop.clear()
+
+        def loop() -> None:
+            while not self._github_reconcile_stop.wait(interval):
+                try:
+                    self.github_reconcile_service.reconcile()
+                except Exception:
+                    continue
+
+        self._github_reconcile_thread = threading.Thread(target=loop, daemon=True)
+        self._github_reconcile_thread.start()
+
+    def _stop_github_reconcile(self) -> None:
+        self._github_reconcile_stop.set()
+        if self._github_reconcile_thread is not None:
+            self._github_reconcile_thread.join(timeout=3)
+            self._github_reconcile_thread = None
 
     def issue_bootstrap_token(self, ttl_sec: int = 300) -> str:
         return self.relay_server.issue_bootstrap_token(ttl_sec=ttl_sec)
@@ -445,6 +494,7 @@ class RemoteRelayHTTPService:
             RemoteSessionRoutes,
             RemoteChatRoutes,
             RemoteRuntimeRoutes,
+            RemoteGitHubRoutes,
             RemoteCollaborationRoutes,
             RemoteTaskflowRoutes,
             RemoteManifestRoutes,
@@ -482,6 +532,9 @@ class RemoteRelayHTTPService:
                 if parsed.path.startswith("/remote/artifacts/"):
                     self._handle_artifact(parsed.path)
                     return
+                if parsed.path == "/remote/admin/github/status":
+                    self._handle_admin(parsed.path)
+                    return
                 if parsed.path.startswith("/remote/mcp/artifacts/"):
                     self._handle_mcp_artifact(parsed.path)
                     return
@@ -500,6 +553,9 @@ class RemoteRelayHTTPService:
                     return
                 if parsed.path == "/remote/result":
                     self._handle_result()
+                    return
+                if parsed.path == "/remote/github/webhook":
+                    self._handle_github_webhook()
                     return
                 if parsed.path == "/remote/mcp/manifest":
                     self._handle_mcp_manifest()

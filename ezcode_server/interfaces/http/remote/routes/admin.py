@@ -77,6 +77,9 @@ class RemoteAdminRoutes:
             return
         payload = self._read_json()
         try:
+            if path.startswith("/remote/admin/github/"):
+                if self._handle_admin_github(path, payload):
+                    return
             if path == "/remote/admin/status":
                 result = {"ok": True, **self.service.admin_manager.status()}
                 self._send_json(HTTPStatus.OK, result)
@@ -265,6 +268,18 @@ class RemoteAdminRoutes:
                         HTTPStatus.NOT_FOUND, {"error": "task_not_found"}
                     )
                     return
+                github_pr_service = self.service.github_pr_service
+                if github_pr_service is not None:
+                    github_pr = github_pr_service.store.get_pull_request_for_task(task_id)
+                    detail["github_pull_request"] = (
+                        github_pr.to_dict() if github_pr is not None else None
+                    )
+                    detail["github_review_comments"] = github_pr_service.list_review_comments(
+                        task_id
+                    )
+                else:
+                    detail["github_pull_request"] = None
+                    detail["github_review_comments"] = []
                 self._send_json(HTTPStatus.OK, {"ok": True, **detail})
                 return
             if path == "/remote/admin/server-settings/read":
