@@ -17,6 +17,7 @@ from reuleauxcoder.domain.config.models import (
     EnvironmentCLIToolConfig,
     EnvironmentConfig,
     EnvironmentSkillConfig,
+    GitHubConfig,
     MCPServerConfig,
     ModeConfig,
     ModelProfileConfig,
@@ -130,6 +131,22 @@ class ConfigLoader:
                     persistence["database_url"] = self._expand_env_value(
                         persistence["database_url"], "persistence.database_url"
                     )
+        github = expanded.get("github", {})
+        if isinstance(github, dict):
+            for field in (
+                "app_id",
+                "installation_id",
+                "private_key_path",
+                "webhook_secret",
+                "api_base_url",
+                "web_base_url",
+            ):
+                if field in github:
+                    value = str(github.get(field) or "").strip()
+                    if value:
+                        github[field] = self._expand_env_value(
+                            github[field], f"github.{field}"
+                        )
         return expanded
 
     def _resolve_llm_params(
@@ -312,6 +329,7 @@ class ConfigLoader:
         remote_exec_config = data.get("remote_exec", {})
         agent_runtime_config = data.get("agent_runtime", {})
         persistence_config = data.get("persistence", {})
+        github_config = data.get("github", {})
         environment_config = data.get("environment", {})
         if not isinstance(environment_config, dict):
             environment_config = {}
@@ -523,6 +541,9 @@ class ConfigLoader:
             agent_runtime=agent_runtime,
             persistence=PersistenceConfig.from_dict(
                 persistence_config if isinstance(persistence_config, dict) else {}
+            ),
+            github=GitHubConfig.from_dict(
+                github_config if isinstance(github_config, dict) else {}
             ),
             environment=EnvironmentConfig(cli_tools=cli_tools, skills=skills),
             session_auto_save=session_config.get(

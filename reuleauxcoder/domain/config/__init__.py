@@ -2,6 +2,7 @@
 
 from reuleauxcoder.domain.config.models import (
     Config,
+    GitHubConfig,
     MCPArtifactConfig,
     MCPDistribution,
     MCPLaunchConfig,
@@ -18,6 +19,7 @@ from reuleauxcoder.domain.config.models import (
 
 __all__ = [
     "Config",
+    "GitHubConfig",
     "MCPArtifactConfig",
     "MCPDistribution",
     "MCPLaunchConfig",

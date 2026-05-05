@@ -668,6 +668,61 @@ class PersistenceConfig:
 
 
 @dataclass
+class GitHubConfig:
+    """GitHub App integration settings for PR lifecycle management."""
+
+    enabled: bool = False
+    app_id: str = ""
+    installation_id: str = ""
+    private_key_path: str = ""
+    webhook_secret: str = ""
+    api_base_url: str = "https://api.github.com"
+    web_base_url: str = "https://github.com"
+    reconcile_interval_sec: int = 300
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "GitHubConfig":
+        if not isinstance(data, dict):
+            return cls()
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            app_id=str(data.get("app_id", "") or ""),
+            installation_id=str(data.get("installation_id", "") or ""),
+            private_key_path=str(data.get("private_key_path", "") or ""),
+            webhook_secret=str(data.get("webhook_secret", "") or ""),
+            api_base_url=str(data.get("api_base_url", "https://api.github.com") or ""),
+            web_base_url=str(data.get("web_base_url", "https://github.com") or ""),
+            reconcile_interval_sec=int(data.get("reconcile_interval_sec", 300) or 300),
+        )
+
+    def to_dict(self, *, mask_secret: bool = False) -> dict[str, Any]:
+        data = {
+            "enabled": self.enabled,
+            "app_id": self.app_id,
+            "installation_id": self.installation_id,
+            "private_key_path": self.private_key_path,
+            "api_base_url": self.api_base_url,
+            "web_base_url": self.web_base_url,
+            "reconcile_interval_sec": self.reconcile_interval_sec,
+        }
+        if mask_secret:
+            data["webhook_secret_hint"] = _mask_secret_hint(self.webhook_secret)
+        else:
+            data["webhook_secret"] = self.webhook_secret
+        return data
+
+
+def _mask_secret_hint(value: str) -> str:
+    if not value:
+        return "(empty)"
+    if value.startswith("${") and value.endswith("}"):
+        return value
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}...{value[-4:]}"
+
+
+@dataclass
 class EnvironmentCLIToolConfig:
     """Declarative CLI tool entry used by lightweight environment sync."""
 
@@ -963,6 +1018,9 @@ class Config:
     # Durable persistence settings
     persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
 
+    # GitHub App pull request lifecycle settings
+    github: GitHubConfig = field(default_factory=GitHubConfig)
+
     # Server-authoritative environment manifest
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
 
@@ -995,6 +1053,27 @@ class Config:
             errors.append("persistence.legacy_session_import must be lazy or disabled")
         if self.persistence.retention_days < 0:
             errors.append("persistence.retention_days must be zero or positive")
+        if self.github.enabled:
+            if self.persistence.backend == "memory" or not self.persistence.database_url:
+                errors.append(
+                    "github.enabled requires Postgres persistence.database_url"
+                )
+            if not self.github.app_id:
+                errors.append("github.app_id is required when github.enabled is true")
+            if not self.github.installation_id:
+                errors.append(
+                    "github.installation_id is required when github.enabled is true"
+                )
+            if not self.github.private_key_path:
+                errors.append(
+                    "github.private_key_path is required when github.enabled is true"
+                )
+            if not self.github.webhook_secret:
+                errors.append(
+                    "github.webhook_secret is required when github.enabled is true"
+                )
+            if self.github.reconcile_interval_sec < 1:
+                errors.append("github.reconcile_interval_sec must be positive")
         for agent_id, agent in self.agent_runtime.agents.items():
             if (
                 agent.runtime_profile
