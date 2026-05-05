@@ -146,7 +146,6 @@ CONFIG_SCHEMA = {
             "profile_id": {
                 "executor": "string (one of reuleauxcoder, fake, codex, claude, gemini)",
                 "execution_location": "string (one of remote_server, local_workspace)",
-                "model": "string (optional, executor model override)",
                 "command": "string (optional, CLI command for external executors)",
                 "args": "list of strings (optional)",
                 "env": "dict of strings (optional, non-secret process env)",
@@ -162,6 +161,12 @@ CONFIG_SCHEMA = {
                 "name": "string (optional)",
                 "description": "string (optional)",
                 "runtime_profile": "string (required when task-dispatched, references runtime_profiles)",
+                "model": {
+                    "provider": "string (optional, references providers.items.<provider_id>)",
+                    "model": "string (optional, provider model id)",
+                    "display_name": "string (optional)",
+                    "parameters": "dict (optional, model runtime parameters such as max_tokens/temperature/max_context_tokens)",
+                },
                 "capabilities": "list of strings (optional)",
                 "prompt": {
                     "agent_md": "string (optional)",
@@ -256,6 +261,15 @@ BUILTIN_MODES = {
         "prompt_append": (
             "Focus on root-cause analysis, minimal repro steps, and targeted fixes with "
             "clear verification."
+        ),
+        "allowed_subagent_modes": ["explore", "verify"],
+    },
+    "taskflow": {
+        "description": "Background long-task planning and dispatch mode.",
+        "tools": ["read_file", "glob", "grep"],
+        "prompt_append": (
+            "Guide the user from a fuzzy goal into decisions, acceptance criteria, "
+            "issue drafts, task drafts, dispatch, and completion review."
         ),
         "allowed_subagent_modes": ["explore", "verify"],
     },

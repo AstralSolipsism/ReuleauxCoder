@@ -1003,6 +1003,14 @@ class Config:
                 errors.append(
                     f"agent_runtime.agents[{agent_id}].runtime_profile must exist in runtime_profiles"
                 )
+            if agent.model.provider and agent.model.provider not in self.providers.items:
+                errors.append(
+                    f"agent_runtime.agents[{agent_id}].model.provider must exist in providers.items"
+                )
+            if agent.model.provider and not agent.model.model:
+                errors.append(
+                    f"agent_runtime.agents[{agent_id}].model.model is required when provider is set"
+                )
         valid_actions = {"allow", "warn", "require_approval", "deny"}
         if (
             self.active_model_profile

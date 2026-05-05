@@ -1,6 +1,7 @@
 from reuleauxcoder.domain.config.models import (
     ApprovalConfig,
     ApprovalRuleConfig,
+    AgentRuntimeConfig,
     Config,
     EnvironmentCLIToolConfig,
     MCPArtifactConfig,
@@ -12,6 +13,10 @@ from reuleauxcoder.domain.config.models import (
     ProvidersConfig,
     RemoteExecConfig,
     infer_provider_compat,
+)
+from reuleauxcoder.domain.agent_runtime.models import (
+    AgentConfig,
+    AgentModelConfig,
 )
 
 
@@ -296,6 +301,50 @@ def test_config_validate_rejects_missing_profile_provider_reference() -> None:
     errors = config.validate()
 
     assert "model_profiles[main].provider must exist in providers.items" in errors
+
+
+def test_config_validate_accepts_agent_default_model_provider_reference() -> None:
+    config = Config(
+        api_key="",
+        providers=ProvidersConfig(
+            items={
+                "deepseek": ProviderConfig(
+                    id="deepseek",
+                    type="openai_chat",
+                    api_key="sk-ds",
+                )
+            }
+        ),
+        agent_runtime=AgentRuntimeConfig(
+            agents={
+                "coder": AgentConfig(
+                    id="coder",
+                    model=AgentModelConfig(provider="deepseek", model="V4PRO"),
+                )
+            }
+        ),
+    )
+
+    assert config.validate() == []
+
+
+def test_config_validate_rejects_missing_agent_default_model_provider() -> None:
+    config = Config(
+        api_key="",
+        providers=ProvidersConfig(),
+        agent_runtime=AgentRuntimeConfig(
+            agents={
+                "coder": AgentConfig(
+                    id="coder",
+                    model=AgentModelConfig(provider="missing", model="V4PRO"),
+                )
+            }
+        ),
+    )
+
+    errors = config.validate()
+
+    assert "agent_runtime.agents[coder].model.provider must exist in providers.items" in errors
 
 
 def test_config_is_valid_for_minimal_valid_configuration() -> None:

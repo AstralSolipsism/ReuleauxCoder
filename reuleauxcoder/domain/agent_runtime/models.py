@@ -150,13 +150,62 @@ class AgentPromptConfig:
 
 
 @dataclass
+class AgentModelConfig:
+    """Default model binding for an Agent profile."""
+
+    provider: str = ""
+    model: str = ""
+    display_name: str = ""
+    parameters: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "AgentModelConfig":
+        if not isinstance(data, dict):
+            return cls()
+        parameters = data.get("parameters", {})
+        return cls(
+            provider=str(
+                data.get("provider")
+                or data.get("provider_id")
+                or data.get("providerId")
+                or ""
+            ),
+            model=str(
+                data.get("model")
+                or data.get("model_id")
+                or data.get("modelId")
+                or ""
+            ),
+            display_name=str(
+                data.get("display_name") or data.get("displayName") or ""
+            ),
+            parameters=dict(parameters) if isinstance(parameters, dict) else {},
+        )
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.provider and self.model)
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        if self.provider:
+            result["provider"] = self.provider
+        if self.model:
+            result["model"] = self.model
+        if self.display_name:
+            result["display_name"] = self.display_name
+        if self.parameters:
+            result["parameters"] = dict(self.parameters)
+        return result
+
+
+@dataclass
 class RuntimeProfileConfig:
     """Runtime profile describing how to launch an Agent executor."""
 
     id: str
     executor: ExecutorType = ExecutorType.REULEAUXCODER
     execution_location: ExecutionLocation = ExecutionLocation.REMOTE_SERVER
-    model: str | None = None
     command: str | None = None
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
@@ -179,7 +228,6 @@ class RuntimeProfileConfig:
             execution_location=ExecutionLocation(
                 str(data.get("execution_location", "remote_server"))
             ),
-            model=str(data["model"]) if data.get("model") is not None else None,
             command=str(data["command"]) if data.get("command") is not None else None,
             args=_string_list(data.get("args", [])),
             env=_string_dict(data.get("env", {})),
@@ -195,8 +243,6 @@ class RuntimeProfileConfig:
             "executor": self.executor.value,
             "execution_location": self.execution_location.value,
         }
-        if self.model is not None:
-            result["model"] = self.model
         if self.command is not None:
             result["command"] = self.command
         if self.args:
@@ -225,6 +271,7 @@ class AgentConfig:
     description: str = ""
     runtime_profile: str = ""
     capabilities: list[str] = field(default_factory=list)
+    model: AgentModelConfig = field(default_factory=AgentModelConfig)
     prompt: AgentPromptConfig = field(default_factory=AgentPromptConfig)
     mcp: dict[str, Any] = field(default_factory=dict)
     skills: list[str] = field(default_factory=list)
@@ -244,6 +291,7 @@ class AgentConfig:
             description=str(data.get("description", "") or ""),
             runtime_profile=str(data.get("runtime_profile", "") or ""),
             capabilities=_string_list(data.get("capabilities", [])),
+            model=AgentModelConfig.from_dict(data.get("model")),
             prompt=AgentPromptConfig.from_dict(data.get("prompt")),
             mcp=_dict_value(data.get("mcp", {})),
             skills=_string_list(data.get("skills", [])),
@@ -261,6 +309,9 @@ class AgentConfig:
             result["runtime_profile"] = self.runtime_profile
         if self.capabilities:
             result["capabilities"] = list(self.capabilities)
+        model = self.model.to_dict()
+        if model:
+            result["model"] = model
         prompt = self.prompt.to_dict()
         if prompt:
             result["prompt"] = prompt

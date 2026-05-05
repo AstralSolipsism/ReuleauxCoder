@@ -6,6 +6,7 @@ import re
 from typing import Optional
 import yaml
 
+from reuleauxcoder.domain.agent_runtime.models import AgentConfig, AgentModelConfig
 from reuleauxcoder.compat import migrate_bash_to_shell, migrate_legacy_config
 from reuleauxcoder.domain.config.models import (
     AgentRuntimeConfig,
@@ -420,6 +421,15 @@ class ConfigLoader:
                 )
 
         llm_params = self._resolve_llm_params(active_profile, app_config, providers)
+        agent_runtime = AgentRuntimeConfig.from_dict(
+            agent_runtime_config if isinstance(agent_runtime_config, dict) else {}
+        )
+        self._migrate_legacy_model_profiles_to_agents(
+            agent_runtime,
+            model_profiles,
+            active_main_model_profile,
+            modes,
+        )
 
         return Config(
             **llm_params,
@@ -510,9 +520,7 @@ class ConfigLoader:
                 ),
                 shell_timeout_sec=int(remote_exec_config.get("shell_timeout_sec", 120)),
             ),
-            agent_runtime=AgentRuntimeConfig.from_dict(
-                agent_runtime_config if isinstance(agent_runtime_config, dict) else {}
-            ),
+            agent_runtime=agent_runtime,
             persistence=PersistenceConfig.from_dict(
                 persistence_config if isinstance(persistence_config, dict) else {}
             ),
@@ -526,6 +534,46 @@ class ConfigLoader:
                 app_config.get("llm_debug_trace", DEFAULTS["llm_debug_trace"])
             ),
         )
+
+    def _migrate_legacy_model_profiles_to_agents(
+        self,
+        agent_runtime: AgentRuntimeConfig,
+        model_profiles: dict[str, ModelProfileConfig],
+        active_main_model_profile: str | None,
+        modes: dict[str, ModeConfig],
+    ) -> None:
+        """Expose legacy model profile defaults as Agent model bindings."""
+        if not model_profiles:
+            return
+        profile_name = active_main_model_profile or next(iter(model_profiles.keys()), None)
+        if not profile_name:
+            return
+        profile = model_profiles.get(profile_name)
+        if profile is None:
+            return
+        parameters = {
+            "max_tokens": profile.max_tokens,
+            "temperature": profile.temperature,
+            "max_context_tokens": profile.max_context_tokens,
+            "preserve_reasoning_content": profile.preserve_reasoning_content,
+            "backfill_reasoning_content_for_tool_calls": profile.backfill_reasoning_content_for_tool_calls,
+            "reasoning_effort": profile.reasoning_effort,
+            "thinking_enabled": profile.thinking_enabled,
+            "reasoning_replay_mode": profile.reasoning_replay_mode,
+            "reasoning_replay_placeholder": profile.reasoning_replay_placeholder,
+        }
+        for agent_id in modes.keys():
+            agent = agent_runtime.agents.get(agent_id)
+            if agent is None:
+                agent = AgentConfig(id=agent_id, name=agent_id)
+                agent_runtime.agents[agent_id] = agent
+            if not agent.model.configured:
+                agent.model = AgentModelConfig(
+                    provider=profile.provider or "",
+                    model=profile.model,
+                    display_name=profile.name,
+                    parameters=dict(parameters),
+                )
 
     def _is_workspace_bootstrapped(self, workspace_data: dict) -> bool:
         """Check whether workspace has been bootstrapped."""

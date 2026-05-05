@@ -146,11 +146,62 @@ def test_parse_config_reads_provider_backed_profiles() -> None:
         }
     )
 
+    coder_model = config.agent_runtime.agents["coder"].model
     assert config.providers.items["anthropic-main"].type == "anthropic_messages"
     assert config.providers.items["anthropic-main"].compat == "deepseek"
     assert config.model_profiles["main"].provider == "anthropic-main"
+    assert coder_model.provider == "anthropic-main"
+    assert coder_model.model == "claude-sonnet"
+    assert coder_model.display_name == "main"
     assert config.api_key == "sk-ant"
     assert config.base_url == "https://api.anthropic.com"
+
+
+def test_parse_config_keeps_existing_agent_default_model() -> None:
+    loader = ConfigLoader()
+    config = loader._parse_config(
+        {
+            "providers": {
+                "items": {
+                    "deepseek": {
+                        "type": "openai_chat",
+                        "api_key": "sk-ds",
+                        "models": [
+                            {"id": "V4FLASH", "display_name": "V4 Flash"},
+                            {"id": "V4PRO", "display_name": "V4 Pro"},
+                        ],
+                    }
+                }
+            },
+            "models": {
+                "active_main": "legacy-main",
+                "profiles": {
+                    "legacy-main": {
+                        "provider": "deepseek",
+                        "model": "V4FLASH",
+                    }
+                },
+            },
+            "modes": {"profiles": {"coder": {}}},
+            "agent_runtime": {
+                "agents": {
+                    "coder": {
+                        "name": "Coder",
+                        "model": {
+                            "provider": "deepseek",
+                            "model": "V4PRO",
+                            "display_name": "V4 Pro",
+                        },
+                    }
+                }
+            },
+        }
+    )
+
+    coder_model = config.agent_runtime.agents["coder"].model
+    assert coder_model.provider == "deepseek"
+    assert coder_model.model == "V4PRO"
+    assert coder_model.display_name == "V4 Pro"
 
 
 def test_expand_env_refs_expands_provider_and_profile_runtime_fields(
