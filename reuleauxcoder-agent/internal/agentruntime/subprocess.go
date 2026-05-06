@@ -127,6 +127,9 @@ func (b SubprocessBackend) Execute(ctx context.Context, req RunRequest, opts Run
 func normalizeStreamLine(provider, line string) Event {
 	var raw map[string]any
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
+		if strings.EqualFold(provider, "reuleauxcoder") {
+			return Event{Type: EventText, Text: line, Data: map[string]any{"provider": provider}}
+		}
 		return Event{Type: EventLog, Text: line, Data: map[string]any{"provider": provider}}
 	}
 	if typ, ok := raw["type"].(string); ok {

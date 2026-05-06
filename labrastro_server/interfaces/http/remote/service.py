@@ -737,7 +737,7 @@ class RemoteRelayHTTPService:
     def _build_environment_manifest(
         self, os_name: str, arch: str, workspace: str
     ) -> EnvironmentManifestResponse:
-        del os_name, arch
+        del os_name, arch, workspace
         tools: list[EnvironmentCLIToolManifest] = []
         for name, tool in sorted(self.environment_cli_tools.items()):
             if not _env_bool_value(_env_tool_value(tool, "enabled", True)):
@@ -892,65 +892,6 @@ class RemoteRelayHTTPService:
             cli_tools=tools,
             mcp_servers=mcp_servers,
             skills=skills,
-            prompt=self._build_environment_sync_prompt(
-                tools, mcp_servers, skills, workspace
-            ),
-        )
-
-    @staticmethod
-    def _build_environment_sync_prompt(
-        tools: list[EnvironmentCLIToolManifest],
-        mcp_servers: list[EnvironmentMCPServerManifest],
-        skills: list[EnvironmentSkillManifest],
-        workspace: str,
-    ) -> str:
-        if not tools and not mcp_servers and not skills:
-            return ""
-        manifest = json.dumps(
-            {
-                "cli_tools": [tool.to_dict() for tool in tools],
-                "mcp_servers": [server.to_dict() for server in mcp_servers],
-                "skills": [skill.to_dict() for skill in skills],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        workspace_line = workspace or "(peer working directory)"
-        return (
-            "You are the Labrastro lightweight environment sync agent.\n"
-            "The server is the authority for the environment manifest below. Work only from "
-            "this manifest; do not scan PATH broadly, discover unrelated tools, or "
-            "build a persistent inventory database.\n\n"
-            f"Peer workspace: {workspace_line}\n\n"
-            "Environment manifest:\n"
-            f"```json\n{manifest}\n```\n\n"
-            "Procedure:\n"
-            "1. For each CLI, MCP, and skill entry with a `check` command, use the shell "
-            "tool to run exactly that command from the peer workspace.\n"
-            "2. Treat successful checks as available. For failures, explain the "
-            "missing or mismatched tool and quote the configured `install` command "
-            "if one is present.\n"
-            "3. Before running any install command, read that entry's `install_prompt`, "
-            "`docs`, `evidence`, `credentials`, `risk_level`, and `notes`; present a "
-            "concise install plan grounded in those fields and wait for normal user "
-            "approval. Do not invent install steps "
-            "outside the manifest. Do not install Node, Python, uv, npm, "
-            "pipx, or other base runtimes automatically; report them as blockers if "
-            "they are missing.\n"
-            "4. After any approved install command, follow that entry's `verify_prompt` "
-            "when present, then rerun that tool's `check` command.\n"
-            "5. If a check still fails because the declared command is not found, run "
-            "`command -v <command>` on Unix-like peers or `Get-Command <command>` "
-            "on Windows peers, then report the active PATH and the directory that "
-            "should be added.\n"
-            "6. Do not edit shell profiles, PATH, npm prefix, PowerShell profiles, "
-            "or system environment variables unless the user approves that exact "
-            "change.\n"
-            "7. Treat `docs` as reference links for troubleshooting and reporting. "
-            "If a configured guide conflicts with the install command, stop and "
-            "report the manifest inconsistency.\n"
-            "8. Finish with a compact status table: tool, capability, check result, "
-            "action taken, remaining blocker.\n"
         )
 
 

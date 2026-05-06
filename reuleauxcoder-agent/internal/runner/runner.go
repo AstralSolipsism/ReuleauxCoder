@@ -33,7 +33,6 @@ type Config struct {
 	PeerInfoFile    string
 	PollInterval    time.Duration
 	Interactive     bool
-	EnvSync         bool
 	AgentRuntime    bool
 	RuntimeWorkerID string
 }
@@ -142,23 +141,6 @@ func (r *Runner) Run(ctx context.Context) error {
 	}()
 
 	go r.heartbeatLoop(childCtx, registerResp.PeerToken, heartbeatInterval)
-	if r.cfg.EnvSync {
-		errCh := make(chan error, 1)
-		go func() {
-			errCh <- r.runPollLoop(childCtx, registerResp.PeerToken, cwd, pollInterval)
-		}()
-		err := r.runEnvironmentSync(childCtx, registerResp.PeerToken, workspaceRoot)
-		cancel()
-		select {
-		case pollErr := <-errCh:
-			if err == nil && pollErr != nil && childCtx.Err() == nil {
-				return pollErr
-			}
-		default:
-		}
-		return err
-	}
-
 	if r.cfg.AgentRuntime {
 		return r.runAgentRuntimeLoop(childCtx, registerResp.PeerToken, pollInterval, workspaceRoot)
 	}
@@ -187,27 +169,6 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	return r.runPollLoop(childCtx, registerResp.PeerToken, cwd, pollInterval)
-}
-
-func (r *Runner) runEnvironmentSync(ctx context.Context, peerToken, workspaceRoot string) error {
-	manifestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	resp, err := r.client.EnvironmentManifest(manifestCtx, protocol.EnvironmentManifestRequest{
-		PeerToken: peerToken,
-		OS:        runtimeOS(),
-		Arch:      runtimeArch(),
-		Workspace: workspaceRoot,
-	})
-	cancel()
-	if err != nil {
-		return fmt.Errorf("environment manifest failed: %w", err)
-	}
-	entryCount := len(resp.CLITools) + len(resp.MCPServers)
-	if entryCount == 0 || strings.TrimSpace(resp.Prompt) == "" {
-		fmt.Println("No environment entries are configured on the host.")
-		return nil
-	}
-	fmt.Printf("Starting environment sync agent for %d environment entry(s).\n", entryCount)
-	return r.runRemoteChat(ctx, peerToken, resp.Prompt)
 }
 
 func writePeerInfoFile(path string, resp protocol.RegisterResponse) error {
@@ -1047,7 +1008,7 @@ func runtimeHostname() string {
 }
 
 func runtimeExecutors() []string {
-	return []string{"fake", "codex", "claude", "gemini"}
+	return []string{"fake", "reuleauxcoder", "codex", "claude", "gemini"}
 }
 
 func runtimeExecutionLocations() []string {

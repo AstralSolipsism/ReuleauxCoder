@@ -68,6 +68,34 @@ func TestBuildCodexInvocationUsesAppServerTransport(t *testing.T) {
 	}
 }
 
+func TestBuildReuleauxCoderInvocationUsesOneShotPrompt(t *testing.T) {
+	inv, err := BuildInvocation(RunRequest{
+		Executor: "reuleauxcoder",
+		Prompt:   "check environment",
+		Model:    "gpt-5.2",
+		Workdir:  "/tmp/work",
+	}, RunOptions{
+		Command:    "rcoder-dev",
+		CustomArgs: []string{"--prompt", "override", "--config", "/tmp/config.yaml"},
+	})
+	if err != nil {
+		t.Fatalf("BuildInvocation error: %v", err)
+	}
+	if inv.Command != "rcoder-dev" || inv.Transport != "plain_stdout" {
+		t.Fatalf("unexpected invocation: %#v", inv)
+	}
+	joined := strings.Join(inv.Args, " ")
+	if strings.Contains(joined, "override") {
+		t.Fatalf("blocked prompt override leaked: %v", inv.Args)
+	}
+	if !strings.Contains(joined, "--prompt check environment") || !strings.Contains(joined, "--model gpt-5.2") {
+		t.Fatalf("missing rcoder prompt/model args: %v", inv.Args)
+	}
+	if !strings.Contains(joined, "--config /tmp/config.yaml") {
+		t.Fatalf("custom config arg missing: %v", inv.Args)
+	}
+}
+
 func TestBuildInvocationRejectsUnsupportedExecutor(t *testing.T) {
 	_, err := BuildInvocation(RunRequest{Executor: "unknown-cli"}, RunOptions{})
 	if err == nil || !strings.Contains(err.Error(), "unsupported executor") {

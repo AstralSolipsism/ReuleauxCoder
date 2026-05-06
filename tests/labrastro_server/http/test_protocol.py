@@ -271,7 +271,6 @@ class TestEnvironmentManifest:
                     notes=["Use user scope."],
                 )
             ],
-            prompt="check gitnexus",
         )
 
         restored = EnvironmentManifestResponse.from_dict(response.to_dict())
@@ -296,7 +295,7 @@ class TestEnvironmentManifest:
         assert restored.skills[0].docs[0]["title"] == "Claude skill"
         assert restored.skills[0].verify_prompt == "Check SKILL.md exists."
         assert restored.skills[0].notes == ["Use user scope."]
-        assert restored.prompt == "check gitnexus"
+        assert "prompt" not in response.to_dict()
 
     def test_manifest_request_roundtrip(self) -> None:
         req = EnvironmentManifestRequest(

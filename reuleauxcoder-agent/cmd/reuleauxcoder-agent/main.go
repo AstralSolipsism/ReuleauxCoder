@@ -19,7 +19,6 @@ func main() {
 		peerInfoFile    string
 		pollInterval    time.Duration
 		interactive     bool
-		envSync         bool
 		agentRuntime    bool
 		runtimeWorkerID string
 	)
@@ -31,7 +30,6 @@ func main() {
 	flag.StringVar(&peerInfoFile, "peer-info-file", "", "Write peer registration info to this JSON file")
 	flag.DurationVar(&pollInterval, "poll-interval", 500*time.Millisecond, "Polling interval when no work is available")
 	flag.BoolVar(&interactive, "interactive", false, "Run interactive chat loop proxied through host")
-	flag.BoolVar(&envSync, "env-sync", false, "Run one lightweight CLI environment sync chat and exit")
 	flag.BoolVar(&agentRuntime, "agent-runtime", false, "Run Agent Runtime worker loop")
 	flag.StringVar(&runtimeWorkerID, "runtime-worker-id", "", "Stable Agent Runtime worker id")
 	flag.Parse()
@@ -53,7 +51,6 @@ func main() {
 		PeerInfoFile:    peerInfoFile,
 		PollInterval:    pollInterval,
 		Interactive:     interactive,
-		EnvSync:         envSync,
 		AgentRuntime:    agentRuntime,
 		RuntimeWorkerID: runtimeWorkerID,
 	})

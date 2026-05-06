@@ -380,7 +380,7 @@ func (r *codexRPC) handleLegacyEvent(msg map[string]any) {
 	case "exec_command_begin":
 		r.appendEvent(Event{Type: EventToolUse, Data: map[string]any{"tool": "exec_command", "input": msg}})
 	case "exec_command_end":
-		r.appendEvent(Event{Type: EventToolResult, Data: map[string]any{"tool": "exec_command", "output": msg["output"]}})
+		r.appendEvent(Event{Type: EventToolResult, Data: map[string]any{"tool": "exec_command", "input": msg, "output": msg["output"]}})
 	case "patch_apply_begin":
 		r.appendEvent(Event{Type: EventToolUse, Data: map[string]any{"tool": "patch_apply", "input": msg}})
 	case "patch_apply_end":
@@ -401,7 +401,7 @@ func (r *codexRPC) handleItem(method string, params map[string]any) {
 	case method == "item/started" && itemType == "commandExecution":
 		r.appendEvent(Event{Type: EventToolUse, Data: map[string]any{"tool": "exec_command", "input": item}})
 	case method == "item/completed" && itemType == "commandExecution":
-		r.appendEvent(Event{Type: EventToolResult, Data: map[string]any{"tool": "exec_command", "output": item["aggregatedOutput"]}})
+		r.appendEvent(Event{Type: EventToolResult, Data: map[string]any{"tool": "exec_command", "input": item, "output": item["aggregatedOutput"]}})
 	case method == "item/started" && itemType == "fileChange":
 		r.appendEvent(Event{Type: EventToolUse, Data: map[string]any{"tool": "patch_apply", "input": item}})
 	case method == "item/completed" && itemType == "fileChange":

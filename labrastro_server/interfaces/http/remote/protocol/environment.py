@@ -344,14 +344,12 @@ class EnvironmentManifestResponse:
     cli_tools: list[EnvironmentCLIToolManifest] = field(default_factory=list)
     mcp_servers: list[EnvironmentMCPServerManifest] = field(default_factory=list)
     skills: list[EnvironmentSkillManifest] = field(default_factory=list)
-    prompt: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "cli_tools": [tool.to_dict() for tool in self.cli_tools],
             "mcp_servers": [server.to_dict() for server in self.mcp_servers],
             "skills": [skill.to_dict() for skill in self.skills],
-            "prompt": self.prompt,
         }
 
     @classmethod
@@ -372,7 +370,6 @@ class EnvironmentManifestResponse:
                 for item in d.get("skills", [])
                 if isinstance(item, dict)
             ],
-            prompt=str(d.get("prompt", "")),
         )
 
 

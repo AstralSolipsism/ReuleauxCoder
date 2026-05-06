@@ -205,10 +205,22 @@ type EnvironmentMCPServerManifest struct {
 	Description  string            `json:"description,omitempty"`
 }
 
+type EnvironmentSkillManifest struct {
+	Name         string            `json:"name"`
+	Scope        string            `json:"scope,omitempty"`
+	Check        string            `json:"check,omitempty"`
+	Install      string            `json:"install,omitempty"`
+	Version      string            `json:"version,omitempty"`
+	Source       string            `json:"source,omitempty"`
+	Description  string            `json:"description,omitempty"`
+	PathHint     string            `json:"path_hint,omitempty"`
+	Requirements map[string]string `json:"requirements,omitempty"`
+}
+
 type EnvironmentManifestResponse struct {
 	CLITools   []EnvironmentCLIToolManifest   `json:"cli_tools,omitempty"`
 	MCPServers []EnvironmentMCPServerManifest `json:"mcp_servers,omitempty"`
-	Prompt     string                         `json:"prompt,omitempty"`
+	Skills     []EnvironmentSkillManifest     `json:"skills,omitempty"`
 }
 
 type ExecToolRequest struct {

@@ -47,8 +47,18 @@ var geminiBlockedArgs = map[string]blockedArgMode{
 	"-m":     blockedWithValue,
 }
 
+var reuleauxcoderBlockedArgs = map[string]blockedArgMode{
+	"-p":       blockedWithValue,
+	"--prompt": blockedWithValue,
+	"-m":       blockedWithValue,
+	"--model":  blockedWithValue,
+	"--server": blockedStandalone,
+}
+
 func BuildInvocation(req RunRequest, opts RunOptions) (Invocation, error) {
 	switch strings.ToLower(strings.TrimSpace(req.Executor)) {
+	case "reuleauxcoder":
+		return buildReuleauxCoderInvocation(req, opts), nil
 	case "codex":
 		return buildCodexInvocation(req, opts), nil
 	case "claude":
@@ -59,6 +69,23 @@ func BuildInvocation(req RunRequest, opts RunOptions) (Invocation, error) {
 		return Invocation{Command: "fake", CWD: req.Workdir}, nil
 	default:
 		return Invocation{}, fmt.Errorf("unsupported executor %q", req.Executor)
+	}
+}
+
+func buildReuleauxCoderInvocation(req RunRequest, opts RunOptions) Invocation {
+	command := firstNonEmpty(opts.Command, "rcoder")
+	args := []string{"--prompt", req.Prompt}
+	if req.Model != "" {
+		args = append(args, "--model", req.Model)
+	}
+	args = append(args, filterCustomArgs(opts.ExtraArgs, reuleauxcoderBlockedArgs)...)
+	args = append(args, filterCustomArgs(opts.CustomArgs, reuleauxcoderBlockedArgs)...)
+	return Invocation{
+		Command:   command,
+		Args:      args,
+		Env:       cloneEnv(opts.Env),
+		CWD:       req.Workdir,
+		Transport: "plain_stdout",
 	}
 }
 
