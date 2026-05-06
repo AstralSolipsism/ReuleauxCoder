@@ -23,6 +23,10 @@ from labrastro_server.services.agent_runtime.executor_backend import (
     ExecutorRunRequest,
     ExecutorRunResult,
 )
+from labrastro_server.services.agent_runtime.environment_events import (
+    environment_summary_event,
+    expand_environment_executor_event,
+)
 from labrastro_server.services.agent_runtime.lifecycle import IssueStatus
 from labrastro_server.services.agent_runtime.prompt_renderer import (
     CanonicalAgentContext,
@@ -575,7 +579,33 @@ class PostgresRuntimeStore:
                 )
                 if not ok:
                     return False, reason
+            task = self._task_from_row(self._task_row(conn, task_id))
             self._append_event(conn, task_id, event.type.value, event.to_dict())
+            expansion = expand_environment_executor_event(task.metadata, event)
+            for event_type, payload in expansion.events:
+                self._append_event(conn, task_id, event_type, payload)
+            if expansion.policy_error:
+                metadata = dict(task.metadata)
+                metadata["environment_policy_violation"] = expansion.policy_error
+                conn.execute(
+                    text(
+                        """
+                        UPDATE ez_runtime_tasks
+                        SET status='blocked', metadata=CAST(:metadata AS JSONB), updated_at=now()
+                        WHERE id=:task_id
+                        """
+                    ),
+                    {
+                        "task_id": task_id,
+                        "metadata": _json(metadata),
+                    },
+                )
+                self._append_event(
+                    conn,
+                    task_id,
+                    "blocked",
+                    {"error": expansion.policy_error},
+                )
             if event.type.value == "status":
                 status = str(event.data.get("status", ""))
                 mapped = {
@@ -624,11 +654,26 @@ class PostgresRuntimeStore:
     ) -> TaskRecord:
         with self.engine.begin() as conn:
             task = self._task_from_row(self._task_row(conn, task_id))
-            if result.succeeded:
+            expanded_events = [
+                (event, expand_environment_executor_event(task.metadata, event))
+                for event in result.events
+            ]
+            policy_error = str(
+                task.metadata.get("environment_policy_violation") or ""
+            ).strip()
+            for _, expansion in expanded_events:
+                if expansion.policy_error and not policy_error:
+                    policy_error = expansion.policy_error
+            if result.succeeded and not policy_error:
                 status = "completed"
                 issue_status = "in_review" if self._has_open_pr(conn, task_id) else "done"
                 output = result.output
                 failure_reason = None
+            elif policy_error:
+                status = "blocked"
+                issue_status = "blocked"
+                output = policy_error
+                failure_reason = "blocked"
             elif result.status == "cancelled":
                 status = "cancelled"
                 issue_status = "blocked"
@@ -644,6 +689,9 @@ class PostgresRuntimeStore:
                 issue_status = "blocked"
                 output = result.output
                 failure_reason = result.error or "agent_error"
+            metadata = dict(task.metadata)
+            if policy_error:
+                metadata["environment_policy_violation"] = policy_error
             conn.execute(
                 text(
                     """
@@ -652,6 +700,7 @@ class PostgresRuntimeStore:
                         executor_session_id=:executor_session_id,
                         issue_status=:issue_status,
                         failure_reason=COALESCE(:failure_reason, failure_reason),
+                        metadata=CAST(:metadata AS JSONB),
                         completed_at=now(), updated_at=now()
                     WHERE id=:task_id
                     """
@@ -663,17 +712,35 @@ class PostgresRuntimeStore:
                     "executor_session_id": result.executor_session_id,
                     "issue_status": issue_status,
                     "failure_reason": failure_reason,
+                    "metadata": _json(metadata),
                 },
             )
-            for event in result.events:
+            for event, expansion in expanded_events:
                 self._append_event(conn, task_id, event.type.value, event.to_dict())
+                for event_type, payload in expansion.events:
+                    self._append_event(conn, task_id, event_type, payload)
+                if expansion.policy_error:
+                    self._append_event(
+                        conn,
+                        task_id,
+                        "blocked",
+                        {"error": expansion.policy_error},
+                    )
             for artifact in artifacts or []:
                 self._attach_artifact_with_conn(conn, task_id, **artifact)
             task = self._task_from_row(self._task_row(conn, task_id))
+            summary = environment_summary_event(
+                task.metadata,
+                status,
+                output=output or "",
+                error=policy_error or result.error or "",
+            )
+            if summary is not None:
+                self._append_event(conn, task_id, summary[0], summary[1])
             self._append_event(
                 conn,
                 task_id,
-                result.status,
+                status,
                 {"result": result.to_dict(), "task": _task_to_dict(task)},
             )
             self._release_claims(conn, task_id, status="completed")

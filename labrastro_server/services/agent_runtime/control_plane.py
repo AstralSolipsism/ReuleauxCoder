@@ -24,6 +24,10 @@ from labrastro_server.services.agent_runtime.executor_backend import (
     ExecutorRunRequest,
     ExecutorRunResult,
 )
+from labrastro_server.services.agent_runtime.environment_events import (
+    environment_summary_event,
+    expand_environment_executor_event,
+)
 from labrastro_server.services.agent_runtime.lifecycle import IssueStatus, TaskLifecycleState
 from labrastro_server.services.agent_runtime.prompt_renderer import (
     CanonicalAgentContext,
@@ -787,15 +791,27 @@ class AgentRuntimeControlPlane:
                 )
                 if not ok:
                     return False, reason
+            task = self._task_locked(task_id)
             self._append_event_locked(task_id, event.type.value, event.to_dict())
+            expansion = expand_environment_executor_event(task.metadata, event)
+            for event_type, payload in expansion.events:
+                self._append_event_locked(task_id, event_type, payload)
+            if expansion.policy_error:
+                task.metadata["environment_policy_violation"] = expansion.policy_error
+                task.status = TaskStatus.BLOCKED
+                self._append_event_locked(
+                    task_id,
+                    "blocked",
+                    {"error": expansion.policy_error},
+                )
             if event.type.value == "status":
                 status = str(event.data.get("status", ""))
                 if status == "waiting_approval":
-                    self._task_locked(task_id).status = TaskStatus.WAITING_APPROVAL
+                    task.status = TaskStatus.WAITING_APPROVAL
                 elif status == "running":
-                    self._task_locked(task_id).status = TaskStatus.RUNNING
+                    task.status = TaskStatus.RUNNING
                 elif status == "blocked":
-                    self._task_locked(task_id).status = TaskStatus.BLOCKED
+                    task.status = TaskStatus.BLOCKED
             return True, ""
 
     def complete_claimed_task(
@@ -843,8 +859,14 @@ class AgentRuntimeControlPlane:
             return task
         with self._lock:
             task = self._task_locked(task_id)
-            if result.succeeded:
+            policy_error = str(
+                task.metadata.get("environment_policy_violation") or ""
+            ).strip()
+            if result.succeeded and not policy_error:
                 self._states[task_id].complete_task(output=result.output)
+            elif policy_error:
+                task.status = TaskStatus.BLOCKED
+                task.output = policy_error
             elif result.status == "cancelled":
                 task.status = TaskStatus.CANCELLED
                 task.output = result.output
@@ -857,11 +879,32 @@ class AgentRuntimeControlPlane:
             task.executor_session_id = result.executor_session_id
             for event in result.events:
                 self._append_event_locked(task_id, event.type.value, event.to_dict())
+                expansion = expand_environment_executor_event(task.metadata, event)
+                for event_type, payload in expansion.events:
+                    self._append_event_locked(task_id, event_type, payload)
+                if expansion.policy_error and not policy_error:
+                    policy_error = expansion.policy_error
+                    task.metadata["environment_policy_violation"] = policy_error
+                    task.status = TaskStatus.BLOCKED
+                    task.output = policy_error
+                    self._append_event_locked(
+                        task_id,
+                        "blocked",
+                        {"error": policy_error},
+                    )
             for artifact in artifacts or []:
                 self.attach_artifact(task_id, **artifact)
+            summary = environment_summary_event(
+                task.metadata,
+                task.status.value,
+                output=task.output or result.output,
+                error=policy_error or result.error or "",
+            )
+            if summary is not None:
+                self._append_event_locked(task_id, summary[0], summary[1])
             self._append_event_locked(
                 task_id,
-                result.status,
+                task.status.value if policy_error else result.status,
                 {"result": result.to_dict(), "task": _task_to_dict(task)},
             )
             self._clear_task_claims_locked(task_id)

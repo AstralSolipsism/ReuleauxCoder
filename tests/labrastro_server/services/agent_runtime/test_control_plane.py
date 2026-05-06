@@ -11,6 +11,7 @@ from reuleauxcoder.domain.agent_runtime.models import (
     ExecutionLocation,
     ExecutorType,
     TaskSessionRef,
+    TriggerMode,
 )
 from labrastro_server.services.agent_runtime.control_plane import (
     AgentRuntimeControlPlane,
@@ -124,6 +125,162 @@ def test_claim_task_waits_for_wakeup_when_task_is_submitted() -> None:
 
     assert claims[0] is not None
     assert claims[0].task.id == "task-wakeup"
+
+
+def test_environment_runtime_events_are_derived_from_allowlisted_shell_commands() -> None:
+    control = AgentRuntimeControlPlane()
+    task = control.submit_task(
+        RuntimeTaskRequest(
+            issue_id="environment-check",
+            agent_id="environment_configurator",
+            prompt="check environment",
+            executor=ExecutorType.FAKE,
+            trigger_mode=TriggerMode.ENVIRONMENT_CONFIG,
+            metadata={
+                "workflow": "environment_config",
+                "environment_mode": "check",
+                "entry_ids": ["cli:gitnexus"],
+                "manifest_hash": "hash",
+                "allowed_commands": [
+                    {
+                        "entry_id": "cli:gitnexus",
+                        "kind": "cli",
+                        "name": "gitnexus",
+                        "phase": "check",
+                        "command": "gitnexus --version",
+                    }
+                ],
+            },
+        ),
+        task_id="task-env",
+    )
+
+    control.append_executor_event(
+        task.id,
+        ExecutorEvent(
+            type="tool_use",
+            data={
+                "tool": "exec_command",
+                "input": {"command": "gitnexus --version"},
+            },
+        ),
+    )
+    control.append_executor_event(
+        task.id,
+        ExecutorEvent(
+            type="tool_result",
+            data={
+                "tool": "exec_command",
+                "input": {"command": "gitnexus --version"},
+                "output": {"exit_code": 0, "text": "gitnexus 1.0.0"},
+            },
+        ),
+    )
+    control.complete_task(
+        task.id,
+        ExecutorRunResult(task_id=task.id, status="completed", output="done"),
+    )
+
+    events = control.list_events(task.id, after_seq=0)
+    event_types = [event.type for event in events]
+    assert "environment.entry_started" in event_types
+    assert "environment.entry_checked" in event_types
+    assert "environment.entry_verified" in event_types
+    assert "environment.summary" in event_types
+
+
+def test_environment_runtime_blocks_non_manifest_shell_command() -> None:
+    control = AgentRuntimeControlPlane()
+    task = control.submit_task(
+        RuntimeTaskRequest(
+            issue_id="environment-check",
+            agent_id="environment_configurator",
+            prompt="check environment",
+            executor=ExecutorType.FAKE,
+            trigger_mode=TriggerMode.ENVIRONMENT_CONFIG,
+            metadata={
+                "workflow": "environment_config",
+                "environment_mode": "check",
+                "entry_ids": ["cli:gitnexus"],
+                "manifest_hash": "hash",
+                "allowed_commands": [
+                    {
+                        "entry_id": "cli:gitnexus",
+                        "kind": "cli",
+                        "name": "gitnexus",
+                        "phase": "check",
+                        "command": "gitnexus --version",
+                    }
+                ],
+            },
+        ),
+        task_id="task-env-blocked",
+    )
+
+    control.append_executor_event(
+        task.id,
+        ExecutorEvent(
+            type="tool_use",
+            data={"tool": "exec_command", "input": {"command": "npm install -g x"}},
+        ),
+    )
+    completed = control.complete_task(
+        task.id,
+        ExecutorRunResult(task_id=task.id, status="completed", output="done"),
+    )
+
+    assert completed.status.value == "blocked"
+    events = control.list_events(task.id, after_seq=0)
+    assert "environment.entry_failed" in [event.type for event in events]
+
+
+def test_environment_runtime_reports_failed_install_command() -> None:
+    control = AgentRuntimeControlPlane()
+    task = control.submit_task(
+        RuntimeTaskRequest(
+            issue_id="environment-configure",
+            agent_id="environment_configurator",
+            prompt="configure environment",
+            executor=ExecutorType.FAKE,
+            trigger_mode=TriggerMode.ENVIRONMENT_CONFIG,
+            metadata={
+                "workflow": "environment_config",
+                "environment_mode": "configure",
+                "entry_ids": ["cli:gitnexus"],
+                "manifest_hash": "hash",
+                "allowed_commands": [
+                    {
+                        "entry_id": "cli:gitnexus",
+                        "kind": "cli",
+                        "name": "gitnexus",
+                        "phase": "install",
+                        "command": "npm install -g gitnexus",
+                    }
+                ],
+            },
+        ),
+        task_id="task-env-install-failed",
+    )
+
+    control.append_executor_event(
+        task.id,
+        ExecutorEvent(
+            type="tool_result",
+            data={
+                "tool": "exec_command",
+                "input": {"command": "npm install -g gitnexus"},
+                "output": {"exit_code": 1, "text": "install failed"},
+            },
+        ),
+    )
+
+    failed_events = [
+        event
+        for event in control.list_events(task.id, after_seq=0)
+        if event.type == "environment.entry_failed"
+    ]
+    assert failed_events
+    assert failed_events[-1].payload["phase"] == "install"
 
 
 def test_claim_includes_rendered_prompt_files_from_runtime_snapshot() -> None:
