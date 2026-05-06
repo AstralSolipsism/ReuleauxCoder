@@ -130,7 +130,7 @@ Pluggable extension system.
   - `builtin/edit.py` — `EditFileTool`: `_validate_edit_request()` checks file existence and old_string uniqueness before applying.
   - `builtin/grep.py` — `GrepTool`: skips `.git`, `node_modules`, `__pycache__`, `.venv`, etc. via `_SKIP_DIRS`.
   - `builtin/glob.py` — `GlobTool`: recursive `**` support, skip-dirs filter.
-  - `builtin/agent.py` — `AgentTool`: spawns sub-agents. `_parent_agent` ref for mode validation. Pre-flight: mutual exclusion of `task`/`tasks`, batch requires `mode='explore'` + `run_in_background=true`, `parallel_explore` caps (1-4).
+  - `builtin/agent.py` — `AgentTool`: spawns sub-agents. `_parent_agent` ref for mode validation. Pre-flight: required `tasks: list[str]`, background requires `mode='explore'`, batch requires `mode='explore'` + `run_in_background=true`, `parallel_explore` caps (1-4).
 - **command/**: Slash commands with `@register_command_module` + `ActionRegistry`
   - Complete command list: `/help`, `/quit`/`/exit`, `/reset`, `/new`, `/compact [force <strategy>]`, `/tokens`, `/debug on/off`, `/save`, `/model <profile|use-main|use-sub|set-main|set-sub>`, `/mode <mode>`, `/skills [reload|enable|disable <n>]`, `/mcp [show|enable|disable <s>]`, `/approval [show|set ...|set-global ...]`, `/sessions [all]`, `/session <id|latest>`, `/jobs [get|wait <job_id>]`.
   - Commands grouped by module: `system.py` (help/quit/reset/compact/tokens/debug), `sessions.py` (save/new/sessions/session), `model.py` (model switch), `mode.py` (mode switch), `skills.py`, `mcp.py`, `approval.py`, `subagent_jobs.py`.

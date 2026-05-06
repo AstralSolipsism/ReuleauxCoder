@@ -14,30 +14,26 @@ class AgentTool(Tool):
     description = (
         "Spawn one or more sub-agents to handle complex sub-tasks independently. "
         "Each sub-agent has isolated context and tool access. "
-        "Provide either 'task' or 'tasks', but not both. "
-        "Batch 'tasks' requires mode='explore' and run_in_background=true. "
+        "Pass a list of task strings via the 'tasks' parameter: "
+        "a single-element list for one sub-agent, multiple elements for batch parallel jobs. "
+        "Single tasks support synchronous execution in any mode. "
+        "Background jobs require mode='explore'; batch tasks (multiple elements) "
+        "run as explore-mode background jobs. "
         "Optionally set 'model' to 'sub' or 'main'. "
-        "'sub' uses the configured default sub-agent model; 'main' uses the configured main-agent model. "
+        "'sub' uses the configured default sub-agent model; "
+        "'main' uses the configured main-agent model. "
         "If omitted or invalid, 'sub' is used. "
         "parallel_explore sets the runtime explore parallelism cap (1-4)."
     )
     parameters = {
         "type": "object",
         "properties": {
-            "task": {
-                "type": "string",
-                "description": (
-                    "Single sub-agent task. Use this for one job only. "
-                    "Mutually exclusive with 'tasks' - do not provide both."
-                ),
-            },
             "tasks": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Batch tasks for parallel/background explore jobs. "
-                    "Mutually exclusive with 'task' - do not provide both. "
-                    "Requires mode='explore' and run_in_background=true."
+                    "Sub-agent tasks. Use a single-element list for one task. "
+                    "Use multiple items only with mode='explore' and run_in_background=true."
                 ),
             },
             "mode": {
@@ -76,7 +72,7 @@ class AgentTool(Tool):
                 ),
             },
         },
-        "required": [],
+        "required": ["tasks"],
     }
 
     _parent_agent = None
@@ -84,28 +80,32 @@ class AgentTool(Tool):
     def __init__(self, backend: ToolBackend | None = None):
         super().__init__(backend or LocalToolBackend())
 
+    @staticmethod
+    def _normalize_tasks(tasks: object) -> list[str]:
+        if not isinstance(tasks, list):
+            return []
+        return [
+            item.strip()
+            for item in tasks
+            if isinstance(item, str) and item.strip()
+        ]
+
     def preflight_validate(self, **kwargs) -> str | None:
-        task = kwargs.get("task")
         tasks = kwargs.get("tasks")
         mode = kwargs.get("mode", "explore")
         run_in_background = kwargs.get("run_in_background", False)
 
-        single_task = (task or "").strip() if isinstance(task, str) else ""
-        batch_tasks = [
-            item.strip()
-            for item in (tasks or [])
-            if isinstance(item, str) and item.strip()
-        ]
+        task_list = self._normalize_tasks(tasks)
 
-        if not single_task and not batch_tasks:
-            return "Error: provide either 'task' or non-empty 'tasks'."
+        if not task_list:
+            return "Error: 'tasks' must be a non-empty list of task strings."
 
-        if single_task and batch_tasks:
-            return "Error: use either 'task' or 'tasks', not both."
+        if run_in_background and mode != "explore":
+            return "Error: background sub-agent jobs require mode='explore'."
 
-        if batch_tasks and (mode != "explore" or not run_in_background):
+        if len(task_list) > 1 and (mode != "explore" or not run_in_background):
             return (
-                "Error: batch 'tasks' currently requires mode='explore' "
+                "Error: batch tasks require mode='explore' "
                 "and run_in_background=true."
             )
 
@@ -120,7 +120,6 @@ class AgentTool(Tool):
 
     def execute(
         self,
-        task: str | None = None,
         tasks: list[str] | None = None,
         mode: str = "explore",
         run_in_background: bool = False,
@@ -133,7 +132,6 @@ class AgentTool(Tool):
             return "Error: agent tool not initialized (no parent agent)"
 
         return self.run_backend(
-            task=task,
             tasks=tasks,
             mode=mode,
             run_in_background=run_in_background,
@@ -146,7 +144,6 @@ class AgentTool(Tool):
     @backend_handler("local")
     def _execute_local(
         self,
-        task: str | None = None,
         tasks: list[str] | None = None,
         mode: str = "explore",
         run_in_background: bool = False,
@@ -159,6 +156,14 @@ class AgentTool(Tool):
         if parent is None:
             return "Error: agent tool not initialized (no parent agent)"
 
+        validation_error = self.preflight_validate(
+            tasks=tasks,
+            mode=mode,
+            run_in_background=run_in_background,
+        )
+        if validation_error:
+            return validation_error
+
         manager = get_subagent_manager(parent)
         effective_max_rounds = max(1, int(max_rounds or manager.default_max_rounds))
         effective_timeout = max(1, int(timeout_seconds or 300))
@@ -166,8 +171,9 @@ class AgentTool(Tool):
         if model_route not in {"sub", "main"}:
             model_route = "sub"
 
-        single_task = (task or "").strip() if isinstance(task, str) else ""
-        if single_task:
+        task_list = self._normalize_tasks(tasks)
+        if len(task_list) == 1:
+            single_task = task_list[0]
             if run_in_background:
                 job_id = manager.submit_background(
                     parent_agent=parent,
@@ -188,14 +194,6 @@ class AgentTool(Tool):
                 timeout_seconds=effective_timeout,
                 model_profile_name=model_route,
             )
-
-        task_list = [
-            item.strip()
-            for item in (tasks or [])
-            if isinstance(item, str) and item.strip()
-        ]
-        if not task_list:
-            return "Error: provide either 'task' or non-empty 'tasks'."
 
         job_ids: list[str] = []
         for item in task_list:

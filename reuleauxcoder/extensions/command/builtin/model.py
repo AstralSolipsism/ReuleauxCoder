@@ -350,7 +350,7 @@ def _build_model_profiles_payload(config, runtime_state=None) -> dict:
     lines.append("- `/model set-main <profile>` → set global default main model")
     lines.append("- `/model set-sub <profile>` → set global default sub-agent model")
     lines.append(
-        '- `agent(..., model="sub"|"main")` → route a sub-agent to the configured sub/main model'
+        '- `agent(tasks=["..."], model="sub"|"main")` → route a sub-agent to the configured sub/main model'
     )
     lines.append("")
 
