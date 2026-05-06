@@ -1,4 +1,4 @@
-"""Alembic migration helpers for EZCode persistence."""
+"""Alembic migration helpers for Labrastro persistence."""
 
 from __future__ import annotations
 

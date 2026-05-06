@@ -1,0 +1,558 @@
+"""Issue Assignment and Mention Agent control-plane service."""
+
+from __future__ import annotations
+
+import re
+import uuid
+from typing import Any
+
+from reuleauxcoder.domain.issue_assignment.models import (
+    AssignmentRecord,
+    AssignmentStatus,
+    IssueRecord,
+    IssueStatus,
+    MentionRecord,
+    MentionStatus,
+)
+from reuleauxcoder.domain.taskflow.models import GoalStatus, TaskDraftStatus
+from labrastro_server.services.collaboration.in_memory_store import (
+    InMemoryIssueAssignmentStore,
+)
+from labrastro_server.services.collaboration.store import IssueAssignmentStore
+from labrastro_server.services.taskflow.service import TaskflowService
+
+
+_MENTION_RE = re.compile(r"@([A-Za-z0-9_.-]+)")
+
+
+def _new_id(prefix: str) -> str:
+    return f"{prefix}-{uuid.uuid4().hex}"
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if value is None or value == "":
+        return []
+    return [str(value)]
+
+
+def _optional(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+class IssueAssignmentService:
+    """Facade for Issue, Assignment, and Mention Agent lifecycle.
+
+    Issue Assignment owns the structured task-entry control state. It delegates
+    actual Agent selection and RuntimeTask creation to Taskflow so capability
+    dispatch, audit records, and user confirmation boundaries stay centralized.
+    """
+
+    def __init__(
+        self,
+        store: IssueAssignmentStore | None = None,
+        *,
+        taskflow_service: TaskflowService,
+    ) -> None:
+        self.store = store or InMemoryIssueAssignmentStore()
+        self.taskflow_service = taskflow_service
+
+    def _assert_issue_access(
+        self, issue: IssueRecord, peer_id: str | None = None
+    ) -> IssueRecord:
+        if peer_id and issue.peer_id and issue.peer_id != peer_id:
+            raise PermissionError("issue belongs to another peer")
+        return issue
+
+    def _get_issue_for_peer(
+        self, issue_id: str, peer_id: str | None = None
+    ) -> IssueRecord:
+        return self._assert_issue_access(self.store.get_issue(issue_id), peer_id)
+
+    def _get_assignment_for_peer(
+        self, assignment_id: str, peer_id: str | None = None
+    ) -> tuple[AssignmentRecord, IssueRecord]:
+        assignment = self.store.get_assignment(assignment_id)
+        issue = self._get_issue_for_peer(assignment.issue_id, peer_id)
+        return assignment, issue
+
+    def _assert_mention_access(
+        self, mention: MentionRecord, peer_id: str | None = None
+    ) -> MentionRecord:
+        if peer_id and mention.peer_id and mention.peer_id != peer_id:
+            raise PermissionError("mention belongs to another peer")
+        return mention
+
+    def create_issue(
+        self,
+        *,
+        title: str,
+        description: str = "",
+        peer_id: str | None = None,
+        source: str = "manual",
+        taskflow_goal_id: str | None = None,
+        taskflow_issue_draft_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        issue_id: str | None = None,
+    ) -> IssueRecord:
+        title = title.strip() or "Untitled issue"
+        description = description or ""
+        if taskflow_issue_draft_id:
+            issue_draft = self.taskflow_service.get_issue_draft(
+                taskflow_issue_draft_id, peer_id=peer_id
+            )
+            taskflow_goal_id = issue_draft.goal_id
+            if not description:
+                description = issue_draft.description
+            if title == "Untitled issue":
+                title = issue_draft.title
+        if taskflow_goal_id:
+            goal = self.taskflow_service.get_goal(taskflow_goal_id, peer_id=peer_id)
+            if goal.status == GoalStatus.CANCELLED:
+                raise ValueError("cannot create issue from cancelled Taskflow goal")
+        else:
+            goal = self.taskflow_service.create_goal(
+                title=title,
+                prompt=description,
+                peer_id=peer_id,
+                metadata={"source": "issue_assignment", **dict(metadata or {})},
+            )
+            taskflow_goal_id = goal.id
+        issue = IssueRecord(
+            id=issue_id or _new_id("issue"),
+            title=title,
+            description=description,
+            peer_id=peer_id,
+            source=source,
+            taskflow_goal_id=taskflow_goal_id,
+            taskflow_issue_draft_id=taskflow_issue_draft_id,
+            metadata=dict(metadata or {}),
+        )
+        created = self.store.create_issue(issue)
+        self.store.append_event(
+            "issue", created.id, "issue_created", {"issue": created.to_dict()}
+        )
+        return created
+
+    def get_issue(self, issue_id: str, *, peer_id: str | None = None) -> IssueRecord:
+        return self._get_issue_for_peer(issue_id, peer_id)
+
+    def load_issue_detail(
+        self, issue_id: str, *, peer_id: str | None = None
+    ) -> dict[str, Any]:
+        issue = self._get_issue_for_peer(issue_id, peer_id)
+        assignments = [
+            assignment.to_dict()
+            for assignment in self.store.list_assignments(issue.id)
+        ]
+        mentions = [
+            mention.to_dict()
+            for mention in self.store.list_mentions(issue_id=issue.id)
+        ]
+        taskflow_detail = None
+        if issue.taskflow_goal_id:
+            try:
+                taskflow_detail = self.taskflow_service.load_goal_detail(
+                    issue.taskflow_goal_id, peer_id=peer_id
+                )
+            except Exception:
+                taskflow_detail = None
+        return {
+            "issue": issue.to_dict(),
+            "assignments": assignments,
+            "mentions": mentions,
+            "taskflow": taskflow_detail,
+        }
+
+    def list_assignments(
+        self, issue_id: str, *, peer_id: str | None = None
+    ) -> list[AssignmentRecord]:
+        issue = self._get_issue_for_peer(issue_id, peer_id)
+        return self.store.list_assignments(issue.id)
+
+    def load_assignment_detail(
+        self, assignment_id: str, *, peer_id: str | None = None
+    ) -> dict[str, Any]:
+        assignment, issue = self._get_assignment_for_peer(assignment_id, peer_id)
+        payload: dict[str, Any] = {
+            "assignment": assignment.to_dict(),
+            "issue": issue.to_dict(),
+            "task_draft": None,
+            "dispatch_decisions": [],
+        }
+        if assignment.task_draft_id:
+            draft = self.taskflow_service.get_task_draft(
+                assignment.task_draft_id, peer_id=peer_id
+            )
+            payload["task_draft"] = draft.to_dict()
+            payload["dispatch_decisions"] = [
+                decision.to_dict()
+                for decision in self.taskflow_service.list_dispatch_decisions(
+                    draft.id, peer_id=peer_id
+                )
+            ]
+        return payload
+
+    def create_assignment(
+        self,
+        issue_id: str,
+        *,
+        peer_id: str | None = None,
+        target_agent_id: str | None = None,
+        title: str | None = None,
+        prompt: str | None = None,
+        required_capabilities: list[str] | None = None,
+        preferred_capabilities: list[str] | None = None,
+        task_type: str | None = None,
+        workspace_root: str | None = None,
+        repo_url: str | None = None,
+        execution_location: str | None = None,
+        reason: str = "",
+        source: str = "manual",
+        metadata: dict[str, Any] | None = None,
+        assignment_id: str | None = None,
+    ) -> AssignmentRecord:
+        issue = self._get_issue_for_peer(issue_id, peer_id)
+        if issue.status == IssueStatus.CANCELLED:
+            raise ValueError("cancelled issues cannot be assigned")
+        goal_id = self._ensure_backing_goal(issue, peer_id=peer_id)
+        assignment = AssignmentRecord(
+            id=assignment_id or _new_id("assignment"),
+            issue_id=issue.id,
+            target_agent_id=_optional(target_agent_id),
+            source=source,
+            reason=reason,
+            metadata=dict(metadata or {}),
+        )
+        draft_metadata = {
+            "issue_id": issue.id,
+            "assignment_id": assignment.id,
+            "assignment_source": source,
+            **dict(metadata or {}),
+        }
+        draft = self.taskflow_service.create_task_draft(
+            goal_id,
+            title=(title or issue.title),
+            prompt=(prompt or issue.description or issue.title),
+            required_capabilities=_string_list(required_capabilities),
+            preferred_capabilities=_string_list(preferred_capabilities),
+            task_type=_optional(task_type),
+            workspace_root=_optional(workspace_root),
+            repo_url=_optional(repo_url),
+            execution_location=_optional(execution_location),
+            manual_agent_id=assignment.target_agent_id,
+            status=TaskDraftStatus.CONFIRMED.value,
+            peer_id=peer_id,
+            metadata=draft_metadata,
+        )
+        assignment.task_draft_id = draft.id
+        created = self.store.create_assignment(assignment)
+        self.store.append_event(
+            "issue",
+            issue.id,
+            "assignment_created",
+            {"issue": issue.to_dict(), "assignment": created.to_dict()},
+        )
+        self.store.append_event(
+            "assignment",
+            created.id,
+            "assignment_created",
+            {"assignment": created.to_dict(), "task_draft": draft.to_dict()},
+        )
+        return created
+
+    def dispatch_assignment(
+        self, assignment_id: str, *, peer_id: str | None = None
+    ) -> AssignmentRecord:
+        assignment, issue = self._get_assignment_for_peer(assignment_id, peer_id)
+        if assignment.status == AssignmentStatus.CANCELLED:
+            raise ValueError("cancelled assignments cannot be dispatched")
+        if not assignment.task_draft_id:
+            raise ValueError("assignment has no task draft")
+        dispatch_source = "mention" if assignment.source == "mention" else "assignment"
+        decision = self.taskflow_service.dispatch_task_draft(
+            assignment.task_draft_id,
+            manual_agent_id=assignment.target_agent_id,
+            peer_id=peer_id,
+            source=dispatch_source,
+            metadata={"issue_id": issue.id, "assignment_id": assignment.id},
+        )
+        assignment.dispatch_decision_id = decision.id
+        assignment.runtime_task_id = decision.runtime_task_id
+        assignment.status = (
+            AssignmentStatus.DISPATCHED
+            if decision.runtime_task_id
+            else AssignmentStatus.NEEDS_ASSIGNMENT
+        )
+        saved = self.store.update_assignment(assignment)
+        event_type = (
+            "assignment_dispatched"
+            if saved.status == AssignmentStatus.DISPATCHED
+            else "assignment_needs_assignment"
+        )
+        payload = {
+            "issue": issue.to_dict(),
+            "assignment": saved.to_dict(),
+            "decision": decision.to_dict(),
+        }
+        self.store.append_event("issue", issue.id, event_type, payload)
+        self.store.append_event("assignment", saved.id, event_type, payload)
+        return saved
+
+    def cancel_assignment(
+        self,
+        assignment_id: str,
+        *,
+        peer_id: str | None = None,
+        reason: str = "user_cancelled",
+    ) -> AssignmentRecord:
+        assignment, issue = self._get_assignment_for_peer(assignment_id, peer_id)
+        assignment.status = AssignmentStatus.CANCELLED
+        assignment.metadata.setdefault("cancel_reason", reason)
+        saved = self.store.update_assignment(assignment)
+        payload = {"issue": issue.to_dict(), "assignment": saved.to_dict()}
+        self.store.append_event("issue", issue.id, "assignment_cancelled", payload)
+        self.store.append_event("assignment", saved.id, "assignment_cancelled", payload)
+        return saved
+
+    def reassign_assignment(
+        self,
+        assignment_id: str,
+        *,
+        agent_id: str,
+        peer_id: str | None = None,
+        reason: str = "manual_reassign",
+    ) -> AssignmentRecord:
+        assignment, issue = self._get_assignment_for_peer(assignment_id, peer_id)
+        if assignment.status == AssignmentStatus.DISPATCHED:
+            raise ValueError("dispatched assignments cannot be reassigned")
+        if assignment.status == AssignmentStatus.CANCELLED:
+            raise ValueError("cancelled assignments cannot be reassigned")
+        previous_agent_id = assignment.target_agent_id
+        assignment.target_agent_id = agent_id
+        assignment.status = AssignmentStatus.READY
+        assignment.reason = reason or assignment.reason
+        assignment.metadata.setdefault("reassigned_from_agent_id", previous_agent_id)
+        saved = self.store.update_assignment(assignment)
+        if saved.task_draft_id:
+            draft = self.taskflow_service.get_task_draft(
+                saved.task_draft_id, peer_id=peer_id
+            )
+            draft.manual_agent_id = agent_id
+            if draft.status == TaskDraftStatus.NEEDS_ASSIGNMENT:
+                draft.status = TaskDraftStatus.CONFIRMED
+            self.taskflow_service.store.update_task_draft(draft)
+        payload = {
+            "issue": issue.to_dict(),
+            "assignment": saved.to_dict(),
+            "previous_agent_id": previous_agent_id,
+        }
+        self.store.append_event("issue", issue.id, "assignment_reassigned", payload)
+        self.store.append_event("assignment", saved.id, "assignment_reassigned", payload)
+        return saved
+
+    def get_mention(
+        self, mention_id: str, *, peer_id: str | None = None
+    ) -> MentionRecord:
+        return self._assert_mention_access(self.store.get_mention(mention_id), peer_id)
+
+    def parse_mention(
+        self,
+        *,
+        raw_text: str,
+        agent_ref: str | None = None,
+        peer_id: str | None = None,
+    ) -> MentionRecord:
+        ref = _optional(agent_ref) or self._extract_mention_ref(raw_text)
+        mention = self._mention_from_resolution(
+            raw_text=raw_text,
+            ref=ref,
+            peer_id=peer_id,
+            mention_id=_new_id("mention-parse"),
+        )
+        return mention
+
+    def create_mention(
+        self,
+        *,
+        raw_text: str,
+        peer_id: str | None = None,
+        agent_ref: str | None = None,
+        issue_id: str | None = None,
+        title: str | None = None,
+        prompt: str | None = None,
+        context_type: str = "chat",
+        context_id: str | None = None,
+        source: str = "manual",
+        metadata: dict[str, Any] | None = None,
+    ) -> MentionRecord:
+        issue = self._get_issue_for_peer(issue_id, peer_id) if issue_id else None
+        ref = _optional(agent_ref) or self._extract_mention_ref(raw_text)
+        mention = self._mention_from_resolution(
+            raw_text=raw_text,
+            ref=ref,
+            peer_id=peer_id,
+            mention_id=_new_id("mention"),
+        )
+        mention.issue_id = issue.id if issue else None
+        mention.context_type = context_type or "chat"
+        mention.context_id = _optional(context_id)
+        mention.source = source
+        mention.metadata = dict(metadata or {})
+        if mention.resolved_agent_id and issue is not None:
+            assignment = self.create_assignment(
+                issue.id,
+                peer_id=peer_id,
+                target_agent_id=mention.resolved_agent_id,
+                title=title,
+                prompt=prompt or raw_text,
+                reason=f"mention:{mention.agent_ref}",
+                source="mention",
+                metadata={"mention_id": mention.id, **dict(metadata or {})},
+            )
+            mention.assignment_id = assignment.id
+            mention.status = MentionStatus.READY
+            mention.reason = "assignment_created"
+        elif mention.resolved_agent_id:
+            mention.status = MentionStatus.PARSED
+            mention.reason = "agent_resolved"
+        saved = self.store.create_mention(mention)
+        payload = {"mention": saved.to_dict()}
+        self.store.append_event("mention", saved.id, "mention_created", payload)
+        if issue is not None:
+            self.store.append_event("issue", issue.id, "mention_created", payload)
+        return saved
+
+    def list_events(
+        self,
+        scope: str,
+        scope_id: str,
+        *,
+        after_seq: int = 0,
+        timeout_sec: float = 0.0,
+        peer_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self._assert_scope_access(scope, scope_id, peer_id)
+        events = self.store.wait_events(
+            scope, scope_id, after_seq=after_seq, timeout_sec=timeout_sec
+        )
+        return [event.to_dict() for event in events]
+
+    def _ensure_backing_goal(
+        self, issue: IssueRecord, *, peer_id: str | None = None
+    ) -> str:
+        goal_id = issue.taskflow_goal_id
+        if goal_id:
+            goal = self.taskflow_service.get_goal(goal_id, peer_id=peer_id)
+            if goal.status == GoalStatus.CANCELLED:
+                raise ValueError("cancelled Taskflow goal cannot accept assignments")
+            if goal.status != GoalStatus.CONFIRMED:
+                self.taskflow_service.confirm_goal(
+                    goal_id, peer_id=peer_id, confirmed_by="issue_assignment"
+                )
+            return goal_id
+        goal = self.taskflow_service.create_goal(
+            title=issue.title,
+            prompt=issue.description,
+            peer_id=peer_id,
+            metadata={"source": "issue_assignment", "issue_id": issue.id},
+        )
+        self.taskflow_service.confirm_goal(
+            goal.id, peer_id=peer_id, confirmed_by="issue_assignment"
+        )
+        issue.taskflow_goal_id = goal.id
+        self.store.update_issue(issue)
+        return goal.id
+
+    def _mention_from_resolution(
+        self,
+        *,
+        raw_text: str,
+        ref: str | None,
+        peer_id: str | None,
+        mention_id: str,
+    ) -> MentionRecord:
+        if not ref:
+            return MentionRecord(
+                id=mention_id,
+                raw_text=raw_text,
+                peer_id=peer_id,
+                status=MentionStatus.NEEDS_ASSIGNMENT,
+                reason="agent_ref_missing",
+            )
+        candidates = self._resolve_agent_ref(ref)
+        if len(candidates) == 1:
+            return MentionRecord(
+                id=mention_id,
+                raw_text=raw_text,
+                peer_id=peer_id,
+                status=MentionStatus.PARSED,
+                agent_ref=ref,
+                resolved_agent_id=str(candidates[0]["agent_id"]),
+                candidates=candidates,
+                reason="agent_resolved",
+            )
+        reason = "alias_ambiguous" if len(candidates) > 1 else "agent_not_found"
+        return MentionRecord(
+            id=mention_id,
+            raw_text=raw_text,
+            peer_id=peer_id,
+            status=MentionStatus.NEEDS_ASSIGNMENT,
+            agent_ref=ref,
+            candidates=candidates,
+            reason=reason,
+        )
+
+    def _extract_mention_ref(self, raw_text: str) -> str | None:
+        match = _MENTION_RE.search(raw_text or "")
+        return match.group(1) if match else None
+
+    def _resolve_agent_ref(self, ref: str) -> list[dict[str, Any]]:
+        normalized = ref.strip().lstrip("@").lower()
+        runtime = getattr(self.taskflow_service, "runtime_control_plane", None)
+        snapshot = _dict(runtime.runtime_snapshot) if runtime is not None else {}
+        agents = _dict(snapshot.get("agents"))
+        candidates: list[dict[str, Any]] = []
+        for agent_id, raw_agent in agents.items():
+            raw = _dict(raw_agent)
+            aliases = {str(agent_id).lower()}
+            for key in ("alias", "name"):
+                if raw.get(key) is not None:
+                    aliases.add(str(raw[key]).lower())
+            for key in ("aliases", "mention_aliases"):
+                for alias in _string_list(raw.get(key)):
+                    aliases.add(alias.lower().lstrip("@"))
+            if normalized not in aliases:
+                continue
+            candidates.append(
+                {
+                    "agent_id": str(agent_id),
+                    "name": str(raw.get("name") or ""),
+                    "capabilities": _string_list(raw.get("capabilities")),
+                    "runtime_profile": str(raw.get("runtime_profile") or ""),
+                    "matched_ref": ref,
+                }
+            )
+        return sorted(candidates, key=lambda item: str(item["agent_id"]))
+
+    def _assert_scope_access(
+        self, scope: str, scope_id: str, peer_id: str | None = None
+    ) -> None:
+        if scope == "issue":
+            self._get_issue_for_peer(scope_id, peer_id)
+            return
+        if scope == "assignment":
+            self._get_assignment_for_peer(scope_id, peer_id)
+            return
+        if scope == "mention":
+            self.get_mention(scope_id, peer_id=peer_id)
+            return
+        raise ValueError(f"unsupported event scope: {scope}")

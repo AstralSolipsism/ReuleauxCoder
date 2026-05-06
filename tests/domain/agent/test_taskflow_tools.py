@@ -6,7 +6,7 @@ from reuleauxcoder.domain.agent.agent import Agent
 from reuleauxcoder.domain.config.models import ModeConfig
 from reuleauxcoder.domain.taskflow.models import GoalStatus
 from reuleauxcoder.extensions.tools.taskflow import TaskflowPlanningTool
-from ezcode_server.services.taskflow.service import TaskflowService
+from labrastro_server.services.taskflow.service import TaskflowService
 
 
 class _Tool:

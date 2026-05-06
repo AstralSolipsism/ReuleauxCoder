@@ -30,10 +30,10 @@ from reuleauxcoder.domain.session.models import Session, SessionRuntimeState
 from reuleauxcoder.domain.approval import ApprovalRequest
 from reuleauxcoder.domain.hooks.registry import HookRegistry
 from reuleauxcoder.domain.llm.models import LLMResponse, ToolCall
-from ezcode_server.adapters.reuleauxcoder.remote_backend import RemoteRelayToolBackend
-from ezcode_server.interfaces.http.remote.service import RemoteRelayHTTPService
-from ezcode_server.interfaces.http.remote.protocol import ToolPreviewResult
-from ezcode_server.relay.server import RelayServer
+from labrastro_server.adapters.reuleauxcoder.remote_backend import RemoteRelayToolBackend
+from labrastro_server.interfaces.http.remote.service import RemoteRelayHTTPService
+from labrastro_server.interfaces.http.remote.protocol import ToolPreviewResult
+from labrastro_server.relay.server import RelayServer
 from reuleauxcoder.infrastructure.yaml.loader import load_yaml_config, save_yaml_config
 from reuleauxcoder.infrastructure.persistence.session_store import SessionStore
 from reuleauxcoder.interfaces.entrypoint.runner import (

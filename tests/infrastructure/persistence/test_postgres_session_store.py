@@ -12,13 +12,13 @@ from reuleauxcoder.infrastructure.persistence.postgres_session_store import (
 
 
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("EZCODE_TEST_DATABASE_URL"),
-    reason="EZCODE_TEST_DATABASE_URL is not configured",
+    not os.environ.get("LABRASTRO_TEST_DATABASE_URL"),
+    reason="LABRASTRO_TEST_DATABASE_URL is not configured",
 )
 
 
 def _store() -> PostgresSessionStore:
-    database_url = os.environ["EZCODE_TEST_DATABASE_URL"]
+    database_url = os.environ["LABRASTRO_TEST_DATABASE_URL"]
     run_migrations(database_url)
     return PostgresSessionStore(create_postgres_engine(database_url))
 

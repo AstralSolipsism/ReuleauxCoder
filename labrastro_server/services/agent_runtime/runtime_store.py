@@ -1,0 +1,123 @@
+"""Storage protocol for Agent Runtime control-plane state."""
+
+from __future__ import annotations
+
+from typing import Any, Protocol
+
+from reuleauxcoder.domain.agent_runtime.models import TaskArtifact, TaskRecord, TaskSessionRef
+from labrastro_server.services.agent_runtime.executor_backend import ExecutorEvent, ExecutorRunResult
+
+
+class RuntimeStore(Protocol):
+    max_running_tasks: int
+    runtime_snapshot: dict[str, Any]
+
+    def configure(
+        self,
+        *,
+        max_running_tasks: int | None = None,
+        runtime_snapshot: dict[str, Any] | None = None,
+    ) -> None: ...
+
+    def submit_task(self, request: Any, *, task_id: str | None = None) -> TaskRecord: ...
+
+    def claim_task(
+        self,
+        *,
+        worker_id: str,
+        executors: list[Any] | None = None,
+        peer_id: str | None = None,
+        peer_capabilities: list[str] | None = None,
+        workspace_root: str | None = None,
+        lease_sec: int = 15,
+    ) -> Any | None: ...
+
+    def heartbeat_task(
+        self,
+        *,
+        request_id: str,
+        task_id: str,
+        worker_id: str,
+        peer_id: str | None = None,
+        lease_sec: int | None = None,
+    ) -> dict[str, Any]: ...
+
+    def validate_claim_owner(
+        self,
+        *,
+        request_id: str,
+        task_id: str,
+        worker_id: str,
+        peer_id: str | None = None,
+    ) -> tuple[bool, str]: ...
+
+    def recover_stale_tasks(self, *, now: float | None = None) -> list[str]: ...
+
+    def pin_session(self, task_id: str, session: TaskSessionRef) -> None: ...
+
+    def pin_claimed_session(
+        self,
+        *,
+        request_id: str,
+        task_id: str,
+        worker_id: str,
+        peer_id: str | None = None,
+        workdir: str | None = None,
+        branch: str | None = None,
+        executor_session_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]: ...
+
+    def append_executor_event(
+        self,
+        task_id: str,
+        event: ExecutorEvent,
+        *,
+        request_id: str | None = None,
+        worker_id: str | None = None,
+        peer_id: str | None = None,
+    ) -> tuple[bool, str]: ...
+
+    def complete_claimed_task(
+        self,
+        task_id: str,
+        result: ExecutorRunResult,
+        *,
+        request_id: str,
+        worker_id: str,
+        peer_id: str | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
+    ) -> tuple[bool, str, TaskRecord | None]: ...
+
+    def complete_task(
+        self,
+        task_id: str,
+        result: ExecutorRunResult,
+        *,
+        artifacts: list[dict[str, Any]] | None = None,
+    ) -> TaskRecord: ...
+
+    def retry_task(self, task_id: str, *, new_task_id: str | None = None) -> TaskRecord: ...
+
+    def fail_task(self, task_id: str, *, error: str) -> TaskRecord: ...
+
+    def cancel_task(self, task_id: str, *, reason: str = "user_cancelled") -> bool: ...
+
+    def attach_artifact(self, task_id: str, **kwargs: Any) -> TaskArtifact: ...
+
+    def create_or_update_pr(self, task_id: str, *, diff: str = "") -> TaskArtifact: ...
+
+    def list_events(self, task_id: str, *, after_seq: int = 0) -> list[Any]: ...
+
+    def list_artifacts(self, task_id: str) -> list[TaskArtifact]: ...
+
+    def get_task(self, task_id: str) -> TaskRecord: ...
+
+    def task_to_dict(self, task_id: str) -> dict[str, Any]: ...
+
+    def artifacts_to_dict(self, task_id: str) -> list[dict[str, Any]]: ...
+
+    def list_tasks(self, **filters: Any) -> list[dict[str, Any]]: ...
+
+    def load_task_detail(self, task_id: str, *, event_limit: int = 100) -> dict[str, Any]: ...
+

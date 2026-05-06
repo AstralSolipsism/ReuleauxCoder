@@ -275,7 +275,7 @@ func TestResolveAndPrepareRunUsesRuntimeSnapshotAndPromptFiles(t *testing.T) {
 					"model":               "gpt-5.2-codex",
 					"command":             "codex-beta",
 					"args":                []any{"--profile", "default"},
-					"env":                 map[string]any{"EZCODE_TEST": "1"},
+					"env":                 map[string]any{"LABRASTRO_TEST": "1"},
 					"runtime_home_policy": "per_task",
 					"approval_mode":       "autonomous",
 					"mcp":                 map[string]any{"servers": []any{"github"}},
@@ -297,7 +297,7 @@ func TestResolveAndPrepareRunUsesRuntimeSnapshotAndPromptFiles(t *testing.T) {
 	if resolved.Options.RuntimeHome == "" || !strings.Contains(resolved.Options.RuntimeHome, "codex-home") {
 		t.Fatalf("CODEX_HOME not planned: %#v", resolved.Options)
 	}
-	if resolved.Options.Env["EZCODE_TEST"] != "1" {
+	if resolved.Options.Env["LABRASTRO_TEST"] != "1" {
 		t.Fatalf("env not resolved: %#v", resolved.Options.Env)
 	}
 	if resolved.Options.Command != "codex-beta" {

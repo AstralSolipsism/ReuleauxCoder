@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import os
 
-from ezcode_server.services.admin.service import RemoteAdminConfigManager
+from labrastro_server.services.admin.service import RemoteAdminConfigManager
 from reuleauxcoder.services.config.loader import ConfigLoader
 
 
@@ -181,7 +181,7 @@ def test_parse_config_reads_persistence_settings() -> None:
             },
             "persistence": {
                 "backend": "postgres",
-                "database_url": "postgresql://user:pass@localhost/ezcode",
+                "database_url": "postgresql://user:pass@localhost/labrastro",
                 "auto_migrate": False,
                 "runtime_enabled": True,
                 "sessions_enabled": True,
@@ -192,14 +192,14 @@ def test_parse_config_reads_persistence_settings() -> None:
     )
 
     assert config.persistence.backend == "postgres"
-    assert config.persistence.database_url == "postgresql://user:pass@localhost/ezcode"
+    assert config.persistence.database_url == "postgresql://user:pass@localhost/labrastro"
     assert config.persistence.auto_migrate is False
     assert config.persistence.legacy_session_import == "disabled"
     assert config.persistence.retention_days == 30
 
 
 def test_missing_persistence_database_url_env_is_optional() -> None:
-    os.environ.pop("EZCODE_TEST_MISSING_DATABASE_URL", None)
+    os.environ.pop("LABRASTRO_TEST_MISSING_DATABASE_URL", None)
     loader = ConfigLoader()
     data = loader._expand_env_refs(
         {
@@ -209,7 +209,7 @@ def test_missing_persistence_database_url_env_is_optional() -> None:
             },
             "persistence": {
                 "backend": "auto",
-                "database_url": "${EZCODE_TEST_MISSING_DATABASE_URL}",
+                "database_url": "${LABRASTRO_TEST_MISSING_DATABASE_URL}",
             },
         }
     )

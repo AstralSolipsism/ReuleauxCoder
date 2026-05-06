@@ -13,7 +13,7 @@ from reuleauxcoder.app.runtime.session_state import (
     get_session_fingerprint,
 )
 from reuleauxcoder.infrastructure.fs.paths import ensure_user_dirs
-from ezcode_server.infrastructure.persistence.factory import (
+from labrastro_server.infrastructure.persistence.factory import (
     create_session_store as create_configured_session_store,
 )
 from reuleauxcoder.interfaces.cli.commands import handle_command

@@ -35,7 +35,7 @@ func TestPublishWorktreeCommitsPushesAndReportsBranchArtifact(t *testing.T) {
 	}
 	assertRemoteBranch(t, worktree.Path, worktree.BranchName)
 	author := strings.TrimSpace(runGitOutput(t, worktree.Path, "log", "-1", "--format=%an <%ae>"))
-	if author != "EZCode Agent <agent@ezcode.local>" {
+	if author != "Labrastro Agent <agent@labrastro.local>" {
 		t.Fatalf("commit author = %q", author)
 	}
 	if !hasPublishStatus(result.Events, "branch_pushed") || hasPublishStatus(result.Events, "pr_created") {
@@ -230,7 +230,7 @@ func installFakeGH(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "gh.log")
-	t.Setenv("EZCODE_FAKE_GH_LOG", logPath)
+	t.Setenv("LABRASTRO_FAKE_GH_LOG", logPath)
 	if os.PathSeparator == '\\' {
 		path := filepath.Join(dir, "gh.bat")
 		content := "@echo off\r\n" +
@@ -238,13 +238,13 @@ func installFakeGH(t *testing.T) string {
 			"if \"%1\"==\"pr\" if \"%2\"==\"create\" goto create\r\n" +
 			"exit /b 2\r\n" +
 			":view\r\n" +
-			"echo pr view>>\"%EZCODE_FAKE_GH_LOG%\"\r\n" +
-			"if not \"%EZCODE_FAKE_GH_EXISTING_URL%\"==\"\" echo %EZCODE_FAKE_GH_EXISTING_URL%& exit /b 0\r\n" +
+			"echo pr view>>\"%LABRASTRO_FAKE_GH_LOG%\"\r\n" +
+			"if not \"%LABRASTRO_FAKE_GH_EXISTING_URL%\"==\"\" echo %LABRASTRO_FAKE_GH_EXISTING_URL%& exit /b 0\r\n" +
 			"exit /b 1\r\n" +
 			":create\r\n" +
-			"echo pr create>>\"%EZCODE_FAKE_GH_LOG%\"\r\n" +
-			"if \"%EZCODE_FAKE_GH_FAIL_CREATE%\"==\"1\" goto fail_create\r\n" +
-			"if not \"%EZCODE_FAKE_GH_CREATE_URL%\"==\"\" echo %EZCODE_FAKE_GH_CREATE_URL%& exit /b 0\r\n" +
+			"echo pr create>>\"%LABRASTRO_FAKE_GH_LOG%\"\r\n" +
+			"if \"%LABRASTRO_FAKE_GH_FAIL_CREATE%\"==\"1\" goto fail_create\r\n" +
+			"if not \"%LABRASTRO_FAKE_GH_CREATE_URL%\"==\"\" echo %LABRASTRO_FAKE_GH_CREATE_URL%& exit /b 0\r\n" +
 			"echo https://example.test/pr/new\r\n" +
 			"exit /b 0\r\n" +
 			":fail_create\r\n" +
@@ -257,14 +257,14 @@ func installFakeGH(t *testing.T) string {
 		path := filepath.Join(dir, "gh")
 		content := "#!/bin/sh\n" +
 			"if [ \"$1\" = pr ] && [ \"$2\" = view ]; then\n" +
-			"  echo pr view >> \"$EZCODE_FAKE_GH_LOG\"\n" +
-			"  if [ -n \"$EZCODE_FAKE_GH_EXISTING_URL\" ]; then echo \"$EZCODE_FAKE_GH_EXISTING_URL\"; exit 0; fi\n" +
+			"  echo pr view >> \"$LABRASTRO_FAKE_GH_LOG\"\n" +
+			"  if [ -n \"$LABRASTRO_FAKE_GH_EXISTING_URL\" ]; then echo \"$LABRASTRO_FAKE_GH_EXISTING_URL\"; exit 0; fi\n" +
 			"  exit 1\n" +
 			"fi\n" +
 			"if [ \"$1\" = pr ] && [ \"$2\" = create ]; then\n" +
-			"  echo pr create >> \"$EZCODE_FAKE_GH_LOG\"\n" +
-			"  if [ \"$EZCODE_FAKE_GH_FAIL_CREATE\" = 1 ]; then echo gh create failed >&2; exit 1; fi\n" +
-			"  if [ -n \"$EZCODE_FAKE_GH_CREATE_URL\" ]; then echo \"$EZCODE_FAKE_GH_CREATE_URL\"; else echo https://example.test/pr/new; fi\n" +
+			"  echo pr create >> \"$LABRASTRO_FAKE_GH_LOG\"\n" +
+			"  if [ \"$LABRASTRO_FAKE_GH_FAIL_CREATE\" = 1 ]; then echo gh create failed >&2; exit 1; fi\n" +
+			"  if [ -n \"$LABRASTRO_FAKE_GH_CREATE_URL\" ]; then echo \"$LABRASTRO_FAKE_GH_CREATE_URL\"; else echo https://example.test/pr/new; fi\n" +
 			"  exit 0\n" +
 			"fi\n" +
 			"exit 2\n"

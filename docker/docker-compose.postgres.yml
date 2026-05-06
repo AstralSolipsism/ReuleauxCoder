@@ -3,23 +3,23 @@ services:
     image: postgres:16
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-ezcode}
-      POSTGRES_USER: ${POSTGRES_USER:-ezcode}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ezcode}
+      POSTGRES_DB: ${POSTGRES_DB:-labrastro}
+      POSTGRES_USER: ${POSTGRES_USER:-labrastro}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-labrastro}
     volumes:
-      - ezcode-postgres:/var/lib/postgresql/data
+      - labrastro-postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ezcode} -d ${POSTGRES_DB:-ezcode}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-labrastro} -d ${POSTGRES_DB:-labrastro}"]
       interval: 5s
       timeout: 5s
       retries: 20
 
-  rcoder-host:
+  labrastro-host:
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      EZCODE_DATABASE_URL: postgresql://${POSTGRES_USER:-ezcode}:${POSTGRES_PASSWORD:-ezcode}@postgres:5432/${POSTGRES_DB:-ezcode}
+      LABRASTRO_DATABASE_URL: postgresql://${POSTGRES_USER:-labrastro}:${POSTGRES_PASSWORD:-labrastro}@postgres:5432/${POSTGRES_DB:-labrastro}
 
 volumes:
-  ezcode-postgres:
+  labrastro-postgres:

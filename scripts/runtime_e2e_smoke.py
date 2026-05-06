@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end smoke orchestration for EZCode Agent Runtime persistence.
+"""End-to-end smoke orchestration for Labrastro Agent Runtime persistence.
 
 The script has two halves:
 - local `remote` mode packages the current source tree, uploads it over SSH,
@@ -148,7 +148,7 @@ def should_exclude(rel: str) -> bool:
 
 
 def create_source_archive(repo_root: Path, timestamp: str, out_dir: Path) -> Path:
-    archive_path = out_dir / f"ezcode-src-{timestamp}.tgz"
+    archive_path = out_dir / f"labrastro-src-{timestamp}.tgz"
     with tarfile.open(archive_path, "w:gz") as tar:
         for path in sorted(repo_root.rglob("*")):
             rel = path.relative_to(repo_root).as_posix()
@@ -265,7 +265,7 @@ class ServerRunner:
         if not self.pg_password:
             raise SystemExit("Postgres password is required")
         self.masker = Masker([self.pg_password])
-        self.db_name = args.database_name or f"ezcode_runtime_smoke_{self.timestamp.lower()}"
+        self.db_name = args.database_name or f"labrastro_runtime_smoke_{self.timestamp.lower()}"
         if not is_safe_identifier(self.db_name):
             raise SystemExit(f"Unsafe database name: {self.db_name}")
         if not is_safe_identifier(self.pg_user):
@@ -556,7 +556,7 @@ class ServerRunner:
             return service
         if self.host_container in services:
             return self.host_container
-        for candidate in ("ezcode-host", "rcoder-host", "reuleauxcoder-host"):
+        for candidate in ("labrastro-host", "rcoder-host", "reuleauxcoder-host"):
             if candidate in services:
                 return candidate
         if len(services) == 1:
@@ -593,8 +593,8 @@ class ServerRunner:
         image = self.docker_inspect(self.host_container).get("Image")
         if image:
             for tag in (
-                f"ezcode-host:runtime.backup-{self.timestamp}",
-                f"ezcode-host:test.backup-{self.timestamp}",
+                f"labrastro-host:runtime.backup-{self.timestamp}",
+                f"labrastro-host:test.backup-{self.timestamp}",
             ):
                 self.run_cmd(["docker", "tag", image, tag], check=False, timeout=60)
         self.record_step("backup", backup_dir=str(self.backup_dir))
@@ -725,14 +725,14 @@ class ServerRunner:
                     "docker",
                     "build",
                     "-t",
-                    "ezcode-host:test",
+                    "labrastro-host:test",
                     "-f",
                     str(base_dockerfile),
                     str(src),
                 ],
                 timeout=1800,
             )
-            self.record_step("build_base_image", image="ezcode-host:test")
+            self.record_step("build_base_image", image="labrastro-host:test")
         self.run_cmd(
             [
                 "docker",
@@ -921,7 +921,7 @@ class ServerRunner:
         self.run_cmd(["git", "init", "--bare", str(origin)], timeout=60)
         self.run_cmd(["git", "init", str(seed)], timeout=60)
         self.run_cmd(["git", "config", "user.email", "smoke@example.invalid"], cwd=seed)
-        self.run_cmd(["git", "config", "user.name", "EZCode Smoke"], cwd=seed)
+        self.run_cmd(["git", "config", "user.name", "Labrastro Smoke"], cwd=seed)
         (seed / "tracked.txt").write_text("initial\n", encoding="utf-8")
         self.run_cmd(["git", "add", "tracked.txt"], cwd=seed)
         self.run_cmd(["git", "commit", "-m", "initial"], cwd=seed, timeout=60)
@@ -930,7 +930,7 @@ class ServerRunner:
         self.run_cmd(["git", "push", "-u", "origin", "main"], cwd=seed, timeout=60)
         self.run_cmd(["git", "clone", str(origin), str(repo)], timeout=60)
         self.run_cmd(["git", "config", "user.email", "smoke@example.invalid"], cwd=repo)
-        self.run_cmd(["git", "config", "user.name", "EZCode Smoke"], cwd=repo)
+        self.run_cmd(["git", "config", "user.name", "Labrastro Smoke"], cwd=repo)
         self.record_step("create_git_fixture", repo=str(repo), origin=str(origin))
         return {
             "root": str(root),
@@ -955,7 +955,7 @@ class ServerRunner:
               if [ -f {q(self.smoke_dir / "gh_sleep")} ]; then
                 sleep "$(cat {q(self.smoke_dir / "gh_sleep")})"
               fi
-              echo "https://example.test/pr/ezcode-runtime-smoke"
+              echo "https://example.test/pr/labrastro-runtime-smoke"
               exit 0
             fi
             echo "unsupported fake gh command: $@" >&2
@@ -1870,7 +1870,7 @@ class ServerRunner:
         safe = json.loads(self.masker.mask(json.dumps(self.report, ensure_ascii=False)))
         report_json.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
         lines = [
-            "# EZCode Runtime E2E Smoke Report",
+            "# Labrastro Runtime E2E Smoke Report",
             "",
             f"- Timestamp: `{self.timestamp}`",
             f"- Host container: `{self.host_container}`",
@@ -1979,7 +1979,7 @@ def dry_run(args: argparse.Namespace) -> int:
         "ssh_password_env": args.ssh_password_env,
         "pg_password_env": args.pg_password_env,
         "steps": [
-            "package current ezcode source",
+            "package current labrastro source",
             "upload archive and script",
             "backup server files and container inspect",
             "create smoke Postgres database",
@@ -2002,7 +2002,7 @@ def remote(args: argparse.Namespace) -> int:
     timestamp = args.timestamp or utc_timestamp()
     masker = Masker([ssh_password, pg_password])
     repo_root = Path(__file__).resolve().parents[1]
-    with tempfile.TemporaryDirectory(prefix="ezcode-runtime-smoke-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="labrastro-runtime-smoke-") as tmp:
         tmp_path = Path(tmp)
         archive = create_source_archive(repo_root, timestamp, tmp_path)
         print_masked(masker, f"archive={archive} size={archive.stat().st_size}")
@@ -2010,7 +2010,7 @@ def remote(args: argparse.Namespace) -> int:
         try:
             incoming = f"{args.root.rstrip('/')}/incoming"
             ssh.run_checked(f"mkdir -p {q(incoming)}")
-            remote_archive = f"{incoming}/ezcode-src-{timestamp}.tgz"
+            remote_archive = f"{incoming}/labrastro-src-{timestamp}.tgz"
             remote_script = f"{incoming}/runtime_e2e_smoke-{timestamp}.py"
             ssh.put(archive, remote_archive)
             ssh.put(Path(__file__).resolve(), remote_script)
@@ -2067,12 +2067,12 @@ def build_parser() -> argparse.ArgumentParser:
     def add_common(p: argparse.ArgumentParser) -> None:
         p.add_argument("--server", default="192.168.50.149")
         p.add_argument("--ssh-user", default="root")
-        p.add_argument("--ssh-password-env", default="EZCODE_SSH_PASSWORD")
-        p.add_argument("--root", default="/data/ezcode")
-        p.add_argument("--host-container", default="ezcode-host")
+        p.add_argument("--ssh-password-env", default="LABRASTRO_SSH_PASSWORD")
+        p.add_argument("--root", default="/data/labrastro")
+        p.add_argument("--host-container", default="labrastro-host")
         p.add_argument("--pg-container", default="Postgresql")
         p.add_argument("--pg-user", default="user_rBrNr5")
-        p.add_argument("--pg-password-env", default="EZCODE_PG_PASSWORD")
+        p.add_argument("--pg-password-env", default="LABRASTRO_PG_PASSWORD")
         p.add_argument("--timestamp")
         p.add_argument("--retain-success", action="store_true")
 
@@ -2089,7 +2089,7 @@ def build_parser() -> argparse.ArgumentParser:
     server.add_argument("--host-container", required=True)
     server.add_argument("--pg-container", required=True)
     server.add_argument("--pg-user", required=True)
-    server.add_argument("--pg-password-env", default="EZCODE_PG_PASSWORD")
+    server.add_argument("--pg-password-env", default="LABRASTRO_PG_PASSWORD")
     server.add_argument("--source-archive", required=True)
     server.add_argument("--timestamp", required=True)
     server.add_argument("--database-name")

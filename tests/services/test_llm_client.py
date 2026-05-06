@@ -345,7 +345,7 @@ def test_llm_chat_applies_project_context_hook_to_provider_request(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / "AGENT.md").write_text(
-        "Use the EZCode project context marker: hook-injected-context.",
+        "Use the Labrastro project context marker: hook-injected-context.",
         encoding="utf-8",
     )
     captured = {}

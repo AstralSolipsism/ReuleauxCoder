@@ -203,7 +203,7 @@ func cloneEnv(env map[string]string) map[string]string {
 }
 
 func writeMCPConfigToTemp(raw []byte) (string, error) {
-	file, err := os.CreateTemp("", "ezcode-mcp-*.json")
+	file, err := os.CreateTemp("", "labrastro-mcp-*.json")
 	if err != nil {
 		return "", fmt.Errorf("create mcp config temp file: %w", err)
 	}

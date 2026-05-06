@@ -35,7 +35,7 @@ dependencies = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["reuleauxcoder", "ezcode_server"]
+packages = ["reuleauxcoder", "labrastro_server"]
 
 [dependency-groups]
 dev = [
@@ -49,6 +49,6 @@ dev = ["pytest>=7.0"]
 rcoder = "reuleauxcoder.interfaces.cli.main:main"
 
 [project.urls]
-Homepage = "https://github.com/RC-CHN/ReuleauxCoder"
-Repository = "https://github.com/RC-CHN/ReuleauxCoder"
-Issues = "https://github.com/RC-CHN/ReuleauxCoder/issues"
+Homepage = "https://github.com/AstralSolipsism/Labrastro"
+Repository = "https://github.com/AstralSolipsism/Labrastro"
+Issues = "https://github.com/AstralSolipsism/Labrastro/issues"

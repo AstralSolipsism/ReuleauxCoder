@@ -84,11 +84,11 @@ func (p *worktreePublisher) run() PublishResult {
 	}
 	authorName := metadataString(p.req.Metadata, "git_author_name")
 	if authorName == "" {
-		authorName = "EZCode Agent"
+		authorName = "Labrastro Agent"
 	}
 	authorEmail := metadataString(p.req.Metadata, "git_author_email")
 	if authorEmail == "" {
-		authorEmail = "agent@ezcode.local"
+		authorEmail = "agent@labrastro.local"
 	}
 	message := metadataString(p.req.Metadata, "commit_message")
 	if message == "" {

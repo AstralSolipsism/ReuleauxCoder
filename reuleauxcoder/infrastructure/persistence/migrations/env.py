@@ -1,4 +1,4 @@
-"""Alembic environment for EZCode Postgres persistence."""
+"""Alembic environment for Labrastro Postgres persistence."""
 
 from __future__ import annotations
 

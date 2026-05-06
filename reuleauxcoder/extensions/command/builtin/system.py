@@ -24,7 +24,7 @@ from reuleauxcoder.app.runtime.session_state import (
     restore_config_runtime_defaults,
 )
 from reuleauxcoder.domain.context.manager import estimate_tokens
-from ezcode_server.infrastructure.persistence.factory import (
+from labrastro_server.infrastructure.persistence.factory import (
     create_session_store as create_configured_session_store,
 )
 from reuleauxcoder.interfaces.cli.views.common import render_markdown_panel

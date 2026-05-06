@@ -31,10 +31,10 @@ from reuleauxcoder.domain.approval import (
 )
 from reuleauxcoder.domain.config.models import Config
 from reuleauxcoder.domain.session.models import Session, SessionMetadata, SessionRuntimeState
-from ezcode_server.adapters.reuleauxcoder.remote_backend import RemoteRelayToolBackend
-from ezcode_server.adapters.reuleauxcoder.mcp_tools import RemotePeerMCPTool
-from ezcode_server.interfaces.http.remote.protocol import ChatResponse, ToolPreviewResult
-from ezcode_server.relay.server import RelayServer
+from labrastro_server.adapters.reuleauxcoder.remote_backend import RemoteRelayToolBackend
+from labrastro_server.adapters.reuleauxcoder.mcp_tools import RemotePeerMCPTool
+from labrastro_server.interfaces.http.remote.protocol import ChatResponse, ToolPreviewResult
+from labrastro_server.relay.server import RelayServer
 from reuleauxcoder.extensions.skills.service import SkillsService
 from reuleauxcoder.extensions.tools.backend import ExecutionContext
 from reuleauxcoder.extensions.tools.taskflow import TaskflowPlanningTool
@@ -43,7 +43,7 @@ from reuleauxcoder.interfaces.cli.registration import CLI_PROFILE
 from reuleauxcoder.interfaces.cli.render import CLIRenderer
 from reuleauxcoder.interfaces.entrypoint.dependencies import AppDependencies
 from reuleauxcoder.interfaces.events import UIEventBus, UIEventKind
-from ezcode_server.services.taskflow.service import (
+from labrastro_server.services.taskflow.service import (
     TASKFLOW_SYSTEM_PROMPT,
     TASKFLOW_WORKFLOW_MODE,
 )

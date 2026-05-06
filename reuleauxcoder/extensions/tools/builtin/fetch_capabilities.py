@@ -340,7 +340,7 @@ def _fetch_http(url: str) -> _FetchResponse:
         req = urllib_request.Request(
             current_url,
             headers={
-                "User-Agent": "EZCode fetch_capabilities/1.0",
+                "User-Agent": "Labrastro fetch_capabilities/1.0",
                 "Accept": "text/html,text/markdown,text/plain,application/json,application/yaml,*/*;q=0.1",
             },
         )

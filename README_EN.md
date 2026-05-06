@@ -1,50 +1,61 @@
-# Dogcode / EZCode Backend
+# Labrastro Backend Foundation
 
 [中文](README.md)
 
-Backend platform for the Dogcode VS Code frontend.
+This repository is the backend foundation for the Labrastro ecosystem. It is derived from the [RC-CHN/ReuleauxCoder](https://github.com/RC-CHN/ReuleauxCoder) fork lineage, keeps the ReuleauxCoder kernel boundary intact, and adds Labrastro-specific remote relay, session persistence, provider management, MCP distribution, environment manifests, Agent Runtime, and task control plane.
 
-Frontend repository: <https://github.com/AstralSolipsism/dogcode>
+Repository: <https://github.com/AstralSolipsism/Labrastro>
 
-This repository started from the ReuleauxCoder terminal-native coding-agent direction, but the `ezcode` branch has diverged substantially. It is now the backend platform for Dogcode/EZCode: remote relay host, server-backed sessions, provider management, MCP distribution, environment manifests, Agent Runtime, task control plane, and Go-based execution workers.
+## Naming Boundary
 
-Public release wheels from upstream or sibling repositories are not the installation path for this branch because they do not include the Dogcode/EZCode remote-session, Webview, provider, environment-manifest, Agent Runtime, and control-plane integrations.
+The upstream ReuleauxCoder boundary is preserved:
 
-## What This Branch Adds
+- Python kernel package: `reuleauxcoder`
+- CLI: `rcoder`
+- Config directory: `.rcoder`
+- Local peer artifact: `rcoder-peer`
+- Go worker directory and module: `reuleauxcoder-agent`
+- Native Agent Runtime executor id: `reuleauxcoder`
+- HTTP headers: `X-RC-*`
 
-- Dogcode VS Code/Webview backend APIs for remote sessions and UI snapshots.
-- Remote Host/Peer relay with bootstrap tokens and interactive approval routing.
-- Server-authoritative provider/model configuration.
-- Server-managed MCP with `server`, `peer`, and `both` placement modes.
-- Environment manifests for peer-side CLI tools, MCP servers, and skills.
-- Agent Runtime configuration for agents, runtime profiles, execution locations, capabilities, credentials, prompts, MCP, and skills.
-- Task and artifact lifecycles where task completion, PR review, and PR merge are separate states.
-- Git worktree and PR-oriented delivery for remote code tasks.
-- Postgres-backed control-plane persistence.
-- Go worker/runtime components for CLI executors, subprocess management, repo cache, worktrees, and publishing.
+Labrastro-owned control-plane names use the new brand:
+
+- Python control-plane package: `labrastro_server`
+- Default Docker image/container: `labrastro-host`
+- Default database name, user, and volume: `labrastro`
+- Database environment variables: `LABRASTRO_DATABASE_URL`, `LABRASTRO_AUTO_MIGRATE`, `LABRASTRO_TEST_DATABASE_URL`
+
+## Capabilities
+
+- **Labrastro backend foundation** for remote sessions, model calls, task state, environment manifests, and tool execution entrypoints.
+- **Remote Host/Peer relay** where the host runs as `rcoder --server` and peers join through bootstrap tokens.
+- **Agent Runtime control plane** for runtime profiles, executors, models, MCP, skills, credentials, workspace policies, and approval boundaries.
+- **Task and artifact lifecycle** for task, artifact, branch, PR, review, and follow-up states.
+- **Server-side persistence** with file session storage plus Postgres migrations, runtime store, session store, and task state management.
+- **Go worker execution surface** through `reuleauxcoder-agent` for CLI subprocesses, worktrees, repo cache, publishing, and long-running tasks.
 
 ## Deployment
 
-Use Docker for a self-hosted Dogcode/EZCode server. Keep the source checkout and runtime state on persistent storage.
+Use Docker for a self-hosted Labrastro backend. Keep the source checkout and runtime state on persistent storage.
 
 Recommended host layout:
 
 ```text
-/data/ezcode/src              # git clone of this repository, branch ezcode
-/data/ezcode/config           # host config files, if compose volumes are customized
-/data/ezcode/sessions         # persisted session state
-/data/ezcode/mcp-artifacts    # server-hosted MCP artifacts
-/data/ezcode/tools/npm-global # persistent post-installed npm CLIs
-/data/ezcode/cache/npm        # persistent npm cache
-/data/ezcode/home             # container HOME when needed
+/data/labrastro/src              # git clone of this repository
+/data/labrastro/config           # host config files, if compose volumes are customized
+/data/labrastro/sessions         # persisted session state
+/data/labrastro/mcp-artifacts    # server-hosted MCP artifacts
+/data/labrastro/tools/npm-global # persistent post-installed npm CLIs
+/data/labrastro/cache/npm        # persistent npm cache
+/data/labrastro/home             # container HOME when needed
 ```
 
 Basic deployment:
 
 ```bash
-mkdir -p /data/ezcode
-git clone -b ezcode https://github.com/AstralSolipsism/ReuleauxCoder.git /data/ezcode/src
-cd /data/ezcode/src/docker
+mkdir -p /data/labrastro
+git clone https://github.com/AstralSolipsism/Labrastro.git /data/labrastro/src
+cd /data/labrastro/src/docker
 cp .env.example .env
 ```
 
@@ -62,8 +73,17 @@ Start the host:
 
 ```bash
 docker compose up -d --build
-docker compose logs -f rcoder-host
+docker compose logs -f labrastro-host
 ```
+
+For Postgres-backed control-plane state:
+
+```bash
+cd /data/labrastro/src/docker
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
+```
+
+The config template reads `LABRASTRO_DATABASE_URL` for database connectivity.
 
 ## Remote Bootstrap
 
@@ -75,6 +95,7 @@ remote_exec:
   host_mode: true
   relay_bind: 127.0.0.1:8765
   bootstrap_access_secret: <long-random-secret>
+  admin_access_secret: <long-random-secret>
   bootstrap_token_ttl_sec: 120
   peer_token_ttl_sec: 3600
 ```
@@ -104,22 +125,18 @@ iex (Invoke-WebRequest -UseBasicParsing -Headers @{ "X-RC-Bootstrap-Secret" = $e
 ## Development
 
 ```bash
-git clone -b ezcode https://github.com/AstralSolipsism/ReuleauxCoder.git
-cd ReuleauxCoder
+git clone https://github.com/AstralSolipsism/Labrastro.git
+cd Labrastro
 uv sync
 uv run rcoder --version
 uv run rcoder --server
 ```
 
-Run targeted Python tests:
+Run tests:
 
 ```powershell
-uv run pytest tests/domain/agent_runtime tests/ezcode_server tests/services/config/test_agent_runtime_config_loader.py tests/interfaces/entrypoint/test_runner_remote_exec.py tests/services/config/test_loader.py
-```
+uv run pytest -q
 
-Run Go agent tests:
-
-```powershell
 cd reuleauxcoder-agent
 go test ./...
 ```

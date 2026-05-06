@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from reuleauxcoder.extensions.tools.base import Tool
-from ezcode_server.services.collaboration.service import IssueAssignmentService
+from labrastro_server.services.collaboration.service import IssueAssignmentService
 
 
 class MentionAgentTool(Tool):
