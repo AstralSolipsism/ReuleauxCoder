@@ -724,7 +724,7 @@ def _mask_secret_hint(value: str) -> str:
 
 @dataclass
 class EnvironmentCLIToolConfig:
-    """Declarative CLI tool entry used by lightweight environment sync."""
+    """Declarative CLI tool entry consumed by environment-capable Agents."""
 
     name: str
     command: str = ""
@@ -819,7 +819,7 @@ class EnvironmentCLIToolConfig:
 
 @dataclass
 class EnvironmentSkillConfig:
-    """Declarative skill entry used by lightweight environment sync."""
+    """Declarative skill entry consumed by environment-capable Agents."""
 
     name: str
     enabled: bool = True

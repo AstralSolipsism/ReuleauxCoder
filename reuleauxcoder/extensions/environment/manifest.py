@@ -21,8 +21,8 @@ class EnvironmentManifestManager:
     """Record server-authoritative CLI environment entries.
 
     This manager intentionally does not scan, verify, install, or inspect the local
-    machine. It only updates the manifest that the lightweight env-sync agent will
-    later consume.
+    machine. It only updates the manifest that environment-capable Agent runtime
+    tasks consume.
     """
 
     def __init__(self, config_path: Path | None = None):

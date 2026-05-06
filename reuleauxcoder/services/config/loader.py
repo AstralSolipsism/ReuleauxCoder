@@ -655,6 +655,26 @@ class ConfigLoader:
             "agent_runtime": {
                 "max_running_agents": 4,
                 "max_shells_per_agent": 1,
+                "runtime_profiles": {
+                    "environment_local": {
+                        "executor": "reuleauxcoder",
+                        "execution_location": "local_workspace",
+                        "runtime_home_policy": "per_task",
+                        "approval_mode": "full",
+                    }
+                },
+                "agents": {
+                    "environment_configurator": {
+                        "name": "Environment Configurator",
+                        "description": "Checks and configures the local workspace environment from the server manifest.",
+                        "runtime_profile": "environment_local",
+                        "capabilities": [
+                            "environment.check",
+                            "environment.configure",
+                            "environment.manifest.read",
+                        ],
+                    }
+                },
             },
             "skills": {"enabled": True},
         }

@@ -580,6 +580,20 @@ def test_generate_example_config_creates_valid_yaml(tmp_path: Path) -> None:
     assert data["models"]["profiles"]["default"]["api_key"] == "your-api-key-here"
     assert "modes" in data
     assert data["modes"]["active"] == "coder"
+    runtime = data["agent_runtime"]
+    assert runtime["runtime_profiles"]["environment_local"]["executor"] == "reuleauxcoder"
+    assert (
+        runtime["runtime_profiles"]["environment_local"]["execution_location"]
+        == "local_workspace"
+    )
+    assert runtime["runtime_profiles"]["environment_local"]["runtime_home_policy"] == "per_task"
+    assert runtime["runtime_profiles"]["environment_local"]["approval_mode"] == "full"
+    assert "environment_configurator" in runtime["agents"]
+    assert runtime["agents"]["environment_configurator"]["capabilities"] == [
+        "environment.check",
+        "environment.configure",
+        "environment.manifest.read",
+    ]
 
 
 def test_load_does_not_copy_global_environment_manifest_into_workspace(
