@@ -970,7 +970,7 @@ class TestRemoteRelayHTTPService:
             service.stop()
             relay.stop()
 
-    def test_environment_manifest_endpoint_returns_cli_prompt(self) -> None:
+    def test_environment_manifest_endpoint_returns_structured_manifest(self) -> None:
         relay = RelayServer()
         relay.start()
         port = _free_port()
@@ -1108,18 +1108,75 @@ class TestRemoteRelayHTTPService:
             )
             assert skills["collaborating-with-claude"]["docs"][0]["title"] == "Claude skill"
             assert skills["collaborating-with-claude"]["verify_prompt"] == "Verify SKILL.md exists."
-            assert "do not scan PATH broadly" in manifest["prompt"]
-            assert "npm install -g gitnexus" in manifest["prompt"]
-            assert "Use the configured npm command." in manifest["prompt"]
-            assert "Verify SKILL.md exists." in manifest["prompt"]
-            assert "Do not install node automatically." in manifest["prompt"]
-            assert "mcp_servers" in manifest["prompt"]
-            assert "skills" in manifest["prompt"]
-            assert "CLI, MCP, and skill entry" in manifest["prompt"]
-            assert "command -v <command>" in manifest["prompt"]
-            assert "Get-Command <command>" in manifest["prompt"]
-            assert "active PATH" in manifest["prompt"]
-            assert "unless the user approves that exact change" in manifest["prompt"]
+            assert "prompt" not in manifest
+        finally:
+            service.stop()
+            relay.stop()
+
+    def test_environment_run_endpoint_submits_agent_runtime_task(self) -> None:
+        relay = RelayServer()
+        relay.start()
+        port = _free_port()
+        control = AgentRuntimeControlPlane(
+            runtime_snapshot={
+                "runtime_profiles": {
+                    "environment_local": {
+                        "executor": "fake",
+                        "execution_location": "local_workspace",
+                    }
+                },
+                "agents": {
+                    "environment_configurator": {
+                        "runtime_profile": "environment_local",
+                        "capabilities": [
+                            "environment.check",
+                            "environment.configure",
+                        ],
+                    }
+                },
+            }
+        )
+        service = RemoteRelayHTTPService(
+            relay_server=relay,
+            bind=f"127.0.0.1:{port}",
+            admin_access_secret="admin-secret",
+            runtime_control_plane=control,
+            environment_cli_tools={
+                "gitnexus": EnvironmentCLIToolConfig(
+                    name="gitnexus",
+                    command="gitnexus",
+                    check="gitnexus --version",
+                    install="npm install -g gitnexus",
+                )
+            },
+        )
+        service.start()
+        try:
+            status, body = _json_request(
+                "POST",
+                f"{service.base_url}/remote/admin/environment/run",
+                {
+                    "mode": "configure",
+                    "workspace_root": "/tmp/peer",
+                    "entry_ids": ["cli:gitnexus"],
+                },
+                headers={"X-RC-Admin-Secret": "admin-secret"},
+            )
+
+            assert status == 200
+            task = body["task"]
+            assert body["ok"] is True
+            assert body["agent_id"] == "environment_configurator"
+            assert task["trigger_mode"] == "environment_config"
+            assert task["metadata"]["workflow"] == "environment_config"
+            assert task["metadata"]["environment_mode"] == "configure"
+            assert {
+                "entry_id": "cli:gitnexus",
+                "kind": "cli",
+                "name": "gitnexus",
+                "phase": "install",
+                "command": "npm install -g gitnexus",
+            } in task["metadata"]["allowed_commands"]
         finally:
             service.stop()
             relay.stop()

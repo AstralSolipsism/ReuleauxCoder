@@ -1,0 +1,126 @@
+from __future__ import annotations
+
+import pytest
+
+from labrastro_server.interfaces.http.remote.protocol import (
+    EnvironmentCLIToolManifest,
+    EnvironmentManifestResponse,
+)
+from labrastro_server.services.agent_runtime.control_plane import (
+    AgentRuntimeControlPlane,
+)
+from labrastro_server.services.environment_run import (
+    EnvironmentRunError,
+    EnvironmentRunService,
+)
+
+
+def _control(*, agents: dict | None = None) -> AgentRuntimeControlPlane:
+    return AgentRuntimeControlPlane(
+        runtime_snapshot={
+            "runtime_profiles": {
+                "environment_local": {
+                    "executor": "reuleauxcoder",
+                    "execution_location": "local_workspace",
+                }
+            },
+            "agents": agents
+            or {
+                "environment_configurator": {
+                    "runtime_profile": "environment_local",
+                    "capabilities": [
+                        "environment.check",
+                        "environment.configure",
+                    ],
+                }
+            },
+        }
+    )
+
+
+def _manifest() -> EnvironmentManifestResponse:
+    return EnvironmentManifestResponse(
+        cli_tools=[
+            EnvironmentCLIToolManifest(
+                name="gitnexus",
+                command="gitnexus",
+                check="gitnexus --version",
+                install="npm install -g gitnexus",
+            )
+        ]
+    )
+
+
+def test_environment_run_auto_selects_capable_agent_and_sets_check_metadata() -> None:
+    control = _control()
+
+    result = EnvironmentRunService(control).submit(
+        mode="check",
+        manifest=_manifest(),
+        workspace_root="/repo",
+    )
+
+    task = control.get_task(result.task.id)
+    assert result.agent_id == "environment_configurator"
+    assert task.trigger_mode.value == "environment_config"
+    assert task.metadata["workflow"] == "environment_config"
+    assert task.metadata["environment_mode"] == "check"
+    assert task.metadata["entry_ids"] == ["cli:gitnexus"]
+    assert task.metadata["allowed_commands"] == [
+        {
+            "entry_id": "cli:gitnexus",
+            "kind": "cli",
+            "name": "gitnexus",
+            "phase": "check",
+            "command": "gitnexus --version",
+        }
+    ]
+    assert "Check mode" in task.prompt
+
+
+def test_environment_run_configure_includes_install_command() -> None:
+    control = _control()
+
+    result = EnvironmentRunService(control).submit(
+        mode="configure",
+        manifest=_manifest(),
+        workspace_root="/repo",
+        agent_id="environment_configurator",
+    )
+
+    task = control.get_task(result.task.id)
+    assert task.metadata["environment_mode"] == "configure"
+    assert {
+        "entry_id": "cli:gitnexus",
+        "kind": "cli",
+        "name": "gitnexus",
+        "phase": "install",
+        "command": "npm install -g gitnexus",
+    } in task.metadata["allowed_commands"]
+
+
+def test_environment_run_rejects_missing_agent_candidate() -> None:
+    control = _control(agents={"coder": {"capabilities": ["edit_code"]}})
+
+    with pytest.raises(EnvironmentRunError) as raised:
+        EnvironmentRunService(control).submit(
+            mode="check",
+            manifest=_manifest(),
+            workspace_root="/repo",
+        )
+
+    assert raised.value.error == "environment_agent_required"
+
+
+def test_environment_run_rejects_capability_mismatch_for_selected_agent() -> None:
+    control = _control(agents={"coder": {"capabilities": ["environment.check"]}})
+
+    with pytest.raises(EnvironmentRunError) as raised:
+        EnvironmentRunService(control).submit(
+            mode="configure",
+            manifest=_manifest(),
+            workspace_root="/repo",
+            agent_id="coder",
+        )
+
+    assert raised.value.error == "environment_agent_capability_mismatch"

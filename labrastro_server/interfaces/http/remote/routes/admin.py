@@ -56,6 +56,10 @@ from labrastro_server.services.agent_runtime.executor_backend import (
     ExecutorEvent,
     ExecutorRunResult,
 )
+from labrastro_server.services.environment_run import (
+    EnvironmentRunError,
+    EnvironmentRunService,
+)
 from reuleauxcoder.interfaces.events import UIEventKind
 
 class RemoteAdminRoutes:
@@ -110,6 +114,10 @@ class RemoteAdminRoutes:
                             execution_location=optional_payload_str(
                                 payload, "execution_location"
                             ),
+                            trigger_mode=optional_payload_str(
+                                payload, "trigger_mode"
+                            )
+                            or "issue_task",
                             runtime_profile_id=optional_payload_str(
                                 payload, "runtime_profile_id"
                             ),
@@ -135,6 +143,66 @@ class RemoteAdminRoutes:
                         "task": self.service.runtime_control_plane.task_to_dict(
                             task.id
                         ),
+                    },
+                )
+                return
+            if path == "/remote/admin/environment/run":
+                if self.service.runtime_control_plane is None:
+                    self._send_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "agent_runtime_unavailable"},
+                    )
+                    return
+                entry_ids = payload.get("entry_ids", [])
+                if isinstance(entry_ids, list):
+                    normalized_entry_ids = [
+                        str(entry_id)
+                        for entry_id in entry_ids
+                        if str(entry_id).strip()
+                    ]
+                else:
+                    normalized_entry_ids = []
+                workspace_root = str(payload.get("workspace_root") or "")
+                manifest = self.service._build_environment_manifest(
+                    "",
+                    "",
+                    workspace_root,
+                )
+                try:
+                    result = EnvironmentRunService(
+                        self.service.runtime_control_plane
+                    ).submit(
+                        mode=str(payload.get("mode") or "check"),
+                        manifest=manifest,
+                        workspace_root=workspace_root,
+                        entry_ids=normalized_entry_ids,
+                        agent_id=optional_payload_str(payload, "agent_id"),
+                    )
+                except EnvironmentRunError as exc:
+                    self._send_json(
+                        exc.status,
+                        {"error": exc.error, "message": exc.message},
+                    )
+                    return
+                except ValueError as exc:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {
+                            "error": "invalid_environment_task",
+                            "message": str(exc),
+                        },
+                    )
+                    return
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "task": self.service.runtime_control_plane.task_to_dict(
+                            result.task.id
+                        ),
+                        "agent_id": result.agent_id,
+                        "entry_ids": result.entry_ids,
+                        "manifest_hash": result.manifest_hash,
                     },
                 )
                 return

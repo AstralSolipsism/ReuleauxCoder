@@ -30,6 +30,7 @@ class TriggerMode(str, Enum):
 
     INTERACTIVE_CHAT = "interactive_chat"
     ISSUE_TASK = "issue_task"
+    ENVIRONMENT_CONFIG = "environment_config"
 
 
 class TaskStatus(str, Enum):
