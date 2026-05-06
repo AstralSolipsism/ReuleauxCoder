@@ -31,11 +31,10 @@ def test_tool_output_truncates_regular_read_file_output() -> None:
 
 
 def test_tool_output_bypasses_truncation_for_workspace_skills_markdown(
-    tmp_path: Path, monkeypatch
+    monkeypatch,
 ) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir(parents=True, exist_ok=True)
-    monkeypatch.chdir(workspace)
+    workspace = (Path.cwd() / "synthetic-workspace").resolve(strict=False)
+    monkeypatch.setattr(Path, "cwd", lambda: workspace)
 
     hook = ToolOutputTruncationHook(max_chars=20, max_lines=2, store_full_output=False)
     long_text = "line1\nline2\nline3\nline4"
@@ -48,11 +47,11 @@ def test_tool_output_bypasses_truncation_for_workspace_skills_markdown(
 
 
 def test_tool_output_bypasses_truncation_for_global_skills_markdown(
-    tmp_path: Path, monkeypatch
+    monkeypatch,
 ) -> None:
-    home = tmp_path / "home"
-    home.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("HOME", str(home))
+    home = (Path.cwd() / "synthetic-home").resolve(strict=False)
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: home)
 
     hook = ToolOutputTruncationHook(max_chars=20, max_lines=2, store_full_output=False)
     long_text = "line1\nline2\nline3\nline4"
@@ -65,11 +64,10 @@ def test_tool_output_bypasses_truncation_for_global_skills_markdown(
 
 
 def test_tool_output_does_not_bypass_non_markdown_under_skills(
-    tmp_path: Path, monkeypatch
+    monkeypatch,
 ) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir(parents=True, exist_ok=True)
-    monkeypatch.chdir(workspace)
+    workspace = (Path.cwd() / "synthetic-workspace").resolve(strict=False)
+    monkeypatch.setattr(Path, "cwd", lambda: workspace)
 
     hook = ToolOutputTruncationHook(max_chars=20, max_lines=2, store_full_output=False)
     long_text = "line1\nline2\nline3\nline4"

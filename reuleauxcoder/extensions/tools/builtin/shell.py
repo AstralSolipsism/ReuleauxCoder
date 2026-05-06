@@ -70,24 +70,25 @@ class ShellTool(Tool):
                 ShellType.POWERSHELL_CORE,
             ):
                 proc = self._run_powershell(command, cwd, timeout)
-            elif platform_info.is_windows and shell == ShellType.BASH:
-                shell_path = platform_info.get_shell_path()
-                proc = subprocess.run(
-                    [shell_path, "-c", command],
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    cwd=cwd,
-                )
             else:
-                proc = subprocess.run(
-                    command,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    cwd=cwd,
-                )
+                shell_cmd = platform_info.get_shell_executable()
+                if shell_cmd:
+                    proc = subprocess.run(
+                        shell_cmd + [command],
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        cwd=cwd,
+                    )
+                else:
+                    proc = subprocess.run(
+                        command,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        cwd=cwd,
+                    )
 
             if proc.returncode == 0:
                 self._update_cwd(command, cwd, platform_info.is_windows)
@@ -115,8 +116,13 @@ class ShellTool(Tool):
         """Run a command through PowerShell on Windows."""
         platform_info = get_platform_info()
         shell_cmd = platform_info.get_shell_executable()
+        shell = platform_info.get_preferred_shell()
 
-        normalized = command.replace("&&", ";")
+        normalized = (
+            command
+            if shell == ShellType.POWERSHELL_CORE
+            else command.replace("&&", ";")
+        )
 
         proc = subprocess.run(
             shell_cmd + [normalized],
@@ -131,9 +137,13 @@ class ShellTool(Tool):
         self, command: str, current_cwd: str, is_windows: bool = False
     ) -> None:
         if is_windows:
-            parts = re.split(r"[;]|\n", command)
+            shell = get_platform_info().get_preferred_shell()
+            if shell in (ShellType.BASH, ShellType.POWERSHELL_CORE):
+                parts = re.split(r"&&|\|\||[;]|\n", command)
+            else:
+                parts = re.split(r"[;]|\n", command)
         else:
-            parts = re.split(r"&&|;|\n", command)
+            parts = re.split(r"&&|\|\||[;]|\n", command)
 
         for part in parts:
             part = part.strip()

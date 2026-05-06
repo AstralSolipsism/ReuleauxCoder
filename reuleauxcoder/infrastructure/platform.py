@@ -72,9 +72,13 @@ class PlatformInfo:
                 self._shell_path = None
         else:
             # Unix-like systems
-            if shutil.which("bash"):
+            bash = shutil.which("bash")
+            if bash:
                 self._shell = ShellType.BASH
-                self._shell_path = shutil.which("bash")
+                self._shell_path = bash
+            elif sh := shutil.which("sh"):
+                self._shell = ShellType.BASH
+                self._shell_path = sh
             else:
                 self._shell = ShellType.UNKNOWN
                 self._shell_path = None
